@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import httpx
 from drain3 import TemplateMiner
 from drain3.file_persistence import FilePersistence
+from drain3.template_miner_config import TemplateMinerConfig
 
 from app.config import settings
 
@@ -26,7 +27,12 @@ class DrainAnalyzer:
         persistence = FilePersistence(
             os.path.join(settings.drain3_state_dir, "drain3_state.bin")
         )
-        self._miner = TemplateMiner(persistence, config_filename="drain3.ini")
+        config = TemplateMinerConfig()
+        for path in ["drain3.ini", os.path.join(os.path.dirname(__file__), "..", "drain3.ini")]:
+            if os.path.exists(path):
+                config.load(path)
+                break
+        self._miner = TemplateMiner(persistence, config=config)
         self._total_lines = 0
         self._total_anomalies = 0
         self._background_task: asyncio.Task | None = None
@@ -161,3 +167,84 @@ class DrainAnalyzer:
                 await self._background_task
             except asyncio.CancelledError:
                 pass
+
+    # --- S3 Snapshot Management ---
+
+    def save_snapshot_to_file(self) -> str:
+        """Serialize Drain3 state to a local file. Returns the file path."""
+        from datetime import datetime, timezone
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        snapshot_path = os.path.join(settings.drain3_state_dir, f"snapshot_{timestamp}.bin")
+        self._miner.save_state("snapshot")
+        state_file = os.path.join(settings.drain3_state_dir, "drain3_state.bin")
+        if os.path.exists(state_file):
+            import shutil
+            shutil.copy2(state_file, snapshot_path)
+        logger.info("Drain3 snapshot saved to %s", snapshot_path)
+        return snapshot_path
+
+    async def upload_snapshot_to_s3(self, bucket: str, prefix: str = "drain3/snapshots"):
+        """Upload current Drain3 state to S3 for backup and drift prevention."""
+        import boto3
+        from datetime import datetime, timezone
+
+        snapshot_path = self.save_snapshot_to_file()
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        s3_key = f"{prefix}/{timestamp}.bin"
+
+        try:
+            s3 = boto3.client("s3")
+            s3.upload_file(snapshot_path, bucket, s3_key)
+            logger.info("Drain3 snapshot uploaded to s3://%s/%s", bucket, s3_key)
+        except Exception as e:
+            logger.error("S3 snapshot upload failed (non-fatal): %s", e)
+
+    async def download_baseline_from_s3(self, bucket: str, prefix: str = "drain3/baselines"):
+        """Download the latest known-good baseline from S3 and reinitialize Drain3."""
+        import boto3
+
+        try:
+            s3 = boto3.client("s3")
+            response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix + "/")
+            objects = response.get("Contents", [])
+            if not objects:
+                logger.warning("No baselines found in s3://%s/%s", bucket, prefix)
+                return
+
+            latest = sorted(objects, key=lambda o: o["LastModified"], reverse=True)[0]
+            s3_key = latest["Key"]
+            local_path = os.path.join(settings.drain3_state_dir, "drain3_state.bin")
+
+            s3.download_file(bucket, s3_key, local_path)
+            logger.info("Drain3 baseline restored from s3://%s/%s", bucket, s3_key)
+
+            # Reinitialize miner with the downloaded state
+            from drain3.file_persistence import FilePersistence
+            persistence = FilePersistence(local_path)
+            config = TemplateMinerConfig()
+            for path in ["drain3.ini", os.path.join(os.path.dirname(__file__), "..", "drain3.ini")]:
+                if os.path.exists(path):
+                    config.load(path)
+                    break
+            self._miner = TemplateMiner(persistence, config=config)
+            self._total_lines = 0
+            self._total_anomalies = 0
+        except Exception as e:
+            logger.error("S3 baseline download failed (non-fatal): %s", e)
+
+    async def tag_known_good(self, bucket: str):
+        """Tag the current state as a known-good baseline in S3."""
+        import boto3
+        from datetime import datetime, timezone
+
+        snapshot_path = self.save_snapshot_to_file()
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        s3_key = f"drain3/baselines/known-good-{timestamp}.bin"
+
+        try:
+            s3 = boto3.client("s3")
+            s3.upload_file(snapshot_path, bucket, s3_key)
+            logger.info("Drain3 known-good baseline uploaded to s3://%s/%s", bucket, s3_key)
+        except Exception as e:
+            logger.error("S3 baseline tag failed (non-fatal): %s", e)

@@ -3,7 +3,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Query
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, Response
 
 from app.config import settings
 from app.context import ContextGatherer
@@ -123,6 +123,51 @@ async def decisions(
 @app.get("/drain3/stats")
 async def drain3_stats():
     return _drain.get_stats()
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    rows = await _store.get_decisions(limit=100)
+    table_rows = ""
+    for r in rows:
+        verdict_color = "#4caf50" if r.get("action_taken") == "suppressed" else "#f44336"
+        table_rows += f"""<tr>
+            <td>{r.get('timestamp','')[:19]}</td>
+            <td>{r.get('alert_name','')}</td>
+            <td>{r.get('alert_source','')}</td>
+            <td>{r.get('affected_service','')}</td>
+            <td>{r.get('severity','')}</td>
+            <td style="color:{verdict_color};font-weight:bold">{r.get('llm_verdict','—')}</td>
+            <td>{r.get('action_taken','')}</td>
+            <td>{r.get('investigation_duration_ms',0)}ms</td>
+        </tr>"""
+
+    return f"""<!DOCTYPE html>
+<html><head><title>RCA Decision History</title>
+<style>
+body {{ font-family: -apple-system, sans-serif; background: #0f1117; color: #e0e0e0; margin: 0; padding: 24px; }}
+h1 {{ color: #bb86fc; }}
+table {{ border-collapse: collapse; width: 100%; margin-top: 16px; }}
+th, td {{ padding: 8px 12px; text-align: left; border-bottom: 1px solid #2a2d37; font-size: 13px; }}
+th {{ background: #1a1d27; color: #aaa; font-weight: 600; position: sticky; top: 0; }}
+tr:hover {{ background: #1a1d27; }}
+.stats {{ display: flex; gap: 24px; margin: 16px 0; }}
+.stat {{ background: #1a1d27; padding: 16px 24px; border-radius: 8px; }}
+.stat-num {{ font-size: 28px; font-weight: bold; }}
+.stat-label {{ color: #888; font-size: 12px; margin-top: 4px; }}
+</style></head><body>
+<h1>RCA Decision History</h1>
+<div class="stats">
+  <div class="stat"><div class="stat-num">{len(rows)}</div><div class="stat-label">Total Decisions</div></div>
+  <div class="stat"><div class="stat-num" style="color:#f44336">{sum(1 for r in rows if r.get('action_taken')=='emailed')}</div><div class="stat-label">Escalated</div></div>
+  <div class="stat"><div class="stat-num" style="color:#4caf50">{sum(1 for r in rows if r.get('action_taken')=='suppressed')}</div><div class="stat-label">Dismissed</div></div>
+  <div class="stat"><div class="stat-num" style="color:#ff9800">{sum(1 for r in rows if r.get('action_taken')=='emailed_raw')}</div><div class="stat-label">Timeouts</div></div>
+</div>
+<table>
+<thead><tr><th>Time</th><th>Alert</th><th>Source</th><th>Service</th><th>Severity</th><th>Verdict</th><th>Action</th><th>Duration</th></tr></thead>
+<tbody>{table_rows if table_rows else '<tr><td colspan="8" style="text-align:center;color:#666">No decisions yet. Waiting for alerts...</td></tr>'}</tbody>
+</table>
+</body></html>"""
 
 
 @app.get("/metrics")

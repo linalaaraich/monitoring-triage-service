@@ -1,0 +1,94 @@
+# Local development docker-compose for testing the AI stack
+# Usage: docker compose -f docker-compose.dev.yml up --build
+#
+# This runs the triage service + all MCP servers locally.
+# Ollama must be running separately (or use the ollama service below).
+# MCP servers will fail health checks without real Prometheus/Loki/Jaeger
+# but the triage service itself will start and accept webhooks.
+
+services:
+  triage-service:
+    build: .
+    container_name: triage-service
+    ports:
+      - "8090:8090"
+    environment:
+      OLLAMA_URL: "http://ollama:11434"
+      OLLAMA_MODEL: "llama3.1:8b"
+      PROMETHEUS_MCP_URL: "http://prometheus-mcp:8091"
+      LOKI_MCP_URL: "http://loki-mcp:8092"
+      JAEGER_MCP_URL: "http://jaeger-mcp:8093"
+      DRAIN3_MCP_URL: "http://drain3-mcp:8094"
+      RCA_HISTORY_MCP_URL: "http://rca-history-mcp:8095"
+      LOKI_API_URL: "http://loki:3100"
+      RCA_DB_PATH: "/data/rca_history.db"
+      DRAIN3_STATE_DIR: "/data/drain3_state"
+      SMTP_HOST: ""
+      SMTP_USER: ""
+      SMTP_PASSWORD: ""
+      SMTP_FROM: ""
+      NOTIFICATION_EMAIL: ""
+      PIPELINE_TIMEOUT: "300"
+      DEDUP_WINDOW_SECONDS: "300"
+    volumes:
+      - triage_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  prometheus-mcp:
+    build:
+      context: ../monitoring-mcp-servers
+      dockerfile: prometheus_mcp/Dockerfile
+    container_name: prometheus-mcp
+    ports:
+      - "8091:8091"
+    environment:
+      PROMETHEUS_URL: "http://host.docker.internal:9090"
+
+  loki-mcp:
+    build:
+      context: ../monitoring-mcp-servers
+      dockerfile: loki_mcp/Dockerfile
+    container_name: loki-mcp
+    ports:
+      - "8092:8092"
+    environment:
+      LOKI_URL: "http://host.docker.internal:3100"
+
+  jaeger-mcp:
+    build:
+      context: ../monitoring-mcp-servers
+      dockerfile: jaeger_mcp/Dockerfile
+    container_name: jaeger-mcp
+    ports:
+      - "8093:8093"
+    environment:
+      JAEGER_URL: "http://host.docker.internal:16686"
+
+  drain3-mcp:
+    build:
+      context: ../monitoring-mcp-servers
+      dockerfile: drain3_mcp/Dockerfile
+    container_name: drain3-mcp
+    ports:
+      - "8094:8094"
+    environment:
+      TRIAGE_SERVICE_URL: "http://triage-service:8090"
+
+  rca-history-mcp:
+    build:
+      context: ../monitoring-mcp-servers
+      dockerfile: rca_history_mcp/Dockerfile
+    container_name: rca-history-mcp
+    ports:
+      - "8095:8095"
+    volumes:
+      - triage_data:/data:ro
+    environment:
+      RCA_DB_PATH: "/data/rca_history.db"
+
+volumes:
+  triage_data:
