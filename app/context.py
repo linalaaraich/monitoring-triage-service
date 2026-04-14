@@ -5,6 +5,7 @@ import time
 import httpx
 
 from app.config import settings
+from app.metrics import triage_mcp_duration_seconds, triage_mcp_requests_total
 from app.models import GatheredContext
 
 logger = logging.getLogger(__name__)
@@ -73,9 +74,9 @@ class ContextGatherer:
         return ctx
 
     async def _fetch_prometheus(self, service: str) -> tuple[dict, int]:
-        start = time.monotonic()
-        resp = await self._client.get(
-            f"{settings.prometheus_mcp_url}/tools/query_range",
+        return await self._mcp_call(
+            server="prometheus",
+            url=f"{settings.prometheus_mcp_url}/tools/query_range",
             params={
                 "promql": f'{{job=~".*{service}.*"}}',
                 "start": f"{settings.prometheus_range_minutes}m",
@@ -83,14 +84,11 @@ class ContextGatherer:
                 "step": "60s",
             },
         )
-        resp.raise_for_status()
-        ms = int((time.monotonic() - start) * 1000)
-        return resp.json(), ms
 
     async def _fetch_loki(self, service: str) -> tuple[list[str], int]:
-        start = time.monotonic()
-        resp = await self._client.get(
-            f"{settings.loki_mcp_url}/tools/query_logs",
+        data, ms = await self._mcp_call(
+            server="loki",
+            url=f"{settings.loki_mcp_url}/tools/query_logs",
             params={
                 "logql": f'{{service_name="{service}"}}',
                 "start": f"{settings.prometheus_range_minutes}m",
@@ -98,16 +96,13 @@ class ContextGatherer:
                 "limit": settings.loki_log_limit,
             },
         )
-        resp.raise_for_status()
-        data = resp.json()
         lines = data if isinstance(data, list) else data.get("lines", [])
-        ms = int((time.monotonic() - start) * 1000)
         return lines, ms
 
     async def _fetch_jaeger(self, service: str) -> tuple[list[dict], int]:
-        start = time.monotonic()
-        resp = await self._client.get(
-            f"{settings.jaeger_mcp_url}/tools/find_traces",
+        return await self._mcp_call(
+            server="jaeger",
+            url=f"{settings.jaeger_mcp_url}/tools/find_traces",
             params={
                 "service": service,
                 "start": f"{settings.prometheus_range_minutes}m",
@@ -115,6 +110,20 @@ class ContextGatherer:
                 "limit": settings.jaeger_trace_limit,
             },
         )
-        resp.raise_for_status()
-        ms = int((time.monotonic() - start) * 1000)
-        return resp.json(), ms
+
+    async def _mcp_call(self, server: str, url: str, params: dict) -> tuple:
+        """Execute an MCP server HTTP call with metrics instrumentation."""
+        start = time.monotonic()
+        try:
+            resp = await self._client.get(url, params=params)
+            resp.raise_for_status()
+            ms = int((time.monotonic() - start) * 1000)
+            elapsed = (time.monotonic() - start)
+            triage_mcp_requests_total.labels(server=server, status="success").inc()
+            triage_mcp_duration_seconds.labels(server=server).observe(elapsed)
+            return resp.json(), ms
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            triage_mcp_requests_total.labels(server=server, status="error").inc()
+            triage_mcp_duration_seconds.labels(server=server).observe(elapsed)
+            raise exc

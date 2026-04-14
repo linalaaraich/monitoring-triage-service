@@ -6,6 +6,11 @@ class Settings(BaseSettings):
     ollama_url: str = "http://ollama:11434"
     ollama_model: str = "llama3.1:8b"
     ollama_timeout: int = 300
+    ollama_request_timeout: int = 30
+
+    # Circuit breaker
+    circuit_breaker_failure_threshold: int = 5
+    circuit_breaker_cooldown_seconds: int = 60
 
     # MCP server URLs
     prometheus_mcp_url: str = "http://prometheus-mcp:8091"

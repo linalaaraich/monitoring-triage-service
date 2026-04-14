@@ -18,6 +18,7 @@ from app.metrics import (
     llm_duration,
     pipeline_duration,
     pipeline_timeouts,
+    triage_queue_depth,
 )
 from app.models import Decision, Drain3Webhook, GrafanaAlert, GrafanaWebhook, RCARecord
 from app.notifier import EmailNotifier
@@ -81,37 +82,42 @@ class TriagePipeline:
             logger.info("Alert %s deduplicated — skipping", alert.alertname)
             return
 
-        # Step 2: Pipeline with timeout fallback
+        # Track queue depth
+        triage_queue_depth.inc()
         try:
-            await asyncio.wait_for(
-                self._investigate_and_act(alert, source, pipeline_start),
-                timeout=settings.pipeline_timeout,
-            )
-        except asyncio.TimeoutError:
-            elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
-            pipeline_timeouts.inc()
-            logger.error(
-                "Pipeline timeout after %dms for alert %s — sending raw alert",
-                elapsed_ms,
-                alert.alertname,
-            )
+            # Step 2: Pipeline with timeout fallback
+            try:
+                await asyncio.wait_for(
+                    self._investigate_and_act(alert, source, pipeline_start),
+                    timeout=settings.pipeline_timeout,
+                )
+            except asyncio.TimeoutError:
+                elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
+                pipeline_timeouts.inc()
+                logger.error(
+                    "Pipeline timeout after %dms for alert %s — sending raw alert",
+                    elapsed_ms,
+                    alert.alertname,
+                )
 
-            # Send raw alert email as safety fallback
-            await self.notifier.send_timeout_alert(alert)
-            emails_sent.labels(type="timeout").inc()
+                # Send raw alert email as safety fallback
+                await self.notifier.send_timeout_alert(alert)
+                emails_sent.labels(type="timeout").inc()
 
-            # Record timeout in RCA history
-            record = RCARecord(
-                alert_source=source,
-                alert_name=alert.alertname,
-                alert_fingerprint=alert.fingerprint,
-                affected_service=alert.service,
-                severity=alert.severity,
-                triage_decision="timeout_passthrough",
-                action_taken="emailed_raw",
-                investigation_duration_ms=elapsed_ms,
-            )
-            await self.store.save_decision(record)
+                # Record timeout in RCA history
+                record = RCARecord(
+                    alert_source=source,
+                    alert_name=alert.alertname,
+                    alert_fingerprint=alert.fingerprint,
+                    affected_service=alert.service,
+                    severity=alert.severity,
+                    triage_decision="timeout_passthrough",
+                    action_taken="emailed_raw",
+                    investigation_duration_ms=elapsed_ms,
+                )
+                await self.store.save_decision(record)
+        finally:
+            triage_queue_depth.dec()
 
     async def _investigate_and_act(
         self, alert: GrafanaAlert, source: str, pipeline_start: float

@@ -62,6 +62,50 @@ drain3_lines_processed = Counter(
     "Total log lines processed by Drain3",
 )
 
+# --- AI-01: Ollama call metrics ---
+
+ollama_request_duration_seconds = Histogram(
+    "ollama_request_duration_seconds",
+    "Duration of individual Ollama HTTP requests",
+    buckets=[1, 5, 10, 30, 60, 120],
+)
+
+ollama_requests_total = Counter(
+    "ollama_requests_total",
+    "Total Ollama requests by outcome",
+    ["status"],
+)
+
+ollama_circuit_state = Gauge(
+    "ollama_circuit_state",
+    "Ollama circuit breaker state (0=closed, 1=open, 2=half_open)",
+)
+
+# --- AI-03: Enhanced self-observability metrics ---
+
+triage_queue_depth = Gauge(
+    "triage_queue_depth",
+    "Number of alerts currently being processed in the pipeline",
+)
+
+triage_mcp_requests_total = Counter(
+    "triage_mcp_requests_total",
+    "Total MCP server requests by server and status",
+    ["server", "status"],
+)
+
+triage_mcp_duration_seconds = Histogram(
+    "triage_mcp_duration_seconds",
+    "Latency of MCP server calls",
+    ["server"],
+)
+
+triage_fallback_total = Counter(
+    "triage_fallback_total",
+    "Total LLM fallback activations by reason",
+    ["reason"],
+)
+
 
 def get_metrics() -> bytes:
     return generate_latest()

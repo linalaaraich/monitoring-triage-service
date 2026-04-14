@@ -29,12 +29,14 @@ def test_llm_decision_escalate():
     decision = LLMDecision(
         decision=Decision.ESCALATE,
         severity="critical",
+        confidence=0.95,
         reason="High latency detected",
         rca="Database connection pool exhausted",
         suggested_actions=["Restart the service", "Scale DB connections"],
         evidence=["P95 latency at 2500ms", "DB pool at 100%"],
     )
     assert decision.decision == Decision.ESCALATE
+    assert decision.confidence == 0.95
     assert len(decision.suggested_actions) == 2
 
 
@@ -45,6 +47,18 @@ def test_llm_decision_dismiss():
         reason="Transient spike during deployment",
     )
     assert decision.decision == Decision.DISMISS
+    assert decision.confidence == 0.0  # default
+
+
+def test_llm_decision_inconclusive():
+    decision = LLMDecision(
+        decision=Decision.INCONCLUSIVE,
+        severity="warning",
+        confidence=0.3,
+        reason="Insufficient data to determine",
+    )
+    assert decision.decision == Decision.INCONCLUSIVE
+    assert decision.confidence == 0.3
 
 
 def test_llm_decision_invalid_decision():

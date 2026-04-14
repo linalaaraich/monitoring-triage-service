@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -64,11 +64,13 @@ class Drain3Webhook(BaseModel):
 class Decision(str, Enum):
     ESCALATE = "ESCALATE"
     DISMISS = "DISMISS"
+    INCONCLUSIVE = "INCONCLUSIVE"
 
 
 class LLMDecision(BaseModel):
     decision: Decision
     severity: str = "warning"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reason: str = ""
     rca: str = ""
     anomaly_summary: str = ""
