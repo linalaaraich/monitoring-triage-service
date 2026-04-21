@@ -5,6 +5,7 @@ from email.mime.text import MIMEText
 import aiosmtplib
 
 from app.config import settings
+from app.metrics import triage_email_sent_total
 from app.models import GrafanaAlert, LLMDecision, RCARecord
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ This raw alert is forwarded without AI analysis as a safety measure.</p>
     async def _send(self, subject: str, html_body: str):
         if not settings.smtp_user or not settings.smtp_password:
             logger.warning("SMTP credentials not configured — skipping email send")
+            triage_email_sent_total.labels(status="skipped").inc()
             return
 
         msg = MIMEMultipart("alternative")
@@ -105,5 +107,7 @@ This raw alert is forwarded without AI analysis as a safety measure.</p>
                 start_tls=True,
             )
             logger.info("Email sent: %s", subject)
+            triage_email_sent_total.labels(status="sent").inc()
         except Exception as e:
             logger.error("SMTP send failed (non-fatal): %s", e)
+            triage_email_sent_total.labels(status="failed").inc()

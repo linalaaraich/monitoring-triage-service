@@ -11,6 +11,7 @@ from app.metrics import (
     ollama_request_duration_seconds,
     ollama_requests_total,
     triage_fallback_total,
+    triage_llm_token_count,
 )
 from app.models import Decision, GatheredContext, GrafanaAlert, LLMDecision
 
@@ -279,6 +280,13 @@ Analyze this alert using the context above. Respond with ONLY valid JSON."""
             )
             resp.raise_for_status()
             data = resp.json()
+            # Ollama reports token counts on the chat response; record for self-observability (AI-03)
+            prompt_tokens = data.get("prompt_eval_count")
+            completion_tokens = data.get("eval_count")
+            if isinstance(prompt_tokens, int) and prompt_tokens >= 0:
+                triage_llm_token_count.labels(type="prompt").observe(prompt_tokens)
+            if isinstance(completion_tokens, int) and completion_tokens >= 0:
+                triage_llm_token_count.labels(type="completion").observe(completion_tokens)
             return data.get("message", {}).get("content", "")
         finally:
             elapsed = time.monotonic() - start

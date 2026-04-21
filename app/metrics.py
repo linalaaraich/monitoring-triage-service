@@ -47,6 +47,12 @@ emails_sent = Counter(
     ["type"],
 )
 
+triage_email_sent_total = Counter(
+    "triage_email_sent_total",
+    "Total email dispatch attempts by outcome",
+    ["status"],
+)
+
 drain3_clusters = Gauge(
     "drain3_clusters_total",
     "Total Drain3 log template clusters",
@@ -104,6 +110,13 @@ triage_fallback_total = Counter(
     "triage_fallback_total",
     "Total LLM fallback activations by reason",
     ["reason"],
+)
+
+triage_llm_token_count = Histogram(
+    "triage_llm_token_count",
+    "LLM token counts per request, broken down by prompt and completion",
+    ["type"],
+    buckets=[64, 256, 512, 1024, 2048, 4096, 8192, 16384],
 )
 
 
