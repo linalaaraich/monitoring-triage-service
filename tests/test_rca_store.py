@@ -72,3 +72,44 @@ async def test_alert_frequency_empty(store):
     freq = await store.get_alert_frequency("NonExistent", days=7)
     assert freq["count"] == 0
     assert freq["last_seen"] is None
+
+
+@pytest.mark.asyncio
+async def test_recent_decision_lookup_hits(store):
+    # Fresh decision from a minute ago should be returned
+    await store.save_decision(
+        RCARecord(
+            alert_name="PostSchemaFix_v2",
+            affected_service="spring-boot",
+            triage_decision="investigate",
+            llm_verdict="dismiss",
+            action_taken="suppressed",
+        )
+    )
+    recent = await store.get_recent_decision_for_alert(
+        alert_name="PostSchemaFix_v2",
+        affected_service="spring-boot",
+        lookback_minutes=15,
+    )
+    assert recent is not None
+    assert recent["llm_verdict"] == "dismiss"
+
+
+@pytest.mark.asyncio
+async def test_recent_decision_lookup_service_mismatch(store):
+    await store.save_decision(
+        RCARecord(
+            alert_name="PostSchemaFix_v2",
+            affected_service="spring-boot",
+            triage_decision="investigate",
+            llm_verdict="dismiss",
+            action_taken="suppressed",
+        )
+    )
+    # Different service -> no match
+    recent = await store.get_recent_decision_for_alert(
+        alert_name="PostSchemaFix_v2",
+        affected_service="kong",
+        lookback_minutes=15,
+    )
+    assert recent is None

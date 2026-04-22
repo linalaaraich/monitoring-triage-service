@@ -90,6 +90,26 @@ class RCAStore:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def get_recent_decision_for_alert(
+        self, alert_name: str, affected_service: str, lookback_minutes: int
+    ) -> dict | None:
+        """Most recent decision for (alert_name, service) within the lookback window.
+
+        Used by Layer 2 pre-LLM triage to skip the Ollama call when the same
+        alert was recently processed — if we just dismissed it, dismiss again;
+        if we just suppressed it, suppress again.
+        """
+        since = (datetime.utcnow() - timedelta(minutes=lookback_minutes)).isoformat()
+        cursor = await self._db.execute(
+            """SELECT triage_decision, llm_verdict, action_taken, rca_report, timestamp
+               FROM rca_history
+               WHERE alert_name = ? AND affected_service = ? AND timestamp > ?
+               ORDER BY timestamp DESC LIMIT 1""",
+            (alert_name, affected_service, since),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
     async def get_alert_frequency(self, alert_name: str, days: int = 7) -> dict:
         since = (datetime.utcnow() - timedelta(days=days)).isoformat()
         cursor = await self._db.execute(

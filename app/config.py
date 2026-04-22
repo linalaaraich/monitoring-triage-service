@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # Pipeline
     pipeline_timeout: int = 300
 
+    # Layer 2 pre-LLM triage (noise suppression without calling the LLM)
+    triage_suppression_enabled: bool = True
+    triage_history_lookback_minutes: int = 15
+
     # RCA history
     rca_db_path: str = "/var/lib/triage-service/rca_history.db"
 

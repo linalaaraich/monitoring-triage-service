@@ -11,6 +11,7 @@ from app.llm_client import LLMClient
 from app.metrics import (
     alerts_deduplicated,
     alerts_processed,
+    alerts_suppressed,
     drain3_anomalies,
     drain3_clusters,
     drain3_lines_processed,
@@ -82,6 +83,34 @@ class TriagePipeline:
             logger.info("Alert %s deduplicated — skipping", alert.alertname)
             return
 
+        # Step 1b (AI-04, Layer 2): Pre-LLM suppression.
+        # If the same (alert_name, service) was dismissed within the lookback
+        # window, dismiss again without paying the Ollama cost. Gates on
+        # settings.triage_suppression_enabled so it can be disabled at runtime.
+        suppression_reason = await self._check_suppression(alert)
+        if suppression_reason is not None:
+            elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
+            alerts_suppressed.labels(reason=suppression_reason).inc()
+            logger.info(
+                "Alert %s SUPPRESSED pre-LLM: %s (%dms)",
+                alert.alertname, suppression_reason, elapsed_ms,
+            )
+            record = RCARecord(
+                alert_source=source,
+                alert_name=alert.alertname,
+                alert_fingerprint=alert.fingerprint,
+                affected_service=alert.service,
+                severity=alert.severity,
+                triage_decision="triage_suppressed",
+                llm_verdict=None,
+                rca_report=f"Suppressed by Layer 2 triage: {suppression_reason}",
+                llm_reasoning=None,
+                action_taken="suppressed",
+                investigation_duration_ms=elapsed_ms,
+            )
+            await self.store.save_decision(record)
+            return
+
         # Track queue depth
         triage_queue_depth.inc()
         try:
@@ -118,6 +147,31 @@ class TriagePipeline:
                 await self.store.save_decision(record)
         finally:
             triage_queue_depth.dec()
+
+    async def _check_suppression(self, alert: GrafanaAlert) -> str | None:
+        """Return a non-None reason string if this alert should skip LLM.
+
+        Current rule: if we produced a DISMISS (or prior suppression) for the
+        same (alert_name, affected_service) within the lookback window, skip
+        the Ollama call and replay the suppression. Keeps demo-day CPU budget
+        from being spent on noise.
+        """
+        if not settings.triage_suppression_enabled:
+            return None
+        recent = await self.store.get_recent_decision_for_alert(
+            alert_name=alert.alertname,
+            affected_service=alert.service,
+            lookback_minutes=settings.triage_history_lookback_minutes,
+        )
+        if not recent:
+            return None
+        verdict = (recent.get("llm_verdict") or "").lower()
+        triage_decision = (recent.get("triage_decision") or "").lower()
+        if verdict == "dismiss":
+            return "recent_dismissed_history"
+        if triage_decision == "triage_suppressed":
+            return "recent_suppressed_history"
+        return None
 
     async def _investigate_and_act(
         self, alert: GrafanaAlert, source: str, pipeline_start: float
@@ -181,7 +235,7 @@ class TriagePipeline:
 
         # Step 8: Act on decision
         if decision.decision == Decision.ESCALATE:
-            await self.notifier.send_escalation(alert, decision, record, history["count"])
+            await self.notifier.send_escalation(alert, decision, record, history["count"], ctx=ctx)
             emails_sent.labels(type="escalation").inc()
             alerts_processed.labels(decision="escalate").inc()
         else:

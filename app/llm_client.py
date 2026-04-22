@@ -120,6 +120,7 @@ class LLMClient:
                 "content": (
                     "Your response was not valid JSON or did not match the required schema. "
                     f"Validation error: {parse_error}\n\n"
+                    "STRICT: valid JSON only, no markdown fences, no prose, no extra keys. "
                     "Respond ONLY with valid JSON matching the exact schema specified in the system prompt."
                 ),
             })

@@ -11,6 +11,12 @@ alerts_deduplicated = Counter(
     "Total alerts skipped by deduplication",
 )
 
+alerts_suppressed = Counter(
+    "triage_alerts_suppressed_total",
+    "Total alerts suppressed by Layer 2 pre-LLM triage (no Ollama call)",
+    ["reason"],
+)
+
 alerts_processed = Counter(
     "triage_alerts_processed_total",
     "Total alerts fully processed through pipeline",
