@@ -38,11 +38,19 @@ def _top_log_issues(ctx: GatheredContext | None, top_n: int = 3) -> list[tuple[s
 
 
 def _slowest_span_summary(ctx: GatheredContext | None) -> str:
+    # ctx.traces is typed list[dict] but pydantic doesn't validate assignment —
+    # the MCP server may return mixed shapes. Filter to dicts defensively.
     if ctx is None or not ctx.traces:
         return "N/A"
+    trace_dicts = [t for t in ctx.traces if isinstance(t, dict)]
+    if not trace_dicts:
+        return f"{len(ctx.traces)} traces (non-dict payload)"
     try:
-        slowest = max(ctx.traces, key=lambda t: int(t.get("duration") or t.get("duration_us") or 0))
-    except ValueError:
+        slowest = max(
+            trace_dicts,
+            key=lambda t: int(t.get("duration") or t.get("duration_us") or 0),
+        )
+    except (ValueError, TypeError):
         return "N/A"
     name = slowest.get("operationName") or slowest.get("span_name") or "unknown-span"
     duration_us = int(slowest.get("duration") or slowest.get("duration_us") or 0)
@@ -50,8 +58,12 @@ def _slowest_span_summary(ctx: GatheredContext | None) -> str:
 
 
 def _metrics_preview(ctx: GatheredContext | None) -> str:
+    # ctx.metrics is typed dict but pydantic doesn't validate assignment.
+    # Defend against the MCP returning a string or a list.
     if ctx is None or not ctx.metrics:
         return "N/A"
+    if not isinstance(ctx.metrics, dict):
+        return f"{type(ctx.metrics).__name__} payload ({len(ctx.metrics)} items)"
     query = ctx.metrics.get("query") or ctx.metrics.get("promql") or "metrics"
     values = ctx.metrics.get("values") or ctx.metrics.get("result") or []
     count = len(values) if isinstance(values, list) else "?"

@@ -233,16 +233,28 @@ class TriagePipeline:
             investigation_duration_ms=elapsed_ms,
         )
 
-        # Step 8: Act on decision
+        # Step 8: Act on decision. A notifier failure (SMTP hiccup, template
+        # rendering bug) must not block Step 9 — otherwise we'd lose the RCA
+        # record for an alert the LLM actually finished. Save-first would be
+        # cleaner but persisting before emailing breaks ordering guarantees
+        # elsewhere; wrap-and-log is the safer change.
         if decision.decision == Decision.ESCALATE:
-            await self.notifier.send_escalation(alert, decision, record, history["count"], ctx=ctx)
-            emails_sent.labels(type="escalation").inc()
-            alerts_processed.labels(decision="escalate").inc()
+            try:
+                await self.notifier.send_escalation(alert, decision, record, history["count"], ctx=ctx)
+                emails_sent.labels(type="escalation").inc()
+                alerts_processed.labels(decision="escalate").inc()
+            except Exception as notify_exc:
+                logger.error(
+                    "Escalation email failed for %s (%s) — decision still recorded",
+                    alert.alertname, notify_exc, exc_info=True,
+                )
+                emails_sent.labels(type="escalation_failed").inc()
+                alerts_processed.labels(decision="escalate").inc()
         else:
             alerts_processed.labels(decision="dismiss").inc()
             logger.info(
                 "Alert %s DISMISSED: %s", alert.alertname, decision.reason
             )
 
-        # Step 9: Save to RCA history
+        # Step 9: Save to RCA history (always — even on notifier failure)
         await self.store.save_decision(record)

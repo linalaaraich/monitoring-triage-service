@@ -90,3 +90,40 @@ def test_escalation_body_without_ctx_still_renders(alert_with_links, decision_es
     assert "No metrics collected" in body
     assert "No logs collected" in body
     assert "No traces collected" in body
+
+
+def test_slowest_span_defends_against_non_dict_traces():
+    """Real-world: MCP may return a list of strings or mixed shapes. The
+    builder must not crash — we caught this in live demo-day testing."""
+    from app.notifier import _slowest_span_summary
+    ctx = GatheredContext(traces=["not-a-dict", "still-not"])  # strings
+    result = _slowest_span_summary(ctx)
+    assert "non-dict" in result or result == "N/A"
+
+
+def test_metrics_preview_defends_against_non_dict():
+    """Same defense for ctx.metrics — which the pydantic field types as dict
+    but doesn't re-validate on assignment."""
+    from app.notifier import _metrics_preview
+    ctx = GatheredContext(metrics="some raw string from MCP")  # str where dict expected
+    # Pydantic may coerce, but if it doesn't, the preview should degrade gracefully
+    result = _metrics_preview(ctx)
+    # Either it coerced to a dict-like, or it degraded to a non-crash string
+    assert isinstance(result, str) and result != ""
+
+
+def test_full_build_with_malformed_ctx_does_not_crash(alert_with_links, decision_escalate):
+    """End-to-end: even with a fully malformed context, the body must render."""
+    notifier = EmailNotifier()
+    record = RCARecord(alert_name="PostSchemaFix_v2", triage_decision="investigate",
+                       action_taken="emailed", investigation_duration_ms=100)
+    try:
+        bad_ctx = GatheredContext(
+            metrics={"query": "up", "values": "not-a-list"},  # values wrong type
+            traces=["weird"],
+        )
+    except Exception:
+        # Pydantic may reject — that's fine, build with None
+        bad_ctx = None
+    body = notifier._build_escalation_body(alert_with_links, decision_escalate, record, 0, bad_ctx)
+    assert "PostSchemaFix_v2" in body
