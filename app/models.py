@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # --- Grafana Alerting webhook payload ---
@@ -76,6 +76,30 @@ class LLMDecision(BaseModel):
     anomaly_summary: str = ""
     suggested_actions: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)
+
+    # Small 3B-parameter models frequently return `evidence` as a list of
+    # dict objects (e.g. {"metric": "...", "value": 4.7}) instead of the
+    # list[str] we asked for. That's meaningful structured output; we should
+    # accept it, not reject it. Coerce dict items to their JSON string form
+    # so downstream rendering (email, RCA store) still works.
+    @field_validator("evidence", "suggested_actions", mode="before")
+    @classmethod
+    def _coerce_list_items_to_str(cls, v):
+        if isinstance(v, list):
+            out = []
+            for item in v:
+                if isinstance(item, str):
+                    out.append(item)
+                elif isinstance(item, dict):
+                    # Best-effort compact dict rendering
+                    parts = [f"{k}={item[k]}" for k in item]
+                    out.append(" ".join(parts))
+                elif item is None:
+                    continue
+                else:
+                    out.append(str(item))
+            return out
+        return v
 
 
 # --- Context gathering result ---
