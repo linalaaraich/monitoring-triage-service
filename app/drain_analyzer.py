@@ -106,19 +106,23 @@ class DrainAnalyzer:
 
     async def seed_from_loki(self):
         """Fetch recent logs from Loki and feed through Drain3 to build baseline."""
+        import time as _time
         logger.info("Seeding Drain3 from Loki...")
         try:
+            start_ns = int((_time.time() - 3600) * 1e9)  # 1h back in nanoseconds
+            end_ns = int(_time.time() * 1e9)
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.get(
                     f"{settings.loki_api_url}/loki/api/v1/query_range",
                     params={
                         "query": '{service_name=~".+"}',
                         "limit": 1000,
-                        "start": "1h",
+                        "start": str(start_ns),
+                        "end": str(end_ns),
                     },
                 )
                 if resp.status_code != 200:
-                    logger.warning("Loki seed query failed: %d", resp.status_code)
+                    logger.warning("Loki seed query failed: %d %s", resp.status_code, resp.text[:200])
                     return
 
                 data = resp.json()
@@ -127,7 +131,7 @@ class DrainAnalyzer:
                     for _ts, line in stream.get("values", []):
                         self._miner.add_log_message(line)
                         count += 1
-
+                self._total_lines += count
                 logger.info("Drain3 seeded with %d log lines from Loki", count)
         except Exception as e:
             logger.warning("Drain3 Loki seeding failed (non-fatal): %s", e)
@@ -137,16 +141,22 @@ class DrainAnalyzer:
         self._background_task = asyncio.create_task(self._ingest_loop())
 
     async def _ingest_loop(self):
+        import time as _time
         while True:
             try:
                 await asyncio.sleep(settings.drain3_poll_interval)
+                # Loki expects nanosecond epoch timestamps — duration strings
+                # like "30s" return 400 Bad Request.
+                start_ns = int((_time.time() - settings.drain3_poll_interval) * 1e9)
+                end_ns = int(_time.time() * 1e9)
                 async with httpx.AsyncClient(timeout=15) as client:
                     resp = await client.get(
                         f"{settings.loki_api_url}/loki/api/v1/query_range",
                         params={
                             "query": '{service_name=~".+"}',
                             "limit": 200,
-                            "start": f"{settings.drain3_poll_interval}s",
+                            "start": str(start_ns),
+                            "end": str(end_ns),
                         },
                     )
                     if resp.status_code == 200:
@@ -155,6 +165,8 @@ class DrainAnalyzer:
                             for _ts, line in stream.get("values", []):
                                 self._miner.add_log_message(line)
                                 self._total_lines += 1
+                    else:
+                        logger.debug("Drain3 Loki poll returned %d", resp.status_code)
             except asyncio.CancelledError:
                 break
             except Exception as e:
