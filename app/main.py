@@ -123,7 +123,11 @@ async def decisions(
 
 @app.get("/drain3/stats")
 async def drain3_stats():
-    return _drain.get_stats()
+    # get_stats holds a threading.Lock and iterates all drain3 clusters.
+    # Run it in a thread so we don't block the event loop behind any
+    # in-flight ingest batches (which also hold the same lock).
+    import asyncio as _asyncio
+    return await _asyncio.to_thread(_drain.get_stats)
 
 
 _DASHBOARD_CSS = """
@@ -368,20 +372,46 @@ _DASHBOARD_CSS = """
     font-size: 10.5px; font-weight: 600; letter-spacing: .4px;
     text-transform: uppercase; color: var(--muted);
   }
-  .drain-patterns .lbl {
+  .drain-patterns { margin-top: 4px; }
+  .drain-patterns summary {
+    cursor: pointer; user-select: none; list-style: none;
     font-size: 10.5px; font-weight: 700; letter-spacing: 1px;
     text-transform: uppercase; color: var(--muted);
-    margin-bottom: 6px;
+    padding: 4px 0; display: inline-flex; align-items: center; gap: 6px;
   }
+  .drain-patterns summary::-webkit-details-marker { display: none; }
+  .drain-patterns summary::before {
+    content: ""; display: inline-block; width: 0; height: 0;
+    border-left: 4px solid var(--muted);
+    border-top: 3px solid transparent; border-bottom: 3px solid transparent;
+    transition: transform .15s;
+  }
+  .drain-patterns[open] summary::before { transform: rotate(90deg); }
+  .drain-patterns summary:hover { color: var(--ink); }
   .drain-patterns ol {
-    padding-left: 22px;
+    padding-left: 22px; margin-top: 6px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 12px; color: var(--ink-soft);
   }
   .drain-patterns ol li { padding: 2px 0; word-break: break-word; }
   .drain-patterns .none {
-    color: var(--muted); font-style: italic; font-size: 12px;
+    color: var(--muted); font-style: italic; font-size: 12px; margin-top: 6px;
   }
+
+  /* Deep-link chips on decision row: tiny Grafana/Loki/Jaeger shortcuts */
+  .deep-chip {
+    display: inline-block; padding: 2px 8px; border-radius: 6px;
+    font-size: 10px; font-weight: 700; letter-spacing: .3px; text-transform: uppercase;
+    border: 1px solid var(--rule); color: var(--muted); text-decoration: none;
+    margin-left: 4px; transition: border-color .12s, color .12s;
+  }
+  .deep-chip:hover { border-color: var(--sage-strong); color: var(--sage-strong); }
+  .deep-chip.dc-grafana { color: var(--warn); border-color: rgba(161,100,43,.25); }
+  .deep-chip.dc-grafana:hover { background: var(--warn-soft); }
+  .deep-chip.dc-loki { color: var(--info); border-color: rgba(74,115,147,.25); }
+  .deep-chip.dc-loki:hover { background: var(--info-soft); }
+  .deep-chip.dc-jaeger { color: var(--sage-strong); border-color: rgba(62,125,77,.25); }
+  .deep-chip.dc-jaeger:hover { background: var(--sage-soft); }
 
   @media (max-width: 700px) {
     body { padding: 18px; }
@@ -475,6 +505,43 @@ def _quality_pill(quality: str | None) -> str:
     return f'<span class="quality {cls}">{label}</span>'
 
 
+def _deep_chips(service: str | None, alert_name: str | None) -> str:
+    """Render small Grafana / Loki / Jaeger shortcut chips for a decision row.
+
+    Keeps the row readable — just abbreviated labels that open a pre-filtered
+    view in the right tool. Skipped for node-level / non-traced services
+    where the chip would be a dead-end.
+    """
+    import urllib.parse as _urllib
+    svc = (service or "").strip()
+    if not svc or svc == "unknown":
+        return ""
+    chips = []
+    # Grafana Explore / Loki
+    logql_enc = _urllib.quote(f'{{service_name="{svc}"}}')
+    chips.append(
+        f'<a href="{settings.grafana_url}/explore?left=%7B%22datasource%22:%22loki%22,'
+        f'%22queries%22:%5B%7B%22expr%22:%22{logql_enc}%22%7D%5D%7D" class="deep-chip dc-loki" '
+        f'title="View {_html.escape(svc)} logs in Grafana (Loki)" '
+        f'target="_blank" rel="noopener" onclick="event.stopPropagation()">Loki</a>'
+    )
+    # Jaeger — only for traced services
+    if svc in ("spring-boot", "kong", "otel-collector"):
+        chips.append(
+            f'<a href="{settings.jaeger_url}/search?service={_urllib.quote(svc)}" '
+            f'class="deep-chip dc-jaeger" target="_blank" rel="noopener" '
+            f'title="View {_html.escape(svc)} traces in Jaeger" '
+            f'onclick="event.stopPropagation()">Jaeger</a>'
+        )
+    # Grafana alert rule list (filtered by alertname isn't easily linkable; open rules list)
+    chips.append(
+        f'<a href="{settings.grafana_url}/alerting/list" class="deep-chip dc-grafana" '
+        f'target="_blank" rel="noopener" title="Open Grafana alerting" '
+        f'onclick="event.stopPropagation()">Grafana</a>'
+    )
+    return "".join(chips)
+
+
 def _verdict_pill(verdict: str | None, action: str | None) -> str:
     v = (verdict or '').lower()
     if v == 'escalate':
@@ -527,10 +594,10 @@ def _render_drain3_panel(stats: dict) -> str:
         f'    <div class="drain-tile"><div class="num">{lines:,}</div><div class="lbl">Lines processed</div></div>'
         f'    <div class="drain-tile"><div class="num">{anomalies:,}</div><div class="lbl">Anomalies flagged</div></div>'
         '  </div>'
-        '  <div class="drain-patterns">'
-        '    <div class="lbl">Most recent templates</div>'
+        '  <details class="drain-patterns">'
+        '    <summary>Show most recent templates</summary>'
         f'    {pattern_html}'
-        '  </div>'
+        '  </details>'
         '</div>'
     )
 
@@ -609,7 +676,7 @@ async def dashboard():
             f'  <td class="mono">{ts}</td>'
             f'  <td>{_html.escape(alert_name)}</td>'
             f'  <td>{_source_tag(r.get("alert_source") or "")}</td>'
-            f'  <td>{_html.escape(service)}</td>'
+            f'  <td>{_html.escape(service)}{_deep_chips(service, alert_name)}</td>'
             f'  <td><span class="sev sev-{_html.escape(severity)}">{_html.escape(severity or "—")}</span></td>'
             f'  <td>{_verdict_pill(verdict, action)}{_quality_pill(r.get("rca_quality"))}</td>'
             f'  <td class="action action-{_html.escape(action)}">{_html.escape(action)}</td>'

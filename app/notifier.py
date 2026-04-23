@@ -38,8 +38,6 @@ def _top_log_issues(ctx: GatheredContext | None, top_n: int = 3) -> list[tuple[s
 
 
 def _slowest_span_summary(ctx: GatheredContext | None) -> str:
-    # ctx.traces is typed list[dict] but pydantic doesn't validate assignment —
-    # the MCP server may return mixed shapes. Filter to dicts defensively.
     if ctx is None or not ctx.traces:
         return "N/A"
     trace_dicts = [t for t in ctx.traces if isinstance(t, dict)]
@@ -55,6 +53,139 @@ def _slowest_span_summary(ctx: GatheredContext | None) -> str:
     name = slowest.get("operationName") or slowest.get("span_name") or "unknown-span"
     duration_us = int(slowest.get("duration") or slowest.get("duration_us") or 0)
     return f"{name} ({duration_us / 1000.0:.2f} ms)"
+
+
+def _top_traces_rows(ctx: GatheredContext | None, top_n: int = 8) -> str:
+    """Render the top-N slowest traces as table rows for the email. Each row
+    is a clickable link into the Jaeger UI (the trace's own permalink).
+    """
+    if ctx is None or not ctx.traces:
+        return '<tr><td class="v" colspan="3"><i>No traces collected</i></td></tr>'
+    trace_dicts = [t for t in ctx.traces if isinstance(t, dict)]
+    if not trace_dicts:
+        return f'<tr><td class="v" colspan="3"><i>{len(ctx.traces)} traces (non-dict payload)</i></td></tr>'
+
+    def _dur(t):
+        return int(t.get("duration") or t.get("duration_us") or 0)
+
+    slowest = sorted(trace_dicts, key=_dur, reverse=True)[:top_n]
+    rows = []
+    for t in slowest:
+        name = t.get("operationName") or t.get("span_name") or "unknown-span"
+        tid = t.get("traceID") or t.get("trace_id") or ""
+        dur_ms = _dur(t) / 1000.0
+        svc = t.get("serviceName") or t.get("process", {}).get("serviceName") or "—"
+        if tid:
+            link = f'{settings.jaeger_url}/trace/{tid}'
+            name_cell = f'<a href="{link}">{name}</a>'
+        else:
+            name_cell = name
+        rows.append(
+            f'<tr><td class="v">{name_cell}</td>'
+            f'<td class="v mono-inline">{svc}</td>'
+            f'<td class="v mono-inline" style="text-align:right">{dur_ms:.1f} ms</td></tr>'
+        )
+    return "\n".join(rows)
+
+
+def _observed_value_block(alert: GrafanaAlert) -> str:
+    """Render the alert's observed metric value + PromQL as the lede card —
+    this is the single most useful piece of data in the whole email and we
+    want the on-call to see it without scrolling.
+    """
+    values = alert.values or {}
+    expr = alert.annotations.get("expr", "")
+    if not values and not expr:
+        return ""
+
+    items = sorted(values.items()) if values else []
+    value_display = ""
+    if items:
+        primary_ref, primary_val = items[-1]
+        value_display = f"<strong>{primary_val}</strong> <span class=\"mute\">(refId={primary_ref})</span>"
+        if len(items) > 1:
+            rest = ", ".join(f"{k}={v}" for k, v in items[:-1])
+            value_display += f' <span class="mute">[{rest}]</span>'
+    else:
+        value_display = '<span class="mute">(not in webhook payload)</span>'
+
+    return (
+        '<div class="card span2" style="border-left: 4px solid var(--info);">'
+        '<h2>Observed at fire time</h2>'
+        '<table class="kvs">'
+        f'<tr><td class="k">Observed value</td><td class="v" style="font-size:18px">{value_display}</td></tr>'
+        f'<tr><td class="k">PromQL</td><td class="v mono-inline">{expr or "(not provided by rule)"}</td></tr>'
+        '</table>'
+        '</div>'
+    )
+
+
+def _correlated_alerts_block(correlated: list[dict]) -> str:
+    """Render a compact list of other alerts that fired within the same
+    correlation window, so the on-call can see cascade patterns at a glance.
+    """
+    if not correlated:
+        return ""
+    rows = []
+    for c in correlated[:10]:
+        rows.append(
+            f'<tr><td class="v mono-inline">{c.get("timestamp","")[:19]}</td>'
+            f'<td class="v">{c.get("alert_name","?")}</td>'
+            f'<td class="v">{c.get("affected_service","?")}</td>'
+            f'<td class="v">{c.get("llm_verdict") or "—"}</td></tr>'
+        )
+    return (
+        '<div class="card span2">'
+        f'<h2>Correlated alerts <span class="mute">(within ±5 min)</span></h2>'
+        '<table class="kvs"><thead><tr>'
+        '<th class="k">When</th><th class="k">Alert</th><th class="k">Service</th><th class="k">Verdict</th>'
+        '</tr></thead><tbody>'
+        + "\n".join(rows) + '</tbody></table></div>'
+    )
+
+
+def _deep_links(alert: GrafanaAlert) -> dict[str, str]:
+    """Build deep-links into the three pillar UIs so the recipient can
+    verify/investigate without hand-editing URLs. Keyed on labels we know
+    are present after the 2026-04-23 rule enrichment.
+    """
+    links: dict[str, str] = {}
+    service = alert.service or ""
+
+    # Grafana — generatorURL from webhook is authoritative when populated
+    if alert.generatorURL:
+        links["Open alert in Grafana"] = alert.generatorURL
+
+    # Loki — service-scoped log query
+    if service and service != "unknown":
+        logql = f'{{service_name="{service}"}}'
+        import urllib.parse
+        encoded = urllib.parse.quote(logql)
+        # Grafana Explore URL — opens Loki panel pre-filtered to the service.
+        links["View logs in Grafana (Loki)"] = (
+            f'{settings.grafana_url}/explore?left=%7B%22datasource%22:%22loki%22,'
+            f'%22queries%22:%5B%7B%22expr%22:%22{encoded}%22%7D%5D%7D'
+        )
+
+    # Jaeger — service-scoped trace view (only for traced services)
+    if service in ("spring-boot", "kong", "otel-collector"):
+        import urllib.parse
+        encoded = urllib.parse.quote(service)
+        links["View traces in Jaeger"] = f'{settings.jaeger_url}/search?service={encoded}'
+
+    # Pre-existing alert annotations (runbook etc)
+    for key, label in [
+        ("runbook_url", "Runbook"),
+        ("dashboard_url", "Dashboard"),
+        ("DashboardURL", "Dashboard"),
+        ("Silence", "Create Silence"),
+        ("silence", "Create Silence"),
+    ]:
+        url = alert.annotations.get(key) or alert.labels.get(key)
+        if url and label not in links:
+            links[label] = url
+
+    return links
 
 
 def _metrics_preview(ctx: GatheredContext | None) -> str:
@@ -134,6 +265,9 @@ _EMAIL_CSS = """
     font-size: 12px; white-space: pre-wrap; word-break: break-word;
     background: rgba(11,27,58,.03); border: 1px dashed rgba(11,27,58,.18);
     padding: 10px; border-radius: 10px; margin: 8px 0 0; }
+  .mono-inline { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px; color: var(--text); }
+  .mute { color: var(--muted); font-weight: 400; }
   ul { margin: 8px 0 0; padding-left: 18px; }
   .footer { text-align: center; margin-top: 18px; color: var(--muted); font-size: 12px; }
   @media (min-width: 900px) {
@@ -151,10 +285,13 @@ class EmailNotifier:
         record: RCARecord,
         history_count: int = 0,
         ctx: GatheredContext | None = None,
+        correlated: list[dict] | None = None,
     ):
         severity = (decision.severity or alert.severity or "warning").upper()
         subject = f"[ALERT] {severity}: {alert.alertname} — {alert.service}"
-        body = self._build_escalation_body(alert, decision, record, history_count, ctx)
+        body = self._build_escalation_body(
+            alert, decision, record, history_count, ctx, correlated or []
+        )
         await self._send(subject, body)
 
     async def send_timeout_alert(self, alert: GrafanaAlert):
@@ -169,19 +306,23 @@ class EmailNotifier:
         record: RCARecord,
         history_count: int,
         ctx: GatheredContext | None,
+        correlated: list[dict],
     ) -> str:
         env = alert.labels.get("deployment_environment") or alert.labels.get("env") or "N/A"
+        component = alert.labels.get("component") or "—"
+        signal = alert.labels.get("signal") or "—"
         severity_upper = (decision.severity or alert.severity or "warning").upper()
         pill_class = _severity_pill_class(decision.severity or alert.severity)
 
-        quick_links = _quick_links(alert)
+        deep = _deep_links(alert)
         links_html = "".join(
-            f'<li><a href="{url}">{label}</a></li>' for label, url in quick_links.items()
+            f'<li><a href="{url}">{label}</a> <span class="mute">— {url}</span></li>'
+            for label, url in deep.items()
         ) or "<li>No links available</li>"
 
-        top_issues = _top_log_issues(ctx)
+        top_issues = _top_log_issues(ctx, top_n=6)
         log_issues_html = (
-            "".join(f"<li>{msg} ({count}x)</li>" for msg, count in top_issues)
+            "".join(f"<li>{msg} <span class=\"mute\">({count}x)</span></li>" for msg, count in top_issues)
             if top_issues else "<li>No significant log patterns detected</li>"
         )
 
@@ -202,23 +343,31 @@ class EmailNotifier:
         metrics_card = (
             f'<h3>Metrics (Prometheus)</h3>'
             f'<div class="mono">{_metrics_preview(ctx)}</div>'
-            if ctx and ctx.metrics else '<p>No metrics collected</p>'
+            if ctx and ctx.metrics else '<p class="mute">No metrics collected for service=' + alert.service + '</p>'
         )
         logs_card = (
             f'<h3>Logs (Loki, Drain3-annotated)</h3>'
-            f'<p><span class="pill pill-info">{len(ctx.annotated_logs or ctx.logs or [])} lines analyzed</span></p>'
+            f'<p><span class="pill pill-info">{len(ctx.annotated_logs or ctx.logs or [])} lines analyzed</span>'
+            f' <span class="mute">· anomaly summary: {anomaly_summary}</span></p>'
             f'<p><b>Top log patterns</b></p>'
             f'<ul>{log_issues_html}</ul>'
-            if ctx and (ctx.annotated_logs or ctx.logs) else '<p>No logs collected</p>'
+            if ctx and (ctx.annotated_logs or ctx.logs) else '<p class="mute">No service-scoped logs collected (expected for node-level alerts)</p>'
         )
         traces_card = (
-            f'<h3>Traces (Jaeger)</h3>'
-            f'<table class="kvs">'
-            f'<tr><td class="k">Traces</td><td class="v">{len(ctx.traces)}</td></tr>'
-            f'<tr><td class="k">Slowest span</td><td class="v">{_slowest_span_summary(ctx)}</td></tr>'
-            f'</table>'
-            if ctx and ctx.traces else '<p>No traces collected</p>'
+            f'<h3>Traces (Jaeger) <span class="mute">— top {min(8, len(ctx.traces))} by duration</span></h3>'
+            f'<table class="kvs"><thead><tr>'
+            f'<th class="k">Operation</th><th class="k">Service</th><th class="k" style="text-align:right">Duration</th>'
+            f'</tr></thead><tbody>{_top_traces_rows(ctx, top_n=8)}</tbody></table>'
+            if ctx and ctx.traces else '<p class="mute">No traces collected (expected for non-traced services — k3s-node, loki, monitoring)</p>'
         )
+
+        observed_block = _observed_value_block(alert)
+        correlated_block = _correlated_alerts_block(correlated)
+
+        # Service display: if alert.service is a readable label (not an IP),
+        # show it with a hint of where to look; instance still has the raw
+        # IP:port for SRE reference.
+        service_display = alert.service if alert.service and alert.service != "unknown" else "unknown (add service label to the rule)"
 
         return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -228,20 +377,23 @@ class EmailNotifier:
     <div class="hero-top">
       <div>
         <h1 class="title">Alert escalated: {alert.alertname}</h1>
-        <p class="subtitle">CIRES AI triage produced a root cause analysis</p>
+        <p class="subtitle">CIRES AI triage — service <strong>{service_display}</strong> · component <strong>{component}</strong> · signal <strong>{signal}</strong></p>
       </div>
       <div><span class="pill {pill_class}">SEVERITY: {severity_upper}</span></div>
     </div>
   </div>
 
   <div class="grid">
+    {observed_block}
+
     <div class="card">
       <h2>Alert details</h2>
       <table class="kvs">
         <tr><td class="k">Name</td><td class="v">{alert.alertname}</td></tr>
-        <tr><td class="k">Service</td><td class="v">{alert.service}</td></tr>
+        <tr><td class="k">Service</td><td class="v"><strong>{service_display}</strong></td></tr>
+        <tr><td class="k">Component</td><td class="v">{component}</td></tr>
         <tr><td class="k">Severity</td><td class="v">{severity_upper}</td></tr>
-        <tr><td class="k">Instance</td><td class="v">{alert.instance}</td></tr>
+        <tr><td class="k">Instance</td><td class="v mono-inline">{alert.instance}</td></tr>
         <tr><td class="k">Environment</td><td class="v">{env}</td></tr>
         <tr><td class="k">Fired at</td><td class="v">{alert.startsAt}</td></tr>
         <tr><td class="k">Status</td><td class="v">{alert.status}</td></tr>
@@ -253,15 +405,13 @@ class EmailNotifier:
       <h2>RCA verdict</h2>
       <div class="badge {badge_class}">
         <div>Decision: {decision.decision.value}
-          <small>Confidence: {confidence_pct}</small>
+          <small>Confidence: {confidence_pct} · Quality: {record.rca_quality or "unknown"}</small>
         </div>
       </div>
       <div class="mono">Reason: {decision.reason}
 
 Root cause:
-{decision.rca}
-
-Anomaly summary: {anomaly_summary}</div>
+{decision.rca}</div>
       <h3>Suggested actions</h3>
       <ul>{actions_html}</ul>
       <h3>Evidence</h3>
@@ -276,8 +426,10 @@ Anomaly summary: {anomaly_summary}</div>
     {traces_card}
   </div>
 
+  {correlated_block}
+
   <div class="card span2">
-    <h2>Quick links</h2>
+    <h2>Deep links</h2>
     <ul>{links_html}</ul>
   </div>
 

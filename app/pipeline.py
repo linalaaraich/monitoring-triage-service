@@ -195,9 +195,36 @@ class TriagePipeline:
         # Step 5: Check RCA history for prior occurrences, plus any past
         # decisions that were tagged data_starved. The latter get quoted
         # verbatim back to the LLM so it sees its own past hedges and
-        # avoids repeating them in this round's RCA.
+        # avoids repeating them in this round's RCA. Also look for other
+        # alerts that fired within ±5 minutes so the LLM (and the email)
+        # can reason about cascades — "this CPU alert fired 30s after a
+        # latency alert on the same service" is much more actionable than
+        # the CPU alert on its own.
+        from datetime import datetime as _dt
+        try:
+            alert_time = _dt.fromisoformat(alert.startsAt.replace("Z", "+00:00"))
+            alert_time = alert_time.replace(tzinfo=None)  # match stored isoformat
+        except Exception:
+            alert_time = _dt.utcnow()
+        correlated = await self.store.get_correlated_alerts(
+            fingerprint=alert.fingerprint, at=alert_time, window_minutes=5,
+        )
         history = await self.store.get_alert_frequency(alert.alertname)
         history_context = ""
+        if correlated:
+            history_context += (
+                f"Correlated alerts within ±5 min of this one ({len(correlated)}):\n"
+            )
+            for c in correlated[:8]:
+                history_context += (
+                    f"  • {c['timestamp'][:19]}  {c['alert_name']} "
+                    f"(service={c.get('affected_service','?')}, verdict={c.get('llm_verdict') or '-'})\n"
+                )
+            history_context += (
+                "If these alerts are on related services or components, treat them "
+                "as a cascade and reason about the common root cause (noisy neighbor, "
+                "shared dependency, shared node). If they're unrelated, ignore.\n\n"
+            )
         if history["count"] > 0:
             history_context = (
                 f"This alert has fired {history['count']} time(s) in the last "
@@ -302,7 +329,10 @@ class TriagePipeline:
         # elsewhere; wrap-and-log is the safer change.
         if decision.decision == Decision.ESCALATE:
             try:
-                await self.notifier.send_escalation(alert, decision, record, history["count"], ctx=ctx)
+                await self.notifier.send_escalation(
+                    alert, decision, record, history["count"], ctx=ctx,
+                    correlated=correlated,
+                )
                 emails_sent.labels(type="escalation").inc()
                 alerts_processed.labels(decision="escalate").inc()
             except Exception as notify_exc:

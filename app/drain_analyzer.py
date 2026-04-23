@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import threading
 from dataclasses import dataclass
 
 import httpx
@@ -22,6 +23,20 @@ class AnalyzeResult:
 
 
 class DrainAnalyzer:
+    """Drain3 log-template miner with a threading.Lock so sync drain3 calls
+    can safely run from a thread pool without corrupting shared state.
+
+    All methods that touch `self._miner` MUST hold `self._lock`. Callers
+    from async code should wrap in `asyncio.to_thread(...)` so the event
+    loop doesn't block on Drain3's internal work (tokenization, tree walks,
+    and the FilePersistence disk writes which can spike to 100s of ms when
+    the state file grows large).
+
+    Found the hard way: the background ingest loop used to do 200
+    add_log_message calls back-to-back on the event loop, which blocked
+    /drain3/stats HTTP handlers for 15+ seconds per poll.
+    """
+
     def __init__(self):
         os.makedirs(settings.drain3_state_dir, exist_ok=True)
         persistence = FilePersistence(
@@ -36,32 +51,35 @@ class DrainAnalyzer:
         self._total_lines = 0
         self._total_anomalies = 0
         self._background_task: asyncio.Task | None = None
+        # Guards every read/write of self._miner, _total_lines, _total_anomalies.
+        self._lock = threading.Lock()
 
     def analyze(self, log_line: str) -> AnalyzeResult:
-        result = self._miner.add_log_message(log_line)
-        self._total_lines += 1
+        with self._lock:
+            result = self._miner.add_log_message(log_line)
+            self._total_lines += 1
 
-        cluster = result.get("cluster_id")
-        template = result.get("template_mined", "")
-        change_type = result.get("change_type", "none")
-        is_new = change_type in ("cluster_created", "cluster_template_changed")
+            cluster = result.get("cluster_id")
+            template = result.get("template_mined", "")
+            change_type = result.get("change_type", "none")
+            is_new = change_type in ("cluster_created", "cluster_template_changed")
 
-        match_count = 0
-        if cluster is not None:
-            for c in self._miner.drain.clusters:
-                if c.cluster_id == cluster:
-                    match_count = c.size
-                    break
+            match_count = 0
+            if cluster is not None:
+                for c in self._miner.drain.clusters:
+                    if c.cluster_id == cluster:
+                        match_count = c.size
+                        break
 
-        if is_new or match_count < settings.drain3_anomaly_threshold:
-            self._total_anomalies += 1
+            if is_new or match_count < settings.drain3_anomaly_threshold:
+                self._total_anomalies += 1
 
-        return AnalyzeResult(
-            cluster_id=cluster,
-            template=template,
-            is_new_pattern=is_new,
-            match_count=match_count,
-        )
+            return AnalyzeResult(
+                cluster_id=cluster,
+                template=template,
+                is_new_pattern=is_new,
+                match_count=match_count,
+            )
 
     def annotate_lines(self, lines: list[str]) -> tuple[list[str], str]:
         """Annotate log lines with [ANOMALY] or [KNOWN] prefix.
@@ -71,7 +89,7 @@ class DrainAnalyzer:
         new_patterns = 0
 
         for line in lines:
-            result = self.analyze(line)
+            result = self.analyze(line)  # takes its own lock
             if result.is_new_pattern or result.match_count < settings.drain3_anomaly_threshold:
                 annotated.append(f"[ANOMALY] {line}")
                 anomaly_count += 1
@@ -87,29 +105,34 @@ class DrainAnalyzer:
         return annotated, summary
 
     def get_stats(self) -> dict:
-        clusters = self._miner.drain.clusters
-        total = len(clusters)
-        rate = self._total_anomalies / max(self._total_lines, 1)
+        with self._lock:
+            clusters = self._miner.drain.clusters
+            total = len(clusters)
+            rate = self._total_anomalies / max(self._total_lines, 1)
 
-        recent_new = [
-            c.get_template()
-            for c in sorted(clusters, key=lambda c: c.cluster_id, reverse=True)[:5]
-        ]
+            recent_new = [
+                c.get_template()
+                for c in sorted(clusters, key=lambda c: c.cluster_id, reverse=True)[:5]
+            ]
 
-        return {
-            "total_clusters": total,
-            "recent_anomaly_rate": round(rate, 4),
-            "top_new_patterns": recent_new,
-            "total_lines_processed": self._total_lines,
-            "total_anomalies": self._total_anomalies,
-        }
+            return {
+                "total_clusters": total,
+                "recent_anomaly_rate": round(rate, 4),
+                "top_new_patterns": recent_new,
+                "total_lines_processed": self._total_lines,
+                "total_anomalies": self._total_anomalies,
+            }
 
     async def seed_from_loki(self):
-        """Fetch recent logs from Loki and feed through Drain3 to build baseline."""
+        """Fetch recent logs from Loki and feed through Drain3 to build baseline.
+
+        Runs on startup before the HTTP server starts serving, so blocking the
+        event loop briefly here is OK — no handlers are waiting.
+        """
         import time as _time
         logger.info("Seeding Drain3 from Loki...")
         try:
-            start_ns = int((_time.time() - 3600) * 1e9)  # 1h back in nanoseconds
+            start_ns = int((_time.time() - 3600) * 1e9)
             end_ns = int(_time.time() * 1e9)
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.get(
@@ -126,13 +149,17 @@ class DrainAnalyzer:
                     return
 
                 data = resp.json()
-                count = 0
+                lines: list[str] = []
                 for stream in data.get("data", {}).get("result", []):
                     for _ts, line in stream.get("values", []):
-                        self._miner.add_log_message(line)
-                        count += 1
-                self._total_lines += count
-                logger.info("Drain3 seeded with %d log lines from Loki", count)
+                        lines.append(line)
+
+                if lines:
+                    # Still offload to a thread — 1000 lines * 20ms can run
+                    # seconds even at startup, and it lets `await startup` be
+                    # non-blocking for the rest of the lifespan setup.
+                    await asyncio.to_thread(self._ingest_batch_sync, lines)
+                logger.info("Drain3 seeded with %d log lines from Loki", len(lines))
         except Exception as e:
             logger.warning("Drain3 Loki seeding failed (non-fatal): %s", e)
 
@@ -145,8 +172,6 @@ class DrainAnalyzer:
         while True:
             try:
                 await asyncio.sleep(settings.drain3_poll_interval)
-                # Loki expects nanosecond epoch timestamps — duration strings
-                # like "30s" return 400 Bad Request.
                 start_ns = int((_time.time() - settings.drain3_poll_interval) * 1e9)
                 end_ns = int(_time.time() * 1e9)
                 async with httpx.AsyncClient(timeout=15) as client:
@@ -161,16 +186,38 @@ class DrainAnalyzer:
                     )
                     if resp.status_code == 200:
                         data = resp.json()
+                        lines: list[str] = []
                         for stream in data.get("data", {}).get("result", []):
                             for _ts, line in stream.get("values", []):
-                                self._miner.add_log_message(line)
-                                self._total_lines += 1
+                                lines.append(line)
+                        if lines:
+                            # Offload the sync drain3 work to a thread so the
+                            # event loop stays responsive to /drain3/stats and
+                            # other HTTP handlers. Route through analyze() so
+                            # anomaly counters actually reflect all observed
+                            # traffic, not just alert-time annotate_lines calls.
+                            await asyncio.to_thread(self._ingest_batch_sync, lines)
                     else:
                         logger.debug("Drain3 Loki poll returned %d", resp.status_code)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.debug("Drain3 background ingestion error: %s", e)
+
+    def _ingest_batch_sync(self, lines: list[str]) -> None:
+        """Process a batch of log lines through analyze() on the calling thread.
+
+        Called from the background ingest loop via asyncio.to_thread. Runs
+        analyze() per line (which takes the lock) rather than raw
+        add_log_message so _total_anomalies reflects all ingested traffic,
+        not just alert-time annotation. This gives the dashboard's Drain3
+        panel an accurate anomaly-rate over time instead of stuck at 0.
+        """
+        for line in lines:
+            try:
+                self.analyze(line)
+            except Exception as e:
+                logger.debug("Drain3 analyze failed for one line (non-fatal): %s", e)
 
     async def stop_background_ingestion(self):
         if self._background_task:

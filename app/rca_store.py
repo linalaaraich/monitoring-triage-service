@@ -198,6 +198,36 @@ class RCAStore:
             "data_starved_count": data_starved_count,
         }
 
+    async def get_correlated_alerts(
+        self, fingerprint: str, at: datetime, window_minutes: int = 5
+    ) -> list[dict]:
+        """Return other alerts fired within ±window_minutes of `at`, excluding
+        the one identified by `fingerprint` (the alert currently being processed).
+
+        Used to give the LLM context on cascades — e.g. if MediumCpuUsage and
+        HighP95Latency fire within 90s of each other, the LLM should reason
+        about them together rather than treating either in isolation.
+
+        Time window is bidirectional because Grafana notifications can lag the
+        actual fire time by the evaluation interval + alertmanager debounce,
+        so a "following" alert may have a slightly earlier timestamp than the
+        one we're processing.
+        """
+        start = (at - timedelta(minutes=window_minutes)).isoformat()
+        end = (at + timedelta(minutes=window_minutes)).isoformat()
+        cursor = await self._db.execute(
+            """SELECT timestamp, alert_name, affected_service, severity,
+                      llm_verdict, rca_quality
+               FROM rca_history
+               WHERE timestamp BETWEEN ? AND ?
+                 AND (alert_fingerprint != ? OR alert_fingerprint IS NULL)
+               ORDER BY timestamp DESC
+               LIMIT 20""",
+            (start, end, fingerprint or ""),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
     async def get_recent_data_starved_rcas(
         self, alert_name: str, affected_service: str, limit: int = 3
     ) -> list[dict]:

@@ -32,9 +32,15 @@ class Settings(BaseSettings):
 
     # Context gathering
     context_timeout: int = 8
-    prometheus_range_minutes: int = 15
-    loki_log_limit: int = 50
-    jaeger_trace_limit: int = 20
+    # MCP query scope. These are the upper bounds the triage passes to each
+    # MCP when gathering context for an alert. Bumped from 15/50/20 on
+    # 2026-04-23 after observing that the LLM had to reason from only 50
+    # log lines and ~2 traces per alert, which is below the "give it the
+    # full picture" bar. Values are high enough to capture cascades but not
+    # so high they blow past the Ollama model's context window.
+    prometheus_range_minutes: int = 30    # was 15
+    loki_log_limit: int = 500             # was 50
+    jaeger_trace_limit: int = 100         # was 20
 
     # Deduplication
     dedup_window_seconds: int = 300
@@ -60,8 +66,12 @@ class Settings(BaseSettings):
     drain3_poll_interval: int = 30
     drain3_anomaly_threshold: int = 5
 
-    # Grafana (for dashboard links in emails)
-    grafana_url: str = "http://monitoring-vm:3000"
+    # Public UIs for deep-links in the escalation email + dashboard.
+    # Defaults assume the tailnet/MagicDNS layout; override per-deployment
+    # via env (GRAFANA_URL, JAEGER_URL, LOKI_URL).
+    grafana_url: str = "http://52.202.21.192:3000"
+    jaeger_url: str = "http://52.202.21.192:16686"
+    loki_url: str = "http://52.202.21.192:3100"
 
     model_config = {"env_prefix": "", "case_sensitive": False}
 
