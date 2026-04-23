@@ -209,6 +209,7 @@ _DASHBOARD_CSS = """
     display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;
   }
   .toolbar input[type=checkbox] { accent-color: var(--sage); }
+  .refresh-state { font-size: 11px; color: var(--warn); font-style: italic; margin-left: 6px; }
 
   .table-card {
     background: var(--card); border: 1px solid var(--rule); border-radius: 12px;
@@ -461,6 +462,35 @@ _DASHBOARD_CSS = """
   }
   .panel-link:hover { border-color: var(--sage-strong); color: var(--sage-strong); }
 
+  /* Placeholder for sections where the LLM emitted nothing — still render
+     the section so the UI is consistent + the absence is visible. */
+  .panel-empty {
+    background: var(--card-alt); border: 1px dashed var(--rule);
+    border-radius: 8px; padding: 12px 16px;
+    color: var(--muted); font-size: 12.5px; font-style: italic;
+    line-height: 1.6;
+  }
+
+  /* Copyable PromQL / LogQL rows — since Grafana 13 deep-link format is
+     brittle across versions, we hand the user the query as text. */
+  .query-row {
+    display: flex; gap: 12px; align-items: center;
+    margin-bottom: 8px; flex-wrap: wrap;
+  }
+  .query-lbl {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .8px;
+    text-transform: uppercase; color: var(--muted);
+    min-width: 120px;
+  }
+  .query-code {
+    flex: 1; padding: 8px 12px; border-radius: 6px;
+    background: var(--card-alt); border: 1px solid var(--rule);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px; color: var(--ink-soft);
+    word-break: break-all;
+    user-select: all; /* triple-click to select all for copying */
+  }
+
   @media (max-width: 700px) {
     body { padding: 18px; }
     .toolbar input[type=text] { min-width: 0; width: 100%; }
@@ -476,6 +506,26 @@ _DASHBOARD_JS = """
     if (!sRow || !dRow) return;
     sRow.classList.toggle('open');
     dRow.classList.toggle('open');
+    // Pause auto-refresh while ANY row is expanded — reloading the page
+    // while someone is reading the RCA would be infuriating. Resume once
+    // all rows are closed.
+    syncRefreshWithPanels();
+  }
+  function syncRefreshWithPanels() {
+    var anyOpen = document.querySelector('tr.summary.open') !== null;
+    var cb = document.getElementById('refresh');
+    var label = document.getElementById('refresh-state');
+    if (anyOpen) {
+      // Pause without flipping the checkbox — user stays in "auto-refresh on"
+      // mode but the timer is dormant until the panel closes.
+      if (window._refreshTimer) { clearInterval(window._refreshTimer); window._refreshTimer = null; }
+      if (label) label.textContent = '(paused — a row is open)';
+    } else {
+      if (cb && cb.checked && !window._refreshTimer) {
+        window._refreshTimer = setInterval(function() { window.location.reload(); }, 30000);
+      }
+      if (label) label.textContent = '';
+    }
   }
   function applyFilter() {
     var q = document.getElementById('filter').value.trim().toLowerCase();
@@ -502,9 +552,13 @@ _DASHBOARD_JS = """
   function toggleRefresh() {
     var cb = document.getElementById('refresh');
     if (cb.checked) {
-      window._refreshTimer = setInterval(function() { window.location.reload(); }, 30000);
+      // Only start the timer if no detail panel is open; syncRefreshWithPanels
+      // will start it once everything closes.
+      syncRefreshWithPanels();
     } else {
-      clearInterval(window._refreshTimer);
+      if (window._refreshTimer) { clearInterval(window._refreshTimer); window._refreshTimer = null; }
+      var label = document.getElementById('refresh-state');
+      if (label) label.textContent = '';
     }
   }
   document.addEventListener('DOMContentLoaded', function() {
@@ -554,34 +608,28 @@ def _quality_pill(quality: str | None) -> str:
 
 
 def _deep_chips(service: str | None, alert_name: str | None) -> str:
-    """Render small Grafana / Loki / Jaeger shortcut chips for a decision row.
+    """Small Grafana-alerting / Jaeger shortcut chips for a decision row.
 
-    Keeps the row readable — just abbreviated labels that open a pre-filtered
-    view in the right tool. Skipped for node-level / non-traced services
-    where the chip would be a dead-end.
+    Scoped to what we can actually *deep-link* reliably on Grafana 13:
+      - Grafana: /alerting/list (302→login, then lands on the alerting page)
+      - Jaeger:  /search?service=<svc> (traced services only — works directly)
+    Loki has no standalone UI in Grafana 13 without a pre-pinned datasource
+    UID we don't have at template time. Rather than ship a URL that 404s,
+    we show the LogQL query as copyable text in the detail panel below,
+    not as a chip.
     """
     import urllib.parse as _urllib
     svc = (service or "").strip()
-    if not svc or svc == "unknown":
-        return ""
     chips = []
-    # Grafana Explore / Loki
-    logql_enc = _urllib.quote(f'{{service_name="{svc}"}}')
-    chips.append(
-        f'<a href="{settings.grafana_url}/explore?left=%7B%22datasource%22:%22loki%22,'
-        f'%22queries%22:%5B%7B%22expr%22:%22{logql_enc}%22%7D%5D%7D" class="deep-chip dc-loki" '
-        f'title="View {_html.escape(svc)} logs in Grafana (Loki)" '
-        f'target="_blank" rel="noopener" onclick="event.stopPropagation()">Loki</a>'
-    )
-    # Jaeger — only for traced services
+    # Jaeger — only for traced services (anything else 404s the Jaeger search).
     if svc in ("spring-boot", "kong", "otel-collector"):
         chips.append(
             f'<a href="{settings.jaeger_url}/search?service={_urllib.quote(svc)}" '
             f'class="deep-chip dc-jaeger" target="_blank" rel="noopener" '
-            f'title="View {_html.escape(svc)} traces in Jaeger" '
+            f'title="Search {_html.escape(svc)} traces in Jaeger" '
             f'onclick="event.stopPropagation()">Jaeger</a>'
         )
-    # Grafana alert rule list (filtered by alertname isn't easily linkable; open rules list)
+    # Grafana alerting list — the entry point; user drills in from there.
     chips.append(
         f'<a href="{settings.grafana_url}/alerting/list" class="deep-chip dc-grafana" '
         f'target="_blank" rel="noopener" title="Open Grafana alerting" '
@@ -719,32 +767,58 @@ def _render_detail_panel(r: dict) -> str:
     rca_text = rca or '<em>(no RCA report captured — decision took the suppress or timeout path)</em>'
     reasoning_text = reasoning or '<em>(no reasoning captured)</em>'
 
-    # Suggested actions — persisted as JSON list in new schema, fall back
-    # to omission for older rows.
-    actions_html = ''
+    # Suggested actions — always render the section so the user sees what's
+    # there (or not). An empty list means the LLM emitted nothing, which is
+    # itself useful signal ("model didn't have anything concrete to propose").
     try:
         actions = _json.loads(r['suggested_actions']) if r.get('suggested_actions') else []
     except (ValueError, TypeError):
         actions = []
     if actions:
         items = ''.join(f'<li>{_html.escape(str(a))}</li>' for a in actions)
-        actions_html = (
-            '<div class="section"><h3>Suggested actions</h3>'
-            f'<ul class="panel-list">{items}</ul></div>'
+        actions_inner = f'<ul class="panel-list">{items}</ul>'
+    else:
+        actions_inner = (
+            '<div class="panel-empty">No concrete actions proposed by the model for this alert. '
+            'Either the RCA was confident enough that no follow-up is needed, or the model '
+            'did not have enough context to suggest specific commands.</div>'
         )
+    actions_html = f'<div class="section"><h3>Suggested actions</h3>{actions_inner}</div>'
 
-    # Evidence — same pattern.
-    evidence_html = ''
+    # Evidence — same always-render pattern.
     try:
         evidence = _json.loads(r['evidence']) if r.get('evidence') else []
     except (ValueError, TypeError):
         evidence = []
     if evidence:
         items = ''.join(f'<li>{_html.escape(str(e))}</li>' for e in evidence)
-        evidence_html = (
-            '<div class="section"><h3>Evidence cited</h3>'
-            f'<ul class="panel-list">{items}</ul></div>'
+        evidence_inner = f'<ul class="panel-list">{items}</ul>'
+    else:
+        evidence_inner = (
+            '<div class="panel-empty">No evidence items emitted. '
+            'Check the Root-cause analysis above — the model may have reasoned from the '
+            'observed value alone.</div>'
         )
+    evidence_html = f'<div class="section"><h3>Evidence cited</h3>{evidence_inner}</div>'
+
+    # Queries block — LogQL that would filter logs for this service,
+    # presented as copyable text since Grafana 13 deep-link format is
+    # brittle across versions. The user copies and pastes into Explore.
+    queries_html = ''
+    if service and service != "unknown":
+        logql = f'{{service_name="{_html.escape(service)}"}}'
+        queries_html = (
+            '<div class="section">'
+            '<h3>Queries you can paste into Grafana Explore</h3>'
+            '<div class="query-row"><span class="query-lbl">LogQL (Loki)</span>'
+            f'<code class="query-code">{logql}</code></div>'
+        )
+        if r.get('promql_expr'):
+            queries_html += (
+                '<div class="query-row"><span class="query-lbl">PromQL (rule)</span>'
+                f'<code class="query-code">{_html.escape(r["promql_expr"])}</code></div>'
+            )
+        queries_html += '</div>'
 
     # Anomaly summary (if the LLM or Drain3 noted one).
     anomaly = r.get('anomaly_summary')
@@ -809,6 +883,7 @@ def _render_detail_panel(r: dict) -> str:
         + f'<div class="section"><h3>Model reasoning</h3><div class="body">{reasoning_text}</div></div>'
         + anomaly_html
         + correlated_html
+        + queries_html
         + links_block
         + '</div>'
     )
@@ -885,7 +960,7 @@ async def dashboard():
         f'    <input id="filter" type="text" placeholder="Filter by alert name, service, verdict, or RCA text" autocomplete="off" />'
         f'    <span class="hint" id="match-count"></span>'
         f'    <span class="spacer"></span>'
-        f'    <label class="refresh"><input id="refresh" type="checkbox" checked onchange="toggleRefresh()" /> Auto-refresh every 30 seconds</label>'
+        f'    <label class="refresh"><input id="refresh" type="checkbox" checked onchange="toggleRefresh()" /> Auto-refresh every 30 seconds <span id="refresh-state" class="refresh-state"></span></label>'
         f'  </div>'
         f'  <div class="table-card">'
         f'    <table>'
