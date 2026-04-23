@@ -127,102 +127,196 @@ async def drain3_stats():
 
 
 _DASHBOARD_CSS = """
+  :root {
+    --bg: #f6f7f3;
+    --card: #ffffff;
+    --card-alt: #fbfcf8;
+    --ink: #1f2a23;
+    --ink-soft: #3f4a42;
+    --muted: #6b7a6f;
+    --rule: rgba(30, 55, 40, .10);
+    --rule-hi: rgba(30, 55, 40, .22);
+    --sage: #5d8c6b;
+    --sage-strong: #3e7d4d;
+    --sage-soft: #eef6ee;
+    --ok: #3e7d4d;
+    --warn: #a1642b;
+    --warn-soft: #f6efe3;
+    --danger: #a1393a;
+    --danger-soft: #f6ebe6;
+    --info: #4a7393;
+    --info-soft: #eaf0f5;
+  }
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { font-family:'Inter','Segoe UI',system-ui,sans-serif; background:#0f1117; color:#e4e6ee; padding:24px 32px 48px; }
-  a { color:#4ea8de; text-decoration:none; }
-  a:hover { text-decoration:underline; }
-  .header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; margin-bottom:20px; }
-  .header h1 { font-size:22px; font-weight:700; letter-spacing:-.3px; }
-  .header h1 span { color:#b07ee8; }
-  .header .docs-link { font-size:12px; color:#8890a0; border:1px solid #2a2d3a; padding:6px 12px; border-radius:6px; }
-  .header .docs-link:hover { border-color:#4ea8de; color:#4ea8de; text-decoration:none; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.5;
+    padding: 28px 32px 56px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .container { max-width: 1280px; margin: 0 auto; }
 
-  .stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:12px; margin-bottom:20px; }
-  .stat { background:#1a1d27; border:1px solid #2a2d3a; padding:14px 18px; border-radius:10px; display:flex; flex-direction:column; gap:2px; }
-  .stat .num { font-size:26px; font-weight:700; letter-spacing:-.3px; }
-  .stat .lbl { color:#8890a0; font-size:11px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; }
-  .stat.t-total .num { color:#e4e6ee; }
-  .stat.t-esc .num { color:#e06070; }
-  .stat.t-dismiss .num { color:#6bcf7f; }
-  .stat.t-timeout .num { color:#f0a050; }
-  .stat.t-suppress .num { color:#b07ee8; }
+  .header { margin-bottom: 22px; }
+  .header .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+  .header h1 {
+    font-size: 26px; font-weight: 700; letter-spacing: -.3px; color: var(--ink);
+  }
+  .header h1 .accent { color: var(--sage-strong); }
+  .header .subtitle { margin-top: 4px; color: var(--muted); font-size: 13px; }
 
-  .toolbar { display:flex; gap:12px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .stat {
+    background: var(--card);
+    border: 1px solid var(--rule);
+    padding: 14px 18px;
+    border-radius: 12px;
+    display: flex; flex-direction: column; gap: 4px;
+    transition: border-color .15s;
+  }
+  .stat:hover { border-color: var(--rule-hi); }
+  .stat .num { font-size: 26px; font-weight: 700; letter-spacing: -.3px; line-height: 1.2; color: var(--ink); }
+  .stat .lbl { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .4px; text-transform: uppercase; }
+  .stat.t-total { border-left: 3px solid var(--sage); }
+  .stat.t-esc { border-left: 3px solid var(--danger); }
+  .stat.t-esc .num { color: var(--danger); }
+  .stat.t-dismiss { border-left: 3px solid var(--ok); }
+  .stat.t-dismiss .num { color: var(--ok); }
+  .stat.t-timeout { border-left: 3px solid var(--warn); }
+  .stat.t-timeout .num { color: var(--warn); }
+  .stat.t-suppress { border-left: 3px solid var(--info); }
+  .stat.t-suppress .num { color: var(--info); }
+
+  .toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
   .toolbar input[type=text] {
-    background:#1a1d27; border:1px solid #2a2d3a; color:#e4e6ee; padding:8px 12px;
-    border-radius:6px; font-size:13px; min-width:260px; font-family:inherit;
+    background: var(--card); border: 1px solid var(--rule); color: var(--ink);
+    padding: 9px 14px; border-radius: 8px; font-size: 13px; min-width: 280px;
+    font-family: inherit; transition: border-color .15s, box-shadow .15s;
   }
-  .toolbar input[type=text]:focus { outline:none; border-color:#4ea8de; }
-  .toolbar .hint { font-size:11px; color:#8890a0; }
-  .toolbar .spacer { flex:1; }
-  .toolbar label.refresh { font-size:12px; color:#8890a0; display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none; }
+  .toolbar input[type=text]:focus {
+    outline: none; border-color: var(--sage); box-shadow: 0 0 0 3px rgba(93,140,107,.15);
+  }
+  .toolbar input[type=text]::placeholder { color: var(--muted); }
+  .toolbar .hint { font-size: 12px; color: var(--muted); }
+  .toolbar .spacer { flex: 1; }
+  .toolbar label.refresh {
+    font-size: 12px; color: var(--muted);
+    display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;
+  }
+  .toolbar input[type=checkbox] { accent-color: var(--sage); }
 
-  table { border-collapse:collapse; width:100%; background:#13151e; border:1px solid #2a2d3a; border-radius:8px; overflow:hidden; }
+  .table-card {
+    background: var(--card); border: 1px solid var(--rule); border-radius: 12px;
+    overflow: hidden;
+  }
+  table { border-collapse: collapse; width: 100%; }
   thead th {
-    background:#1a1d27; color:#8890a0; font-weight:700; font-size:10.5px; letter-spacing:.8px;
-    text-transform:uppercase; text-align:left; padding:10px 12px; border-bottom:1px solid #2a2d3a;
-    position:sticky; top:0; z-index:1;
+    background: var(--sage-soft); color: var(--ink-soft);
+    font-weight: 700; font-size: 10.5px; letter-spacing: .8px;
+    text-transform: uppercase; text-align: left;
+    padding: 11px 14px; border-bottom: 1px solid var(--rule);
+    position: sticky; top: 0; z-index: 1;
   }
-  tbody tr.summary { cursor:pointer; transition:background .12s; }
-  tbody tr.summary td { padding:10px 12px; font-size:13px; border-bottom:1px solid #23262f; vertical-align:middle; }
-  tbody tr.summary:hover { background:#181b25; }
-  tbody tr.summary.open { background:#1e2230; }
-  tbody tr.summary td.chev { width:24px; color:#8890a0; font-size:11px; text-align:center; transition:transform .15s; }
-  tbody tr.summary.open td.chev { transform:rotate(90deg); color:#e4e6ee; }
-  tbody tr.summary td.mono { font-family:'JetBrains Mono',ui-monospace,monospace; color:#c0c5d0; font-size:12px; white-space:nowrap; }
+  tbody tr.summary { cursor: pointer; transition: background .12s; }
+  tbody tr.summary td {
+    padding: 11px 14px; font-size: 13px; border-bottom: 1px solid var(--rule);
+    vertical-align: middle; color: var(--ink-soft);
+  }
+  tbody tr.summary td:nth-child(3) { color: var(--ink); font-weight: 500; }
+  tbody tr.summary:hover { background: var(--card-alt); }
+  tbody tr.summary.open { background: var(--sage-soft); }
+  tbody tr.summary.open td { border-bottom-color: transparent; }
 
-  .tag { display:inline-block; padding:2px 8px; border-radius:10px; font-size:10.5px; font-weight:600;
-         border:1px solid; letter-spacing:.3px; }
-  .tag-grafana { color:#f0a050; border-color:rgba(240,160,80,.35); background:rgba(240,160,80,.08); }
-  .tag-drain3  { color:#40d0d0; border-color:rgba(64,208,208,.35); background:rgba(64,208,208,.08); }
-  .tag-default { color:#8890a0; border-color:#2a2d3a; background:#1a1d27; }
+  td.chev { width: 28px; text-align: center; }
+  .chev-icon {
+    display: inline-block; width: 0; height: 0;
+    border-left: 5px solid var(--muted);
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    transition: transform .15s;
+  }
+  tbody tr.summary.open .chev-icon { transform: rotate(90deg); border-left-color: var(--sage-strong); }
 
-  .sev { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; }
-  .sev-critical { color:#e06070; }
-  .sev-warning { color:#f0a050; }
-  .sev-info, .sev-low { color:#8890a0; }
+  td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; white-space: nowrap; }
 
-  .pill { display:inline-block; padding:3px 10px; border-radius:10px; font-size:11px; font-weight:700; letter-spacing:.4px; text-transform:uppercase; }
-  .pill-escalate { background:rgba(224,96,112,.15); color:#e06070; border:1px solid rgba(224,96,112,.35); }
-  .pill-dismiss  { background:rgba(107,207,127,.12); color:#6bcf7f; border:1px solid rgba(107,207,127,.35); }
-  .pill-inconclusive { background:rgba(224,208,96,.1); color:#e0d060; border:1px solid rgba(224,208,96,.3); }
-  .pill-none { background:#1a1d27; color:#8890a0; border:1px solid #2a2d3a; }
+  .tag {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 10.5px; font-weight: 700; border: 1px solid; letter-spacing: .3px;
+  }
+  .tag-grafana { color: var(--warn); border-color: rgba(161,100,43,.35); background: var(--warn-soft); }
+  .tag-drain3 { color: var(--info); border-color: rgba(74,115,147,.35); background: var(--info-soft); }
+  .tag-default { color: var(--muted); border-color: var(--rule); background: var(--bg); }
 
-  .action { font-size:11.5px; color:#c0c5d0; }
-  .action-emailed { color:#e06070; }
-  .action-emailed_raw { color:#f0a050; }
-  .action-suppressed { color:#6bcf7f; }
+  .sev { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+  .sev-critical { color: var(--danger); }
+  .sev-warning { color: var(--warn); }
+  .sev-info, .sev-low { color: var(--muted); }
 
-  tbody tr.detail { display:none; }
-  tbody tr.detail.open { display:table-row; }
-  tbody tr.detail > td { padding:0; background:#12141c; border-bottom:1px solid #2a2d3a; }
+  .pill {
+    display: inline-block; padding: 3px 10px; border-radius: 999px;
+    font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase;
+  }
+  .pill-escalate { background: var(--danger-soft); color: var(--danger); border: 1px solid rgba(161,57,58,.30); }
+  .pill-dismiss  { background: var(--sage-soft); color: var(--sage-strong); border: 1px solid rgba(62,125,77,.32); }
+  .pill-inconclusive { background: var(--warn-soft); color: var(--warn); border: 1px solid rgba(161,100,43,.30); }
+  .pill-none { background: var(--bg); color: var(--muted); border: 1px solid var(--rule); }
 
-  .panel { padding:18px 22px 22px; border-left:3px solid #b07ee8; background:linear-gradient(90deg, rgba(176,126,232,.06), #12141c 60%); }
-  .panel .meta-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px 20px; margin-bottom:16px; }
-  .panel .m { display:flex; flex-direction:column; gap:2px; }
-  .panel .m .lbl { font-size:10px; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:#8890a0; }
-  .panel .m .val { font-size:12.5px; color:#e4e6ee; font-family:'JetBrains Mono',ui-monospace,monospace; word-break:break-all; }
-  .panel .m .val.normal { font-family:'Inter',system-ui,sans-serif; }
+  .action { font-size: 12px; color: var(--ink-soft); }
+  .action-emailed { color: var(--danger); }
+  .action-emailed_raw { color: var(--warn); }
+  .action-suppressed { color: var(--ok); }
 
-  .section { margin-top:14px; }
-  .section h3 { font-size:12px; font-weight:700; color:#4ea8de; letter-spacing:1px; text-transform:uppercase; margin-bottom:6px; display:flex; align-items:center; gap:6px; }
+  tbody tr.detail { display: none; }
+  tbody tr.detail.open { display: table-row; }
+  tbody tr.detail > td { padding: 0; background: var(--card-alt); border-bottom: 1px solid var(--rule); }
+
+  .panel {
+    padding: 20px 24px 22px;
+    border-left: 3px solid var(--sage);
+    background: linear-gradient(90deg, var(--sage-soft), var(--card-alt) 70%);
+  }
+  .panel .meta-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px 24px; margin-bottom: 18px;
+  }
+  .panel .m { display: flex; flex-direction: column; gap: 3px; }
+  .panel .m .lbl {
+    font-size: 10px; font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .panel .m .val {
+    font-size: 12.5px; color: var(--ink); font-weight: 500;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    word-break: break-all;
+  }
+  .panel .m .val.normal {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    font-weight: 500;
+  }
+
+  .section { margin-top: 16px; }
+  .section h3 {
+    font-size: 13px; font-weight: 700; color: var(--ink);
+    margin-bottom: 8px; letter-spacing: .2px;
+  }
   .section .body {
-    background:#0f1117; border:1px solid #2a2d3a; border-radius:6px; padding:12px 14px;
-    color:#c0c5d0; font-size:13px; line-height:1.6; white-space:pre-wrap; word-break:break-word;
+    background: var(--card); border: 1px solid var(--rule); border-radius: 8px;
+    padding: 14px 16px; color: var(--ink-soft); font-size: 13.5px; line-height: 1.65;
+    white-space: pre-wrap; word-break: break-word;
   }
-  .section .body.empty { color:#555; font-style:italic; }
-  .section.reason h3 { color:#b07ee8; }
-  .section.rca h3 { color:#6bcf7f; }
+  .section .body.empty { color: var(--muted); font-style: italic; }
 
   tbody tr.empty td {
-    text-align:center; color:#555; padding:32px 12px; font-style:italic;
+    text-align: center; color: var(--muted); padding: 36px 14px;
+    font-style: italic; font-size: 13px;
   }
 
-  @media(max-width:700px) {
-    body { padding:16px; }
-    .toolbar input[type=text] { min-width:0; width:100%; }
+  @media (max-width: 700px) {
+    body { padding: 18px; }
+    .toolbar input[type=text] { min-width: 0; width: 100%; }
     thead th:nth-child(4), tbody td:nth-child(4),
-    thead th:nth-child(5), tbody td:nth-child(5) { display:none; }
+    thead th:nth-child(5), tbody td:nth-child(5) { display: none; }
   }
 """
 
@@ -317,12 +411,12 @@ def _render_detail_panel(r: dict) -> str:
         f'    <div class="m"><div class="lbl">LLM confidence</div><div class="val normal">{confidence}</div></div>'
         f'    <div class="m"><div class="lbl">Action</div><div class="val normal">{action} · {duration}ms</div></div>'
         f'  </div>'
-        f'  <div class="section rca">'
-        f'    <h3>🤖 Root-cause analysis</h3>'
+        f'  <div class="section">'
+        f'    <h3>Root-cause analysis</h3>'
         f'    <div class="{rca_cls}">{rca_text}</div>'
         f'  </div>'
-        f'  <div class="section reason">'
-        f'    <h3>💭 LLM reasoning</h3>'
+        f'  <div class="section">'
+        f'    <h3>Model reasoning</h3>'
         f'    <div class="{reasoning_cls}">{reasoning_text}</div>'
         f'  </div>'
         f'</div>'
@@ -359,7 +453,7 @@ async def dashboard():
 
         body_rows += (
             f'<tr class="summary" data-id="{did}" data-search="{_html.escape(search_blob, quote=True)}" onclick="toggleDetail(\'{did}\')">'
-            f'  <td class="chev">▶</td>'
+            f'  <td class="chev"><span class="chev-icon"></span></td>'
             f'  <td class="mono">{ts}</td>'
             f'  <td>{_html.escape(alert_name)}</td>'
             f'  <td>{_source_tag(r.get("alert_source") or "")}</td>'
@@ -381,30 +475,35 @@ async def dashboard():
         f'<title>RCA Decisions · Triage Service</title>'
         f'<style>{_DASHBOARD_CSS}</style>'
         f'</head><body>'
-        f'<div class="header">'
-        f'  <h1>RCA Decision <span>History</span></h1>'
-        f'  <a class="docs-link" href="https://linalaaraich.github.io/monitoring-docs/triage-service.html" target="_blank" rel="noopener">📖 Triage service docs →</a>'
+        f'<div class="container">'
+        f'  <div class="header">'
+        f'    <div class="eyebrow">AI root-cause triage</div>'
+        f'    <h1>Decision <span class="accent">history</span></h1>'
+        f'    <div class="subtitle">Recent verdicts produced by the triage pipeline. Click any row to review the full root-cause analysis.</div>'
+        f'  </div>'
+        f'  <div class="stats">'
+        f'    <div class="stat t-total"><div class="num">{total}</div><div class="lbl">Total decisions</div></div>'
+        f'    <div class="stat t-esc"><div class="num">{escalated}</div><div class="lbl">Escalated</div></div>'
+        f'    <div class="stat t-dismiss"><div class="num">{dismissed}</div><div class="lbl">Dismissed</div></div>'
+        f'    <div class="stat t-suppress"><div class="num">{suppressed_pre}</div><div class="lbl">Pre-LLM suppressed</div></div>'
+        f'    <div class="stat t-timeout"><div class="num">{timed_out}</div><div class="lbl">Timed out</div></div>'
+        f'  </div>'
+        f'  <div class="toolbar">'
+        f'    <input id="filter" type="text" placeholder="Filter by alert name, service, verdict, or RCA text" autocomplete="off" />'
+        f'    <span class="hint" id="match-count"></span>'
+        f'    <span class="spacer"></span>'
+        f'    <label class="refresh"><input id="refresh" type="checkbox" onchange="toggleRefresh()" /> Auto-refresh every 30 seconds</label>'
+        f'  </div>'
+        f'  <div class="table-card">'
+        f'    <table>'
+        f'      <thead><tr>'
+        f'        <th></th><th>Time (UTC)</th><th>Alert</th><th>Source</th><th>Service</th>'
+        f'        <th>Severity</th><th>Verdict</th><th>Action</th><th>Duration</th>'
+        f'      </tr></thead>'
+        f'      <tbody>{body_rows}</tbody>'
+        f'    </table>'
+        f'  </div>'
         f'</div>'
-        f'<div class="stats">'
-        f'  <div class="stat t-total"><div class="num">{total}</div><div class="lbl">Total decisions</div></div>'
-        f'  <div class="stat t-esc"><div class="num">{escalated}</div><div class="lbl">Escalated</div></div>'
-        f'  <div class="stat t-dismiss"><div class="num">{dismissed}</div><div class="lbl">Dismissed</div></div>'
-        f'  <div class="stat t-suppress"><div class="num">{suppressed_pre}</div><div class="lbl">Pre-LLM suppressed</div></div>'
-        f'  <div class="stat t-timeout"><div class="num">{timed_out}</div><div class="lbl">Timed out</div></div>'
-        f'</div>'
-        f'<div class="toolbar">'
-        f'  <input id="filter" type="text" placeholder="Filter by alert name, service, verdict, RCA text..." autocomplete="off" />'
-        f'  <span class="hint" id="match-count"></span>'
-        f'  <span class="spacer"></span>'
-        f'  <label class="refresh"><input id="refresh" type="checkbox" onchange="toggleRefresh()" /> Auto-refresh 30s</label>'
-        f'</div>'
-        f'<table>'
-        f'<thead><tr>'
-        f'<th></th><th>Time (UTC)</th><th>Alert</th><th>Source</th><th>Service</th>'
-        f'<th>Severity</th><th>Verdict</th><th>Action</th><th>Duration</th>'
-        f'</tr></thead>'
-        f'<tbody>{body_rows}</tbody>'
-        f'</table>'
         f'<script>{_DASHBOARD_JS}</script>'
         f'</body></html>'
     )
