@@ -262,6 +262,21 @@ _DASHBOARD_CSS = """
   .pill-inconclusive { background: var(--warn-soft); color: var(--warn); border: 1px solid rgba(161,100,43,.30); }
   .pill-none { background: var(--bg); color: var(--muted); border: 1px solid var(--rule); }
 
+  /* Quality pill — indicates whether the RCA text actually named a cause
+     or just hedged with "insufficient data". data_starved rows are what
+     future LLM prompts cite as "don't repeat this". */
+  .quality {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 10px; font-weight: 700; letter-spacing: .4px;
+    text-transform: uppercase; margin-left: 6px; vertical-align: middle;
+  }
+  .quality-actionable { background: transparent; color: var(--muted); border: 1px solid var(--rule); }
+  .quality-data_starved {
+    background: var(--warn-soft); color: var(--warn);
+    border: 1px solid rgba(161,100,43,.35);
+  }
+  .quality-data_starved::before { content: "⚠ "; }
+
   .action { font-size: 12px; color: var(--ink-soft); }
   .action-emailed { color: var(--danger); }
   .action-emailed_raw { color: var(--warn); }
@@ -447,6 +462,19 @@ def _fmt_duration_ms(ms: int | None) -> str:
     return f"{m} min {s} s" if s else f"{m} min"
 
 
+def _quality_pill(quality: str | None) -> str:
+    """Render the rca_quality post-hoc tag as a small pill next to the verdict.
+
+    Absent (older rows before the migration) renders as empty string so
+    the summary row stays clean.
+    """
+    if not quality:
+        return ""
+    cls = 'quality-actionable' if quality == 'actionable' else 'quality-data_starved'
+    label = _html.escape(quality.replace('_', ' '))
+    return f'<span class="quality {cls}">{label}</span>'
+
+
 def _verdict_pill(verdict: str | None, action: str | None) -> str:
     v = (verdict or '').lower()
     if v == 'escalate':
@@ -532,6 +560,7 @@ def _render_detail_panel(r: dict) -> str:
         f'    <div class="m"><div class="lbl">Triage path</div><div class="val normal">{triage}</div></div>'
         f'    <div class="m"><div class="lbl">LLM confidence</div><div class="val normal">{confidence}</div></div>'
         f'    <div class="m"><div class="lbl">Action</div><div class="val normal">{action} · {_fmt_duration_ms(duration)}</div></div>'
+        f'    <div class="m"><div class="lbl">RCA quality</div><div class="val normal">{_html.escape(r.get("rca_quality") or "—").replace("_"," ")}</div></div>'
         f'  </div>'
         f'  <div class="section">'
         f'    <h3>Root-cause analysis</h3>'
@@ -582,7 +611,7 @@ async def dashboard():
             f'  <td>{_source_tag(r.get("alert_source") or "")}</td>'
             f'  <td>{_html.escape(service)}</td>'
             f'  <td><span class="sev sev-{_html.escape(severity)}">{_html.escape(severity or "—")}</span></td>'
-            f'  <td>{_verdict_pill(verdict, action)}</td>'
+            f'  <td>{_verdict_pill(verdict, action)}{_quality_pill(r.get("rca_quality"))}</td>'
             f'  <td class="action action-{_html.escape(action)}">{_html.escape(action)}</td>'
             f'  <td class="mono">{_fmt_duration_ms(duration)}</td>'
             f'</tr>'

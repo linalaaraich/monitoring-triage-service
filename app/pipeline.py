@@ -23,7 +23,7 @@ from app.metrics import (
 )
 from app.models import Decision, Drain3Webhook, GrafanaAlert, GrafanaWebhook, RCARecord
 from app.notifier import EmailNotifier
-from app.rca_store import RCAStore
+from app.rca_store import RCAStore, _classify_rca_quality
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +177,7 @@ class TriagePipeline:
         self, alert: GrafanaAlert, source: str, pipeline_start: float
     ):
         # Step 3: Gather context from all three pillars
-        ctx = await self.context.gather(alert.alertname, alert.service, alert.startsAt)
+        ctx = await self.context.gather(alert)
 
         # Step 4: Annotate logs with Drain3
         annotated_logs = []
@@ -192,14 +192,37 @@ class TriagePipeline:
             drain3_anomalies.inc(sum(1 for l in annotated_logs if l.startswith("[ANOMALY]")))
             drain3_clusters.set(self.drain.get_stats()["total_clusters"])
 
-        # Step 5: Check RCA history for prior occurrences
+        # Step 5: Check RCA history for prior occurrences, plus any past
+        # decisions that were tagged data_starved. The latter get quoted
+        # verbatim back to the LLM so it sees its own past hedges and
+        # avoids repeating them in this round's RCA.
         history = await self.store.get_alert_frequency(alert.alertname)
         history_context = ""
         if history["count"] > 0:
             history_context = (
                 f"This alert has fired {history['count']} time(s) in the last "
-                f"{history['days']} days. Last seen: {history['last_seen']}."
+                f"{history['days']} days. Last seen: {history['last_seen']}.\n"
             )
+            if history.get("data_starved_count", 0) > 0:
+                prior_hedges = await self.store.get_recent_data_starved_rcas(
+                    alert_name=alert.alertname,
+                    affected_service=alert.service,
+                    limit=3,
+                )
+                if prior_hedges:
+                    history_context += (
+                        f"\n⚠ {history['data_starved_count']} recent decision(s) for this alert "
+                        f"were tagged data_starved — the model hedged with 'insufficient data' "
+                        f"or similar rather than naming a cause. Examples to avoid repeating:\n"
+                    )
+                    for i, h in enumerate(prior_hedges, 1):
+                        rca = (h.get("rca_report") or "").replace("\n", " ")[:200]
+                        history_context += f"  [{i}] {h['timestamp'][:19]}: \"{rca}\"\n"
+                    history_context += (
+                        "\nDo not repeat these phrasings. Use the observed metric value "
+                        "from the alert above as your primary evidence, and propose a "
+                        "specific hypothesis even if the MCP pillars are thin."
+                    )
 
         # Step 6: Call LLM
         decision, llm_ms = await self.llm.investigate(
@@ -207,13 +230,51 @@ class TriagePipeline:
         )
         llm_duration.observe(llm_ms / 1000)
 
+        # Step 6b: If the first-pass RCA looks data-starved, give the LLM ONE
+        # more shot with an explicit "you hedged — do better" instruction
+        # appended to the history context. Only retry if the gate is on and
+        # we haven't already spent too much of the pipeline budget.
+        quality = _classify_rca_quality(decision.rca, decision.reason)
+        total_so_far = int((time.monotonic() - pipeline_start) * 1000)
+        retry_budget_ms = settings.pipeline_timeout * 1000 - total_so_far - 5000  # 5s safety margin
+        if (
+            quality == "data_starved"
+            and settings.triage_data_starved_retry_enabled
+            and retry_budget_ms > 10_000
+        ):
+            logger.warning(
+                "First-pass RCA tagged data_starved (verdict=%s) — retrying with anti-hedge prompt",
+                decision.decision.value,
+            )
+            retry_history = history_context + (
+                "\n\n⚠ RETRY — your first response just said 'insufficient data' without naming a cause. "
+                "Look at the alert's PromQL and observed value above: those ARE data. "
+                "Even if the three pillars came back thin, propose a concrete hypothesis (e.g. "
+                "'load-test traffic spiked node CPU; CPU-throttling the triage container is the "
+                "likely secondary effect') and two specific commands/queries a human can run to confirm. "
+                "Do NOT use the phrases 'insufficient data', 'cannot determine', or 'no recent data' in this response."
+            )
+            retry_decision, retry_ms = await self.llm.investigate(
+                alert, ctx, anomaly_summary, retry_history
+            )
+            llm_duration.observe(retry_ms / 1000)
+            llm_ms += retry_ms
+            retry_quality = _classify_rca_quality(retry_decision.rca, retry_decision.reason)
+            if retry_quality == "actionable":
+                logger.info("Retry produced actionable RCA — replacing first-pass verdict")
+                decision = retry_decision
+                quality = "actionable"
+            else:
+                logger.info("Retry still data_starved — keeping first-pass verdict, tagging as data_starved")
+
         elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
         pipeline_duration.observe(elapsed_ms / 1000)
 
         logger.info(
-            "LLM verdict for %s: %s (confidence implied by reasoning, %dms total)",
+            "LLM verdict for %s: %s (quality=%s, %dms total)",
             alert.alertname,
             decision.decision.value,
+            quality,
             elapsed_ms,
         )
 
@@ -231,6 +292,7 @@ class TriagePipeline:
             llm_reasoning=decision.reason,
             action_taken="emailed" if decision.decision == Decision.ESCALATE else "suppressed",
             investigation_duration_ms=elapsed_ms,
+            rca_quality=quality,  # pre-computed, saves store from re-running the classifier
         )
 
         # Step 8: Act on decision. A notifier failure (SMTP hiccup, template

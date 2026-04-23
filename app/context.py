@@ -7,7 +7,7 @@ import httpx
 
 from app.config import settings
 from app.metrics import triage_mcp_duration_seconds, triage_mcp_requests_total
-from app.models import GatheredContext
+from app.models import GatheredContext, GrafanaAlert
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,29 @@ def _parse_alert_time(alert_time: str) -> float | None:
         return epoch
     except (ValueError, TypeError):
         return None
+
+
+def _prom_result_empty(data) -> bool:
+    """True if a Prometheus MCP response carries no series.
+
+    The MCP server passes the Prometheus JSON through largely unchanged, so
+    a populated response looks like `{"status":"success","data":{"result":[...]}}`
+    and an empty one has `result: []`. Be generous about the shape: we've
+    also seen the MCP return a raw list or a plain `{"result":[]}` wrapper.
+    """
+    if not data:
+        return True
+    if isinstance(data, list):
+        return len(data) == 0
+    if isinstance(data, dict):
+        # {"data": {"result": [...]}} — standard Prom wrapper
+        inner = data.get("data", data)
+        if isinstance(inner, dict):
+            result = inner.get("result")
+            if result is None:
+                return False  # unknown shape — don't second-guess, treat as non-empty
+            return len(result) == 0
+    return False
 
 
 def _absolute_window(alert_epoch: float, window_minutes: int) -> tuple[float, float]:
@@ -64,26 +87,31 @@ class ContextGatherer:
         await self._client.aclose()
 
     async def gather(
-        self, alert_name: str, service: str, alert_time: str
+        self, alert: GrafanaAlert
     ) -> GatheredContext:
         """Gather context from all three pillars in parallel.
 
-        If alert_time (Grafana startsAt) parses cleanly, all three pillars
+        If alert.startsAt (Grafana startsAt) parses cleanly, all three pillars
         share an absolute time window anchored on the alert itself. This
         is the correlation guarantee — metrics/logs/traces for the alert's
         timeframe, not for whenever the LLM happens to wake up.
+
+        We pass the full alert down to each pillar fetch so fallback queries
+        can key on alert.instance or alert.annotations.expr when service-scoped
+        queries return nothing (which is the common case for node-level alerts
+        like HighCpuUsage where `service=k3s-node` matches no `job=~".*k3s-node.*"` series).
         """
         start = time.monotonic()
-        alert_epoch = _parse_alert_time(alert_time)
+        alert_epoch = _parse_alert_time(alert.startsAt)
         abs_window = (
             _absolute_window(alert_epoch, settings.prometheus_range_minutes)
             if alert_epoch is not None
             else None
         )
 
-        prom_task = self._fetch_prometheus(service, abs_window)
-        loki_task = self._fetch_loki(service, abs_window)
-        jaeger_task = self._fetch_jaeger(service, abs_window)
+        prom_task = self._fetch_prometheus(alert, abs_window)
+        loki_task = self._fetch_loki(alert, abs_window)
+        jaeger_task = self._fetch_jaeger(alert, abs_window)
 
         results = await asyncio.gather(
             prom_task, loki_task, jaeger_task, return_exceptions=True
@@ -134,56 +162,125 @@ class ContextGatherer:
         return ctx
 
     async def _fetch_prometheus(
-        self, service: str, abs_window: tuple[float, float] | None
+        self, alert: GrafanaAlert, abs_window: tuple[float, float] | None
     ) -> tuple[dict, int]:
-        params = {
+        """Query Prometheus with service-scoped PromQL, fall back to:
+          1) the rule's own PromQL expression (from annotations.expr) — authoritative,
+          2) an instance-scoped query (useful for node-level alerts), if we have one.
+
+        The primary `{job=~".*<service>.*"}` query matches nothing for service
+        labels like `k3s-node` or `monitoring` since those aren't job values —
+        that's the case that previously produced "insufficient data" RCAs.
+        """
+        service = alert.service
+        primary = {
             "promql": f'{{job=~".*{service}.*"}}',
             "step": "60s",
         }
         if abs_window:
-            # Prometheus accepts epoch seconds as a float-string.
-            params["start"] = f"{abs_window[0]:.3f}"
-            params["end"] = f"{abs_window[1]:.3f}"
+            primary["start"] = f"{abs_window[0]:.3f}"
+            primary["end"] = f"{abs_window[1]:.3f}"
         else:
-            params["start"] = f"{settings.prometheus_range_minutes}m"
-            params["end"] = "now"
-        return await self._mcp_call(
+            primary["start"] = f"{settings.prometheus_range_minutes}m"
+            primary["end"] = "now"
+
+        data, ms = await self._mcp_call(
             server="prometheus",
             url=f"{settings.prometheus_mcp_url}/tools/query_range",
-            params=params,
+            params=primary,
         )
 
+        if _prom_result_empty(data):
+            # Try the rule's own PromQL first — it's exactly what Grafana
+            # evaluated, so we know it returns a value when the alert fires.
+            fallback_promql = alert.annotations.get("expr", "").strip()
+            if not fallback_promql and alert.instance and alert.instance != "unknown":
+                # Instance-scoped fallback for node-level alerts that don't carry
+                # an `expr` annotation yet.
+                fallback_promql = f'{{instance="{alert.instance}"}}'
+            if fallback_promql:
+                fb_params = dict(primary, promql=fallback_promql)
+                logger.info(
+                    "Prometheus primary empty for service=%s — falling back to %r",
+                    service, fallback_promql[:80],
+                )
+                fb_data, fb_ms = await self._mcp_call(
+                    server="prometheus",
+                    url=f"{settings.prometheus_mcp_url}/tools/query_range",
+                    params=fb_params,
+                )
+                if not _prom_result_empty(fb_data):
+                    return fb_data, ms + fb_ms
+                # Fallback also empty — return primary (the LLM prompt will
+                # note the miss rather than hallucinate).
+        return data, ms
+
     async def _fetch_loki(
-        self, service: str, abs_window: tuple[float, float] | None
+        self, alert: GrafanaAlert, abs_window: tuple[float, float] | None
     ) -> tuple[list[str], int]:
-        params = {
+        """Query Loki with service-scoped logs, fall back to any-service logs
+        in a short window. Node-level alerts (service=k3s-node etc.) have no
+        service-scoped log stream so the fallback is the only way to see
+        anything useful.
+        """
+        service = alert.service
+        primary = {
             "logql": f'{{service_name="{service}"}}',
             "limit": settings.loki_log_limit,
         }
         if abs_window:
-            # Loki wants nanoseconds as an integer string.
-            params["start"] = str(int(abs_window[0] * 1_000_000_000))
-            params["end"] = str(int(abs_window[1] * 1_000_000_000))
+            primary["start"] = str(int(abs_window[0] * 1_000_000_000))
+            primary["end"] = str(int(abs_window[1] * 1_000_000_000))
         else:
-            params["start"] = f"{settings.prometheus_range_minutes}m"
-            params["end"] = "now"
+            primary["start"] = f"{settings.prometheus_range_minutes}m"
+            primary["end"] = "now"
+
         data, ms = await self._mcp_call(
             server="loki",
             url=f"{settings.loki_mcp_url}/tools/query_logs",
-            params=params,
+            params=primary,
         )
         lines = data if isinstance(data, list) else data.get("lines", [])
+
+        if not lines:
+            # Fallback: last 2min of any logs, smaller limit so we don't blow
+            # the LLM context. Won't help latency alerts (too noisy) but very
+            # useful for node-level alerts + data-sanity when a shipper is down.
+            fb_params = dict(primary)
+            fb_params["logql"] = '{service_name=~".+"}'
+            fb_params["limit"] = min(settings.loki_log_limit, 50)
+            logger.info(
+                "Loki primary empty for service=%s — falling back to any-service (limit=%d)",
+                service, fb_params["limit"],
+            )
+            fb_data, fb_ms = await self._mcp_call(
+                server="loki",
+                url=f"{settings.loki_mcp_url}/tools/query_logs",
+                params=fb_params,
+            )
+            fb_lines = fb_data if isinstance(fb_data, list) else fb_data.get("lines", [])
+            if fb_lines:
+                return fb_lines, ms + fb_ms
         return lines, ms
 
     async def _fetch_jaeger(
-        self, service: str, abs_window: tuple[float, float] | None
+        self, alert: GrafanaAlert, abs_window: tuple[float, float] | None
     ) -> tuple[list[dict], int]:
+        """Query Jaeger for traces. For node-level alerts (service=k3s-node,
+        monitoring, loki, etc.) there are no traces — skip the call entirely
+        to avoid a 500 ms wasted round-trip that always returns empty.
+        """
+        service = alert.service
+        # Services that don't emit traces. Update if new traced services are added.
+        TRACED = {"spring-boot", "kong", "otel-collector"}
+        if service not in TRACED:
+            return [], 0
+
         params = {
             "service": service,
             "limit": settings.jaeger_trace_limit,
         }
         if abs_window:
-            # Jaeger wants microseconds as an integer string.
             params["start"] = str(int(abs_window[0] * 1_000_000))
             params["end"] = str(int(abs_window[1] * 1_000_000))
         else:

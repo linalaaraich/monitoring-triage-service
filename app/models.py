@@ -136,6 +136,11 @@ class RCARecord(BaseModel):
     action_taken: str = ""
     related_alerts: Optional[str] = None  # JSON string
     investigation_duration_ms: int = 0
+    # Quality of the RCA text — `actionable` if the LLM named a specific
+    # cause / mechanism, `data_starved` if the RCA just says "insufficient
+    # data" / "no recent logs" type hedges. Post-hoc classified, fed into
+    # future prompts so the LLM sees its past hedges and does better next time.
+    rca_quality: Optional[str] = None  # "actionable" | "data_starved" | None (not classified)
 
 
 # --- Health ---

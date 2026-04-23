@@ -24,12 +24,17 @@ SYSTEM_PROMPT = """You are an expert SRE assistant analyzing infrastructure aler
 
 Your job:
 1. Analyze the alert and the pre-gathered context (metrics, logs, traces) provided below.
-2. Use the MCP tools available to gather additional data if needed.
-3. Always check all three pillars (metrics, logs, traces) within the alert time window before reaching a verdict.
-4. Determine if the alert represents a real issue (ESCALATE), noise (DISMISS), or if you cannot determine with confidence (INCONCLUSIVE).
-5. If ESCALATE: provide a root cause analysis, supporting evidence, and suggested remediation.
-6. If DISMISS: explain why this is not actionable.
-7. If INCONCLUSIVE: explain what additional information would be needed.
+2. Always check all three pillars (metrics, logs, traces) within the alert time window before reaching a verdict.
+3. Determine if the alert represents a real issue (ESCALATE), noise (DISMISS), or if you cannot determine with confidence (INCONCLUSIVE).
+4. If ESCALATE: provide a root cause analysis, supporting evidence, and suggested remediation.
+5. If DISMISS: explain why this is not actionable.
+6. If INCONCLUSIVE: explain what additional information would be needed.
+
+CRITICAL output quality rules (must follow):
+A. The alert itself ALWAYS carries useful signal: a PromQL expression, a current observed value, and a time window. Always start your RCA by restating the rule's PromQL, the observed value, and whether the value is materially above or below the threshold. This is data — treat it as such.
+B. If any pre-gathered pillar (metrics/logs/traces) is empty, name WHICH pillar returned nothing and WHY that might be (e.g. "Loki returned 0 lines for service=X — possible causes: service not emitting logs, wrong label, shipper down"). Never write the phrase "insufficient data" as a standalone conclusion — always pair it with a named missing source and a concrete hypothesis to test next.
+C. If the "Prior decisions for this alert" section below shows past decisions that hedged (tagged data_starved), DO NOT repeat the same hedge. Use the available signal — even if thin — to propose a specific hypothesis, and suggest concrete remediation the human can check.
+D. Prefer ESCALATE over INCONCLUSIVE when you can at least name a probable cause. INCONCLUSIVE should be rare and always accompanied by a specific remediation: what query to run, what label to add, which shipper to restart.
 
 You MUST respond with ONLY valid JSON matching this exact schema:
 {
@@ -37,21 +42,32 @@ You MUST respond with ONLY valid JSON matching this exact schema:
   "severity": "critical" | "warning" | "info",
   "confidence": <float between 0.0 and 1.0>,
   "reason": "<one-line summary of why this decision was made>",
-  "rca": "<detailed root cause analysis (2-5 sentences)>",
+  "rca": "<detailed root cause analysis (2-5 sentences), always citing the observed metric value from the alert>",
   "anomaly_summary": "<summary of Drain3 anomaly findings>",
   "suggested_actions": ["<action 1>", "<action 2>"],
   "evidence": ["<metric/log/trace evidence used>"]
-}
+}"""
 
-Field descriptions:
-- decision: ESCALATE (real issue requiring human attention), DISMISS (noise/not actionable), or INCONCLUSIVE (cannot determine)
-- severity: the assessed severity level
-- confidence: your confidence in the decision from 0.0 (no confidence) to 1.0 (certain)
-- reason: brief one-line explanation
-- rca: root cause analysis in 2-5 sentences; if DISMISS, explain why it's noise
-- anomaly_summary: summary of any log anomalies detected by Drain3
-- suggested_actions: list of recommended remediation steps
-- evidence: list of specific metrics, log lines, or trace data supporting the decision"""
+
+def _format_observed_value(values: dict) -> str:
+    """Render the Grafana webhook's `values` dict for inclusion in the LLM prompt.
+
+    Grafana sends values keyed by refId (e.g. {"B": 82.3} for a rule with a
+    single 'reduce' step at refId B). Multi-step rules emit multiple keys —
+    we want to show them all so the LLM sees both raw + derived values.
+    Returns an empty string if there's nothing useful in the dict.
+    """
+    if not values:
+        return ""
+    # Prefer the most "downstream" ref ID (alphabetically last — B > A, C > B)
+    # as the primary, then include the rest as supporting.
+    items = sorted(values.items())
+    primary_ref, primary_val = items[-1]
+    out = [f"{primary_val} (refId={primary_ref})"]
+    if len(items) > 1:
+        rest = ", ".join(f"{k}={v}" for k, v in items[:-1])
+        out.append(f"[other refIds: {rest}]")
+    return " ".join(out)
 
 
 def _build_fallback_decision() -> LLMDecision:
@@ -156,38 +172,58 @@ class LLMClient:
         drain_summary: str,
         history_context: str,
     ) -> list[dict]:
+        rule_expr = alert.annotations.get("expr", "") or "(rule expression not provided — ask the alert owner to add annotations.expr)"
+        observed_value = _format_observed_value(alert.values)
+        signal = alert.labels.get("signal", "unknown")
+        component = alert.labels.get("component", "unknown")
+        timeframe = alert.labels.get("timeframe", "10m")
+
+        # If the webhook came in without any observed value, tell the LLM that
+        # explicitly — don't let it pretend nothing happened. Grafana usually
+        # fills `values` with {"<refId>": <number>} when the rule fires.
+        value_line = f"{observed_value}" if observed_value else "(no observed value in webhook payload)"
+
         user_content = f"""## Alert Details
 - **Name:** {alert.alertname}
 - **Severity:** {alert.severity}
 - **Service:** {alert.service}
+- **Component:** {component}
+- **Primary signal:** {signal}  (prioritise the matching pillar when investigating)
 - **Instance:** {alert.instance}
 - **Status:** {alert.status}
 - **Started:** {alert.startsAt}
+- **Lookback suggested:** {timeframe}
 - **Summary:** {alert.annotations.get("summary", "N/A")}
 - **Description:** {alert.annotations.get("description", "N/A")}
+
+## Rule fired because of THIS metric
+- **PromQL:** `{rule_expr}`
+- **Observed value at fire time:** {value_line}
+
+The observed value above is ground-truth signal from Prometheus at the moment the rule's threshold was crossed. Cite this value explicitly in your RCA — do not say "insufficient data" if the alert itself carries a value.
 
 ## Pre-Gathered Context
 
 ### Metrics (Prometheus, last {settings.prometheus_range_minutes}min)
-{json.dumps(context.metrics, indent=2) if context.metrics else "[Prometheus] unavailable"}
+{json.dumps(context.metrics, indent=2) if context.metrics else "[Prometheus] returned no series for service=" + alert.service + " — rare-but-possible, treat as MCP miss not app silence. The alert value above is still authoritative."}
 
 ### Logs (Loki, last {settings.loki_log_limit} lines, Drain3-annotated)
-{chr(10).join(context.annotated_logs) if context.annotated_logs else "[Loki] unavailable"}
+{chr(10).join(context.annotated_logs) if context.annotated_logs else "[Loki] returned 0 lines for service=" + alert.service + ". If this is a node-level alert (service=k3s-node etc.), no service-scoped logs are expected — the host doesn't log through the app pipeline. Reason about the metric alone."}
 
 ### {drain_summary}
 
 ### Traces (Jaeger, last {settings.jaeger_trace_limit} traces)
-{json.dumps(context.traces, indent=2, default=str) if context.traces else "[Jaeger] unavailable"}
+{json.dumps(context.traces, indent=2, default=str) if context.traces else "[Jaeger] returned 0 traces for service=" + alert.service + ". Likely normal for infrastructure alerts; a traced request-path would have surfaced a spring-boot/kong service here."}
 
 ### Context Gathering Stats
 - Sources available: {context.sources_available}/3
 - Prometheus: {context.prometheus_ms}ms, Loki: {context.loki_ms}ms, Jaeger: {context.jaeger_ms}ms
 {chr(10).join(context.errors) if context.errors else ""}
 
-## RCA History
+## Prior decisions for this alert
 {history_context if history_context else "No prior RCA records for this alert."}
 
-Analyze this alert using the context above. Respond with ONLY valid JSON."""
+Analyze this alert using the context above. Respond with ONLY valid JSON. Start your RCA by restating the observed value and PromQL."""
 
         return [
             {"role": "system", "content": SYSTEM_PROMPT},

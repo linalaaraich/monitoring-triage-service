@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     triage_suppression_enabled: bool = True
     triage_history_lookback_minutes: int = 15
 
+    # If the first LLM pass produces a data-starved RCA (hedges like "insufficient
+    # data" without naming a cause), retry once with an explicit anti-hedge prompt.
+    # Adds up to ~25 s to the pipeline on cold inferences; disable if latency
+    # budget is tight or Ollama is on a small GPU.
+    triage_data_starved_retry_enabled: bool = True
+
     # RCA history
     rca_db_path: str = "/var/lib/triage-service/rca_history.db"
 
