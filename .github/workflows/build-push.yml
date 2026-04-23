@@ -1,0 +1,92 @@
+name: build-push
+
+# Build the triage-service container image and publish it to GitHub Container
+# Registry (ghcr.io) on every push to main, plus on-demand via workflow_dispatch.
+#
+# GHCR is free for public repos with no quota meaningful to this project, and
+# GITHUB_TOKEN can push to it without any extra secrets — this is the cheapest
+# viable pipeline. Consumers pull with:
+#
+#   docker pull ghcr.io/linalaaraich/monitoring-triage-service:main
+#
+# Tags produced per run:
+#   - main                 (moving tag, latest commit on main)
+#   - sha-<short-sha>      (immutable, for reproducible deploys)
+#   - latest               (only on main)
+#
+# Build cache is backed by GHA's type=gha driver, so subsequent builds only
+# rebuild the layers that actually changed (Python deps layer is reused when
+# requirements.txt is untouched — typical build ~60s, ~15s on a cache hit).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Only rebuild when code, deps, Dockerfile, or the workflow itself change.
+      # Docs-only commits skip CI.
+      - "app/**"
+      - "requirements.txt"
+      - "Dockerfile"
+      - "drain3.ini"
+      - ".github/workflows/build-push.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/monitoring-triage-service
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          {
+            echo "### Pushed to GHCR"
+            echo ""
+            echo "\`\`\`"
+            echo "${{ steps.meta.outputs.tags }}"
+            echo "\`\`\`"
+            echo ""
+            echo "Pull locally on the laptop with:"
+            echo ""
+            echo "\`\`\`bash"
+            echo "docker pull ghcr.io/${{ github.repository_owner }}/monitoring-triage-service:main"
+            echo "\`\`\`"
+          } >> $GITHUB_STEP_SUMMARY

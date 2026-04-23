@@ -312,6 +312,62 @@ _DASHBOARD_CSS = """
     font-style: italic; font-size: 13px;
   }
 
+  .drain-card {
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--info);
+    border-radius: 12px;
+    padding: 16px 20px 18px;
+    margin-bottom: 20px;
+  }
+  .drain-card .drain-header {
+    display: flex; align-items: baseline; gap: 12px;
+    margin-bottom: 14px;
+  }
+  .drain-card .drain-header .eyebrow {
+    font-size: 10.5px; font-weight: 700; letter-spacing: 1.5px;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .drain-card .drain-header h2 {
+    font-size: 15px; font-weight: 700; color: var(--ink);
+    letter-spacing: -.2px;
+  }
+  .drain-card .drain-header .anomaly-rate {
+    margin-left: auto;
+    font-size: 12px; color: var(--muted);
+  }
+  .drain-card .drain-header .anomaly-rate strong { color: var(--info); font-weight: 700; }
+  .drain-tiles {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px; margin-bottom: 14px;
+  }
+  .drain-tile {
+    display: flex; flex-direction: column; gap: 3px;
+    padding: 10px 14px;
+    background: var(--card-alt);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+  }
+  .drain-tile .num { font-size: 20px; font-weight: 700; color: var(--ink); letter-spacing: -.2px; }
+  .drain-tile .lbl {
+    font-size: 10.5px; font-weight: 600; letter-spacing: .4px;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .drain-patterns .lbl {
+    font-size: 10.5px; font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .drain-patterns ol {
+    padding-left: 22px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px; color: var(--ink-soft);
+  }
+  .drain-patterns ol li { padding: 2px 0; word-break: break-word; }
+  .drain-patterns .none {
+    color: var(--muted); font-style: italic; font-size: 12px;
+  }
+
   @media (max-width: 700px) {
     body { padding: 18px; }
     .toolbar input[type=text] { min-width: 0; width: 100%; }
@@ -362,8 +418,33 @@ _DASHBOARD_JS = """
     var f = document.getElementById('filter');
     if (f) f.addEventListener('input', applyFilter);
     applyFilter();
+    // Auto-refresh is on by default; honour the checkbox's initial state.
+    toggleRefresh();
   });
 """
+
+
+def _fmt_duration_ms(ms: int | None) -> str:
+    """Render an ms duration as 'Xm Ys' / 'Xs' / 'Xms' depending on scale.
+
+    Anything under 1s stays in ms (sub-second resolution matters for MCP latency);
+    anything between 1s and 60s shows '12.3 s' with one decimal; anything over a
+    minute rolls up to 'N min M s' (whole seconds), dropping the trailing ' 0 s'
+    when the total happens to land on a whole-minute mark.
+    """
+    if ms is None or ms < 0:
+        return "—"
+    if ms < 1000:
+        return f"{ms} ms"
+    total_s = ms / 1000
+    if total_s < 60:
+        return f"{total_s:.1f} s"
+    m = int(total_s // 60)
+    s = int(round(total_s - m * 60))
+    if s == 60:
+        m += 1
+        s = 0
+    return f"{m} min {s} s" if s else f"{m} min"
 
 
 def _verdict_pill(verdict: str | None, action: str | None) -> str:
@@ -383,6 +464,47 @@ def _source_tag(source: str) -> str:
     s = (source or '').lower()
     cls = 'tag-grafana' if s == 'grafana' else 'tag-drain3' if s == 'drain3' else 'tag-default'
     return f'<span class="tag {cls}">{_html.escape(source or "—")}</span>'
+
+
+def _render_drain3_panel(stats: dict) -> str:
+    """Surface DrainAnalyzer.get_stats() as a sage-styled card on /dashboard.
+
+    Tiles: templates learned, lines processed, anomalies flagged. Header carries
+    the current anomaly rate; bottom lists the five most recent templates so
+    operators can see at a glance what Drain3 is actually pattern-matching.
+    """
+    total_clusters = int(stats.get('total_clusters') or 0)
+    lines = int(stats.get('total_lines_processed') or 0)
+    anomalies = int(stats.get('total_anomalies') or 0)
+    rate_raw = float(stats.get('recent_anomaly_rate') or 0.0)
+    rate_pct = f"{rate_raw * 100:.2f}%"
+    patterns = stats.get('top_new_patterns') or []
+
+    if patterns:
+        pattern_html = '<ol>' + ''.join(
+            f'<li>{_html.escape(str(p))}</li>' for p in patterns[:5]
+        ) + '</ol>'
+    else:
+        pattern_html = '<div class="none">No templates learned yet — waiting on log ingestion.</div>'
+
+    return (
+        '<div class="drain-card">'
+        '  <div class="drain-header">'
+        '    <div class="eyebrow">Log template analysis</div>'
+        '    <h2>Drain3 state</h2>'
+        f'    <div class="anomaly-rate">Anomaly rate <strong>{rate_pct}</strong></div>'
+        '  </div>'
+        '  <div class="drain-tiles">'
+        f'    <div class="drain-tile"><div class="num">{total_clusters}</div><div class="lbl">Templates learned</div></div>'
+        f'    <div class="drain-tile"><div class="num">{lines:,}</div><div class="lbl">Lines processed</div></div>'
+        f'    <div class="drain-tile"><div class="num">{anomalies:,}</div><div class="lbl">Anomalies flagged</div></div>'
+        '  </div>'
+        '  <div class="drain-patterns">'
+        '    <div class="lbl">Most recent templates</div>'
+        f'    {pattern_html}'
+        '  </div>'
+        '</div>'
+    )
 
 
 def _render_detail_panel(r: dict) -> str:
@@ -409,7 +531,7 @@ def _render_detail_panel(r: dict) -> str:
         f'    <div class="m"><div class="lbl">Alert fingerprint</div><div class="val">{fingerprint}</div></div>'
         f'    <div class="m"><div class="lbl">Triage path</div><div class="val normal">{triage}</div></div>'
         f'    <div class="m"><div class="lbl">LLM confidence</div><div class="val normal">{confidence}</div></div>'
-        f'    <div class="m"><div class="lbl">Action</div><div class="val normal">{action} · {duration}ms</div></div>'
+        f'    <div class="m"><div class="lbl">Action</div><div class="val normal">{action} · {_fmt_duration_ms(duration)}</div></div>'
         f'  </div>'
         f'  <div class="section">'
         f'    <h3>Root-cause analysis</h3>'
@@ -426,6 +548,7 @@ def _render_detail_panel(r: dict) -> str:
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
     rows = await _store.get_decisions(limit=100)
+    drain_stats = _drain.get_stats() if _drain is not None else {}
 
     total = len(rows)
     escalated = sum(1 for r in rows if r.get('action_taken') == 'emailed')
@@ -461,7 +584,7 @@ async def dashboard():
             f'  <td><span class="sev sev-{_html.escape(severity)}">{_html.escape(severity or "—")}</span></td>'
             f'  <td>{_verdict_pill(verdict, action)}</td>'
             f'  <td class="action action-{_html.escape(action)}">{_html.escape(action)}</td>'
-            f'  <td class="mono">{duration} ms</td>'
+            f'  <td class="mono">{_fmt_duration_ms(duration)}</td>'
             f'</tr>'
             f'<tr class="detail" id="detail-{did}"><td colspan="9">{_render_detail_panel(r)}</td></tr>'
         )
@@ -488,11 +611,12 @@ async def dashboard():
         f'    <div class="stat t-suppress"><div class="num">{suppressed_pre}</div><div class="lbl">Pre-LLM suppressed</div></div>'
         f'    <div class="stat t-timeout"><div class="num">{timed_out}</div><div class="lbl">Timed out</div></div>'
         f'  </div>'
+        f'  {_render_drain3_panel(drain_stats)}'
         f'  <div class="toolbar">'
         f'    <input id="filter" type="text" placeholder="Filter by alert name, service, verdict, or RCA text" autocomplete="off" />'
         f'    <span class="hint" id="match-count"></span>'
         f'    <span class="spacer"></span>'
-        f'    <label class="refresh"><input id="refresh" type="checkbox" onchange="toggleRefresh()" /> Auto-refresh every 30 seconds</label>'
+        f'    <label class="refresh"><input id="refresh" type="checkbox" checked onchange="toggleRefresh()" /> Auto-refresh every 30 seconds</label>'
         f'  </div>'
         f'  <div class="table-card">'
         f'    <table>'
