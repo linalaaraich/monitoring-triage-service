@@ -207,8 +207,8 @@ The observed value above is ground-truth signal from Prometheus at the moment th
 ### Metrics (Prometheus, last {settings.prometheus_range_minutes}min)
 {json.dumps(context.metrics, indent=2) if context.metrics else "[Prometheus] returned no series for service=" + alert.service + " — rare-but-possible, treat as MCP miss not app silence. The alert value above is still authoritative."}
 
-### Logs (Loki, last {settings.loki_log_limit} lines, Drain3-annotated)
-{chr(10).join(context.annotated_logs) if context.annotated_logs else "[Loki] returned 0 lines for service=" + alert.service + ". If this is a node-level alert (service=k3s-node etc.), no service-scoped logs are expected — the host doesn't log through the app pipeline. Reason about the metric alone."}
+### Logs ({"⚠ AMBIENT FALLBACK — NOT ALERT-SPECIFIC" if context.loki_is_fallback else "Loki, service-scoped, Drain3-annotated"}, last {settings.loki_log_limit} lines)
+{("AMBIENT CONTEXT ONLY — these lines are from ALL services in the recent window, NOT filtered to the alerting service. They are background noise to help you judge whether the system is generally healthy; do NOT cite specific lines or counts here as evidence of the alert's root cause, and do NOT treat the line-count as the alert's observed metric (the Observed value above is the only authoritative signal).\n\n" + chr(10).join(context.annotated_logs)) if (context.annotated_logs and context.loki_is_fallback) else chr(10).join(context.annotated_logs) if context.annotated_logs else "[Loki] returned 0 lines for service=" + alert.service + ". If this is a node-level alert (service=k3s-node etc.), no service-scoped logs are expected — the host doesn't log through the app pipeline. Reason about the metric alone, using the Observed value above."}
 
 ### {drain_summary}
 

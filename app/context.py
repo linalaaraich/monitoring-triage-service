@@ -133,7 +133,7 @@ class ContextGatherer:
             errors.append(f"[Loki] unavailable: {results[1]}")
             ctx.loki_ms = settings.context_timeout * 1000
         else:
-            ctx.logs, ctx.loki_ms = results[1]
+            ctx.logs, ctx.loki_ms, ctx.loki_is_fallback = results[1]
             ctx.sources_available += 1
 
         if isinstance(results[2], Exception):
@@ -217,13 +217,22 @@ class ContextGatherer:
 
     async def _fetch_loki(
         self, alert: GrafanaAlert, abs_window: tuple[float, float] | None
-    ) -> tuple[list[str], int]:
-        """Query Loki with service-scoped logs, fall back to any-service logs
-        in a short window. Node-level alerts (service=k3s-node etc.) have no
-        service-scoped log stream so the fallback is the only way to see
-        anything useful.
+    ) -> tuple[list[str], int, bool]:
+        """Query Loki with service-scoped logs, with a narrow fallback only
+        when the alert is genuinely about logs.
+
+        Returns (lines, duration_ms, is_fallback). The caller uses `is_fallback`
+        to label the prompt section — ambient logs get flagged as "NOT alert-
+        specific" so the LLM treats them as background, not evidence. Earlier
+        iterations fell back unconditionally, which caused a small model to
+        misread any-service log volume as the alert's observed metric.
+
+        Fallback is gated on signal=log (alert is specifically about log
+        flow, e.g. LokiIngestionRateLow) — metric-signal alerts don't benefit
+        from random ambient log lines and get hurt by the noise.
         """
         service = alert.service
+        signal = alert.labels.get("signal", "")
         primary = {
             "logql": f'{{service_name="{service}"}}',
             "limit": settings.loki_log_limit,
@@ -242,15 +251,14 @@ class ContextGatherer:
         )
         lines = data if isinstance(data, list) else data.get("lines", [])
 
-        if not lines:
-            # Fallback: last 2min of any logs, smaller limit so we don't blow
-            # the LLM context. Won't help latency alerts (too noisy) but very
-            # useful for node-level alerts + data-sanity when a shipper is down.
+        if not lines and signal == "log":
+            # Only log-signal alerts benefit from ambient fallback — e.g.
+            # LokiIngestionRateLow where "any logs at all?" is the question.
             fb_params = dict(primary)
             fb_params["logql"] = '{service_name=~".+"}'
             fb_params["limit"] = min(settings.loki_log_limit, 50)
             logger.info(
-                "Loki primary empty for service=%s — falling back to any-service (limit=%d)",
+                "Loki primary empty for signal=log service=%s — falling back to any-service (limit=%d)",
                 service, fb_params["limit"],
             )
             fb_data, fb_ms = await self._mcp_call(
@@ -260,8 +268,8 @@ class ContextGatherer:
             )
             fb_lines = fb_data if isinstance(fb_data, list) else fb_data.get("lines", [])
             if fb_lines:
-                return fb_lines, ms + fb_ms
-        return lines, ms
+                return fb_lines, ms + fb_ms, True
+        return lines, ms, False
 
     async def _fetch_jaeger(
         self, alert: GrafanaAlert, abs_window: tuple[float, float] | None

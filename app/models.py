@@ -116,6 +116,11 @@ class GatheredContext(BaseModel):
     total_ms: int = 0
     sources_available: int = 0
     errors: list[str] = Field(default_factory=list)
+    # True when the Loki query fell back to any-service lines (not scoped
+    # to the alert). Used by the LLM prompt builder to flag the logs section
+    # as ambient context — NOT alert-specific evidence — so small models
+    # don't misread log-volume as the alert's observed metric.
+    loki_is_fallback: bool = False
 
 
 # --- RCA history record ---
