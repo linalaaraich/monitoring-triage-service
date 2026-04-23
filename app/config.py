@@ -73,6 +73,40 @@ class Settings(BaseSettings):
     jaeger_url: str = "http://52.202.21.192:16686"
     loki_url: str = "http://52.202.21.192:3100"
 
+    # IP-to-hostname map for turning raw alert instances like "10.0.1.194:9100"
+    # into "observability-rca-k3s / node-exporter" in emails + dashboard.
+    # Keys are IPs (no port); values are friendly hostnames. Port→role
+    # resolution is a separate map below so we can combine into one display
+    # string. Override via INSTANCE_HOSTS env (JSON) when the layout shifts.
+    instance_hosts: dict[str, str] = {
+        "10.0.1.68": "observability-rca-monitoring",
+        "10.0.1.194": "observability-rca-k3s",
+        "127.0.0.1": "localhost",
+    }
+    instance_ports: dict[str, str] = {
+        "9100": "node-exporter",
+        "8080": "spring-boot",
+        "8000": "kong",
+        "8001": "kong-admin",
+        "8081": "cadvisor",
+        "3000": "grafana",
+        "3100": "loki",
+        "9090": "prometheus",
+        "9093": "alertmanager",
+        "16686": "jaeger-ui",
+        "8888": "otel-collector",
+        "4317": "otel-otlp-grpc",
+        "4318": "otel-otlp-http",
+        "6443": "k3s-api",
+        "8090": "triage-service",
+        "8091": "mcp-prometheus",
+        "8092": "mcp-loki",
+        "8093": "mcp-jaeger",
+        "8094": "mcp-drain3",
+        "8095": "mcp-rca-history",
+        "11434": "ollama",
+    }
+
     model_config = {"env_prefix": "", "case_sensitive": False}
 
 

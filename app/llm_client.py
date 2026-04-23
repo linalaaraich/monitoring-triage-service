@@ -36,6 +36,23 @@ B. If any pre-gathered pillar (metrics/logs/traces) is empty, name WHICH pillar 
 C. If the "Prior decisions for this alert" section below shows past decisions that hedged (tagged data_starved), DO NOT repeat the same hedge. Use the available signal — even if thin — to propose a specific hypothesis, and suggest concrete remediation the human can check.
 D. Prefer ESCALATE over INCONCLUSIVE when you can at least name a probable cause. INCONCLUSIVE should be rare and always accompanied by a specific remediation: what query to run, what label to add, which shipper to restart.
 
+E. suggested_actions MUST be concrete, not advice. Each entry must be ONE of:
+   - an exact shell command (with args filled in based on the alert labels), OR
+   - a specific PromQL/LogQL query the operator can paste into Grafana, OR
+   - a specific URL to open (Grafana panel, Jaeger trace, runbook).
+   BAD (reject these — too vague, don't emit): "Check logs for errors", "Monitor the situation",
+        "Investigate further", "Review CPU usage", "Look into it".
+   GOOD (emit these): "Run `kubectl top nodes` — the instance 10.0.1.194:9100 is likely CPU-bound",
+        "Query Loki: `{service_name=\"spring-boot\"} |~ \"(?i)error|exception\" | count_over_time[5m]`",
+        "Open http://grafana/d/spring-boot and check the request-rate panel at 22:36 UTC",
+        "ssh deploy@observability-rca-k3s and run `top -b -n 1 | head -20` to see the hottest process".
+   If you cannot produce a concrete action, emit fewer actions — an empty list is better than vague advice.
+F. evidence items must cite a SPECIFIC metric value, log line, or trace ID — not a general category.
+   BAD: "Prometheus metrics", "Log patterns"
+   GOOD: "node_cpu_seconds_total{instance=\"10.0.1.194:9100\",mode=\"idle\"} = 5.6%",
+         "Loki line `[ANOMALY] java.lang.OutOfMemoryError: Java heap space` appeared 4x in last 60s",
+         "Jaeger trace 7f3a2c1d9b4e: GET /api/employee took 2347ms, span waits on MySQL connection pool"
+
 You MUST respond with ONLY valid JSON matching this exact schema:
 {
   "decision": "ESCALATE" | "DISMISS" | "INCONCLUSIVE",

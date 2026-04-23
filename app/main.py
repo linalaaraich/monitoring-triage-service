@@ -413,6 +413,54 @@ _DASHBOARD_CSS = """
   .deep-chip.dc-jaeger { color: var(--sage-strong); border-color: rgba(62,125,77,.25); }
   .deep-chip.dc-jaeger:hover { background: var(--sage-soft); }
 
+  /* Detail-panel richer layout — sub-cards for observed value, actions,
+     evidence, correlated alerts, deep links. Matches email parity so the
+     UI is the "go deep" destination. */
+  .obs-card {
+    background: var(--card); border: 1px solid var(--rule);
+    border-left: 4px solid var(--info);
+    border-radius: 10px; padding: 14px 18px; margin-bottom: 14px;
+  }
+  .obs-card .obs-row { display: flex; gap: 14px; align-items: baseline; margin-bottom: 6px; }
+  .obs-card .lbl { font-size: 10.5px; font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; color: var(--muted); min-width: 140px; }
+  .obs-card .val { font-size: 20px; font-weight: 700; color: var(--ink); }
+  .obs-card .expr {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px; color: var(--ink-soft); word-break: break-all;
+    background: var(--card-alt); padding: 6px 10px; border-radius: 6px; flex: 1;
+  }
+
+  .panel-list {
+    list-style: none; padding: 0; margin: 0;
+    background: var(--card); border: 1px solid var(--rule); border-radius: 8px;
+    overflow: hidden;
+  }
+  .panel-list li {
+    padding: 9px 14px; border-bottom: 1px solid var(--rule);
+    font-size: 13px; color: var(--ink-soft); word-break: break-word;
+  }
+  .panel-list li:last-child { border-bottom: none; }
+  .panel-list li .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px;
+  }
+
+  .correlated-table { width: 100%; border-collapse: collapse; font-size: 12px; background: var(--card); border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+  .correlated-table th, .correlated-table td { padding: 7px 12px; text-align: left; border-bottom: 1px solid var(--rule); }
+  .correlated-table th { background: var(--sage-soft); font-weight: 700; font-size: 10.5px; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); }
+  .correlated-table tr:last-child td { border-bottom: none; }
+  .correlated-table td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: var(--muted); }
+
+  .panel-links { display: flex; gap: 8px; flex-wrap: wrap; }
+  .panel-link {
+    display: inline-block; padding: 6px 12px; border-radius: 6px;
+    font-size: 12px; font-weight: 600;
+    background: var(--card); border: 1px solid var(--rule); color: var(--ink-soft);
+    text-decoration: none; transition: border-color .15s, color .15s;
+  }
+  .panel-link:hover { border-color: var(--sage-strong); color: var(--sage-strong); }
+
   @media (max-width: 700px) {
     body { padding: 18px; }
     .toolbar input[type=text] { min-width: 0; width: 100%; }
@@ -602,7 +650,31 @@ def _render_drain3_panel(stats: dict) -> str:
     )
 
 
+def _instance_display_ui(instance: str | None) -> str:
+    """Same logic as notifier._instance_display but lives in main.py to avoid
+    a cross-module import for the dashboard path. Turns '10.0.1.194:9100' into
+    '10.0.1.194:9100 (observability-rca-k3s · node-exporter)'.
+    """
+    if not instance or instance == "unknown":
+        return "—"
+    host, _, port = instance.partition(":")
+    friendly = []
+    if host in settings.instance_hosts:
+        friendly.append(settings.instance_hosts[host])
+    if port in settings.instance_ports:
+        friendly.append(settings.instance_ports[port])
+    if friendly:
+        return f"{instance} ({' · '.join(friendly)})"
+    return instance
+
+
 def _render_detail_panel(r: dict) -> str:
+    """Rich expandable panel — richer than the email, by design. The UI is
+    the "go deep" destination, the email is the at-a-glance summary.
+    """
+    import json as _json
+    import urllib.parse as _urllib
+
     did = _html.escape(r.get('id') or '')
     ts_full = _html.escape(r.get('timestamp') or '')
     fingerprint = _html.escape(r.get('alert_fingerprint') or '—')
@@ -610,34 +682,135 @@ def _render_detail_panel(r: dict) -> str:
     confidence = _html.escape(str(r.get('llm_confidence') or '—'))
     action = _html.escape(r.get('action_taken') or '—')
     duration = int(r.get('investigation_duration_ms') or 0)
+    service = r.get('affected_service') or ''
+    quality = r.get('rca_quality') or '—'
 
+    # Meta-grid (top) — identity + core LLM facts.
+    meta_html = (
+        '<div class="meta-grid">'
+        f'  <div class="m"><div class="lbl">Timestamp (UTC)</div><div class="val">{ts_full}</div></div>'
+        f'  <div class="m"><div class="lbl">Decision ID</div><div class="val">{did}</div></div>'
+        f'  <div class="m"><div class="lbl">Alert fingerprint</div><div class="val">{fingerprint}</div></div>'
+        f'  <div class="m"><div class="lbl">Service</div><div class="val normal">{_html.escape(service)}</div></div>'
+        f'  <div class="m"><div class="lbl">Component / signal</div><div class="val normal">{_html.escape((r.get("alert_component") or "—"))} · {_html.escape(r.get("alert_signal") or "—")}</div></div>'
+        f'  <div class="m"><div class="lbl">Instance</div><div class="val normal">{_html.escape(_instance_display_ui(r.get("alert_instance")))}</div></div>'
+        f'  <div class="m"><div class="lbl">Triage path</div><div class="val normal">{triage}</div></div>'
+        f'  <div class="m"><div class="lbl">LLM confidence / quality</div><div class="val normal">{confidence} · {_html.escape(quality).replace("_"," ")}</div></div>'
+        f'  <div class="m"><div class="lbl">Action</div><div class="val normal">{action} · {_fmt_duration_ms(duration)}</div></div>'
+        '</div>'
+    )
+
+    # Observed value + PromQL — the lede. Mirrors the email's lede card.
+    observed = r.get('observed_value')
+    promql = r.get('promql_expr')
+    if observed or promql:
+        obs_html = (
+            '<div class="obs-card">'
+            f'  <div class="obs-row"><div class="lbl">Observed value</div><div class="val">{_html.escape(observed or "—")}</div></div>'
+            f'  <div class="obs-row"><div class="lbl">PromQL</div><div class="expr">{_html.escape(promql or "—")}</div></div>'
+            '</div>'
+        )
+    else:
+        obs_html = ''
+
+    # RCA + reasoning
     rca = _html.escape(r.get('rca_report') or '')
     reasoning = _html.escape(r.get('llm_reasoning') or '')
-    rca_cls = 'body' if rca else 'body empty'
-    reasoning_cls = 'body' if reasoning else 'body empty'
-    rca_text = rca or '(no RCA report captured — decision took the suppress or timeout path)'
-    reasoning_text = reasoning or '(no reasoning captured)'
+    rca_text = rca or '<em>(no RCA report captured — decision took the suppress or timeout path)</em>'
+    reasoning_text = reasoning or '<em>(no reasoning captured)</em>'
+
+    # Suggested actions — persisted as JSON list in new schema, fall back
+    # to omission for older rows.
+    actions_html = ''
+    try:
+        actions = _json.loads(r['suggested_actions']) if r.get('suggested_actions') else []
+    except (ValueError, TypeError):
+        actions = []
+    if actions:
+        items = ''.join(f'<li>{_html.escape(str(a))}</li>' for a in actions)
+        actions_html = (
+            '<div class="section"><h3>Suggested actions</h3>'
+            f'<ul class="panel-list">{items}</ul></div>'
+        )
+
+    # Evidence — same pattern.
+    evidence_html = ''
+    try:
+        evidence = _json.loads(r['evidence']) if r.get('evidence') else []
+    except (ValueError, TypeError):
+        evidence = []
+    if evidence:
+        items = ''.join(f'<li>{_html.escape(str(e))}</li>' for e in evidence)
+        evidence_html = (
+            '<div class="section"><h3>Evidence cited</h3>'
+            f'<ul class="panel-list">{items}</ul></div>'
+        )
+
+    # Anomaly summary (if the LLM or Drain3 noted one).
+    anomaly = r.get('anomaly_summary')
+    anomaly_html = ''
+    if anomaly:
+        anomaly_html = (
+            '<div class="section"><h3>Drain3 anomaly summary</h3>'
+            f'<div class="body">{_html.escape(anomaly)}</div></div>'
+        )
+
+    # Correlated alerts (within ±5 min of this one).
+    correlated_html = ''
+    try:
+        correlated = _json.loads(r['correlated_alerts']) if r.get('correlated_alerts') else []
+    except (ValueError, TypeError):
+        correlated = []
+    if correlated:
+        rows = ''.join(
+            f'<tr><td class="mono">{_html.escape((c.get("timestamp") or "")[:19])}</td>'
+            f'<td>{_html.escape(c.get("alert_name") or "?")}</td>'
+            f'<td>{_html.escape(c.get("affected_service") or "?")}</td>'
+            f'<td>{_html.escape(c.get("llm_verdict") or "—")}</td>'
+            f'<td>{_html.escape(c.get("rca_quality") or "—")}</td></tr>'
+            for c in correlated[:15]
+        )
+        correlated_html = (
+            '<div class="section">'
+            f'<h3>Correlated alerts <span style="font-weight:400;color:var(--muted);font-size:12px">(within ±5 min)</span></h3>'
+            '<table class="correlated-table"><thead><tr>'
+            '<th>When (UTC)</th><th>Alert</th><th>Service</th><th>Verdict</th><th>Quality</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table></div>'
+        )
+
+    # Deep links into Grafana / Jaeger / Loki scoped to this service.
+    links = []
+    if service and service != "unknown":
+        logql_enc = _urllib.quote(f'{{service_name="{service}"}}')
+        links.append(
+            (f'{settings.grafana_url}/explore?left=%7B%22datasource%22:%22loki%22,'
+             f'%22queries%22:%5B%7B%22expr%22:%22{logql_enc}%22%7D%5D%7D',
+             f'Loki — {service} logs')
+        )
+    if service in ("spring-boot", "kong", "otel-collector"):
+        links.append(
+            (f'{settings.jaeger_url}/search?service={_urllib.quote(service)}',
+             f'Jaeger — {service} traces')
+        )
+    links.append((f'{settings.grafana_url}/alerting/list', 'Grafana — alerting list'))
+    links_html = ''.join(
+        f'<a class="panel-link" href="{url}" target="_blank" rel="noopener">{_html.escape(label)}</a>'
+        for url, label in links
+    )
+    links_block = f'<div class="section"><h3>Deep links</h3><div class="panel-links">{links_html}</div></div>'
 
     return (
-        f'<div class="panel">'
-        f'  <div class="meta-grid">'
-        f'    <div class="m"><div class="lbl">Timestamp (UTC)</div><div class="val">{ts_full}</div></div>'
-        f'    <div class="m"><div class="lbl">Decision ID</div><div class="val">{did}</div></div>'
-        f'    <div class="m"><div class="lbl">Alert fingerprint</div><div class="val">{fingerprint}</div></div>'
-        f'    <div class="m"><div class="lbl">Triage path</div><div class="val normal">{triage}</div></div>'
-        f'    <div class="m"><div class="lbl">LLM confidence</div><div class="val normal">{confidence}</div></div>'
-        f'    <div class="m"><div class="lbl">Action</div><div class="val normal">{action} · {_fmt_duration_ms(duration)}</div></div>'
-        f'    <div class="m"><div class="lbl">RCA quality</div><div class="val normal">{_html.escape(r.get("rca_quality") or "—").replace("_"," ")}</div></div>'
-        f'  </div>'
-        f'  <div class="section">'
-        f'    <h3>Root-cause analysis</h3>'
-        f'    <div class="{rca_cls}">{rca_text}</div>'
-        f'  </div>'
-        f'  <div class="section">'
-        f'    <h3>Model reasoning</h3>'
-        f'    <div class="{reasoning_cls}">{reasoning_text}</div>'
-        f'  </div>'
-        f'</div>'
+        '<div class="panel">'
+        + meta_html
+        + obs_html
+        + f'<div class="section"><h3>Root-cause analysis</h3><div class="body">{rca_text}</div></div>'
+        + actions_html
+        + evidence_html
+        + f'<div class="section"><h3>Model reasoning</h3><div class="body">{reasoning_text}</div></div>'
+        + anomaly_html
+        + correlated_html
+        + links_block
+        + '</div>'
     )
 
 

@@ -12,6 +12,26 @@ from app.models import GatheredContext, GrafanaAlert, LLMDecision, RCARecord
 logger = logging.getLogger(__name__)
 
 
+def _instance_display(instance: str | None) -> str:
+    """Render a raw alert instance ("10.0.1.194:9100") with its friendly
+    hostname + role ("observability-rca-k3s · node-exporter"), falling back
+    to the raw value when we don't have a mapping for either piece.
+    """
+    if not instance or instance == "unknown":
+        return "unknown"
+    raw = instance
+    host, _, port = instance.partition(":")
+    parts = [raw]
+    friendly = []
+    if host in settings.instance_hosts:
+        friendly.append(settings.instance_hosts[host])
+    if port in settings.instance_ports:
+        friendly.append(settings.instance_ports[port])
+    if friendly:
+        parts.append("(" + " · ".join(friendly) + ")")
+    return " ".join(parts)
+
+
 def _severity_pill_class(severity: str) -> str:
     s = (severity or "").lower()
     if s in ("critical", "high"):
@@ -393,7 +413,7 @@ class EmailNotifier:
         <tr><td class="k">Service</td><td class="v"><strong>{service_display}</strong></td></tr>
         <tr><td class="k">Component</td><td class="v">{component}</td></tr>
         <tr><td class="k">Severity</td><td class="v">{severity_upper}</td></tr>
-        <tr><td class="k">Instance</td><td class="v mono-inline">{alert.instance}</td></tr>
+        <tr><td class="k">Instance</td><td class="v">{_instance_display(alert.instance)}</td></tr>
         <tr><td class="k">Environment</td><td class="v">{env}</td></tr>
         <tr><td class="k">Fired at</td><td class="v">{alert.startsAt}</td></tr>
         <tr><td class="k">Status</td><td class="v">{alert.status}</td></tr>
@@ -468,7 +488,7 @@ Root cause:
       <tr><td class="k">Name</td><td class="v">{alert.alertname}</td></tr>
       <tr><td class="k">Service</td><td class="v">{alert.service}</td></tr>
       <tr><td class="k">Severity</td><td class="v">{alert.severity.upper()}</td></tr>
-      <tr><td class="k">Instance</td><td class="v">{alert.instance}</td></tr>
+      <tr><td class="k">Instance</td><td class="v">{_instance_display(alert.instance)}</td></tr>
       <tr><td class="k">Environment</td><td class="v">{env}</td></tr>
       <tr><td class="k">Fired at</td><td class="v">{alert.startsAt}</td></tr>
       <tr><td class="k">Summary</td><td class="v">{alert.annotations.get('summary', 'N/A')}</td></tr>

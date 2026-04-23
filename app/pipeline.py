@@ -305,7 +305,20 @@ class TriagePipeline:
             elapsed_ms,
         )
 
-        # Step 7: Build RCA record
+        # Step 7: Build RCA record. Persist the rich fields (observed value,
+        # PromQL, suggested actions, evidence, correlated alerts) so the
+        # dashboard can render them without having to re-query Grafana later.
+        import json as _json
+        # Format observed value once, reuse in both email and dashboard.
+        values = alert.values or {}
+        observed_str = ""
+        if values:
+            items = sorted(values.items())
+            primary_ref, primary_val = items[-1]
+            observed_str = f"{primary_val} (refId={primary_ref})"
+            if len(items) > 1:
+                observed_str += " [" + ", ".join(f"{k}={v}" for k, v in items[:-1]) + "]"
+
         record = RCARecord(
             alert_source=source,
             alert_name=alert.alertname,
@@ -319,7 +332,16 @@ class TriagePipeline:
             llm_reasoning=decision.reason,
             action_taken="emailed" if decision.decision == Decision.ESCALATE else "suppressed",
             investigation_duration_ms=elapsed_ms,
-            rca_quality=quality,  # pre-computed, saves store from re-running the classifier
+            rca_quality=quality,
+            alert_instance=alert.instance,
+            alert_component=alert.labels.get("component"),
+            alert_signal=alert.labels.get("signal"),
+            observed_value=observed_str or None,
+            promql_expr=alert.annotations.get("expr") or None,
+            suggested_actions=_json.dumps(decision.suggested_actions) if decision.suggested_actions else None,
+            evidence=_json.dumps(decision.evidence) if decision.evidence else None,
+            anomaly_summary=decision.anomaly_summary or (ctx.anomaly_summary if ctx else None),
+            correlated_alerts=_json.dumps(correlated) if correlated else None,
         )
 
         # Step 8: Act on decision. A notifier failure (SMTP hiccup, template

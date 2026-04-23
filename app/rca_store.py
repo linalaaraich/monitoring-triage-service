@@ -74,14 +74,30 @@ class RCAStore:
         self._db = await aiosqlite.connect(self.db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute(CREATE_TABLE)
-        # Additive migration for pre-existing databases that predate the
-        # rca_quality column. SQLite has no IF NOT EXISTS for ADD COLUMN,
-        # so we probe the schema first.
+        # Additive migrations for pre-existing databases. SQLite has no
+        # IF NOT EXISTS for ADD COLUMN so we probe the schema first. Each
+        # column here must be nullable — we never back-fill historical
+        # rows, we just let them stay NULL until they age out.
         cursor = await self._db.execute("PRAGMA table_info(rca_history)")
         cols = {row["name"] for row in await cursor.fetchall()}
-        if "rca_quality" not in cols:
-            logger.info("Migrating rca_history: adding rca_quality column")
-            await self._db.execute("ALTER TABLE rca_history ADD COLUMN rca_quality TEXT")
+        new_columns = [
+            ("rca_quality",       "TEXT"),
+            ("alert_instance",    "TEXT"),
+            ("alert_component",   "TEXT"),
+            ("alert_signal",      "TEXT"),
+            ("observed_value",    "TEXT"),
+            ("promql_expr",       "TEXT"),
+            ("suggested_actions", "TEXT"),  # JSON list
+            ("evidence",          "TEXT"),  # JSON list
+            ("anomaly_summary",   "TEXT"),
+            ("correlated_alerts", "TEXT"),  # JSON list
+        ]
+        for name, sql_type in new_columns:
+            if name not in cols:
+                logger.info("Migrating rca_history: adding column %s", name)
+                await self._db.execute(
+                    f"ALTER TABLE rca_history ADD COLUMN {name} {sql_type}"
+                )
         await self._db.commit()
         logger.info("RCA history database initialized at %s", self.db_path)
 
@@ -101,8 +117,12 @@ class RCAStore:
                (id, timestamp, alert_source, alert_name, alert_fingerprint,
                 affected_service, severity, triage_decision, llm_verdict,
                 llm_confidence, rca_report, llm_reasoning, action_taken,
-                related_alerts, investigation_duration_ms, rca_quality)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                related_alerts, investigation_duration_ms, rca_quality,
+                alert_instance, alert_component, alert_signal, observed_value,
+                promql_expr, suggested_actions, evidence, anomaly_summary,
+                correlated_alerts)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.id,
                 record.timestamp.isoformat(),
@@ -120,6 +140,15 @@ class RCAStore:
                 record.related_alerts,
                 record.investigation_duration_ms,
                 record.rca_quality,
+                record.alert_instance,
+                record.alert_component,
+                record.alert_signal,
+                record.observed_value,
+                record.promql_expr,
+                record.suggested_actions,
+                record.evidence,
+                record.anomaly_summary,
+                record.correlated_alerts,
             ),
         )
         await self._db.commit()

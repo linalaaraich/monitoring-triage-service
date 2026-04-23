@@ -147,6 +147,21 @@ class RCARecord(BaseModel):
     # future prompts so the LLM sees its past hedges and does better next time.
     rca_quality: Optional[str] = None  # "actionable" | "data_starved" | None (not classified)
 
+    # The alert's full identity at fire time — so the dashboard can show
+    # the same rich detail the email does without having to re-query Grafana.
+    alert_instance: Optional[str] = None       # raw "10.0.1.194:9100"
+    alert_component: Optional[str] = None      # "api" / "gateway" / ...
+    alert_signal: Optional[str] = None         # "metric" / "log" / "trace"
+    observed_value: Optional[str] = None       # rendered value from alert.values
+    promql_expr: Optional[str] = None          # from alert.annotations.expr
+    # LLM-produced rich fields that previously only lived in the email.
+    suggested_actions: Optional[str] = None    # JSON list of strings
+    evidence: Optional[str] = None             # JSON list of strings
+    anomaly_summary: Optional[str] = None      # Drain3 summary the LLM saw
+    # Correlated alerts found in the ±5m window. JSON list of the same
+    # shape returned by RCAStore.get_correlated_alerts.
+    correlated_alerts: Optional[str] = None
+
 
 # --- Health ---
 
