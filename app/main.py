@@ -902,7 +902,7 @@ def _render_detail_panel(r: dict) -> str:
             '<div class="section">'
             f'<h3>Correlated alerts <span style="font-weight:400;color:var(--muted);font-size:12px">(within ±5 min)</span></h3>'
             '<table class="correlated-table"><thead><tr>'
-            '<th>When (UTC)</th><th>Alert</th><th>Service</th><th>Verdict</th><th>Quality</th>'
+            '<th>When (local)</th><th>Alert</th><th>Service</th><th>Verdict</th><th>Quality</th>'
             f'</tr></thead><tbody>{rows}</tbody></table></div>'
         )
 
@@ -1012,7 +1012,7 @@ async def dashboard():
         f'  <div class="table-card">'
         f'    <table>'
         f'      <thead><tr>'
-        f'        <th></th><th>Time (UTC)</th><th>Alert</th><th>Source</th><th>Service</th>'
+        f'        <th></th><th>Time (local)</th><th>Alert</th><th>Source</th><th>Service</th>'
         f'        <th>Severity</th><th>Verdict</th><th>Action</th><th>Duration</th>'
         f'      </tr></thead>'
         f'      <tbody>{body_rows}</tbody>'
