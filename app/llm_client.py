@@ -66,23 +66,52 @@ You MUST respond with ONLY valid JSON matching this exact schema:
 }"""
 
 
+def pick_primary_value(values: dict) -> tuple[str | None, float | None]:
+    """Pick the most informative (refId, value) pair from a Grafana alert values dict.
+
+    Grafana's standard alert rule is a 3-step pipeline: A=query -> B=reduce
+    -> C=threshold. The threshold step emits a boolean (0 or 1) indicating
+    whether the condition matched — it is NOT the metric value. Naively
+    taking the alphabetically-last refId picks C, feeds "1" to the LLM,
+    and the LLM then writes RCAs like "observed value is 1, target is UP"
+    for a TargetDown alert. The actual metric value lives in the reduce
+    step (B).
+
+    Rule: if the highest-refId entry is exactly 0 or 1 AND there are other
+    entries, treat it as the threshold step and prefer the one just below
+    it. Otherwise the last entry IS the value (single-step rules exist).
+    """
+    if not values:
+        return None, None
+    items = sorted(values.items())
+    # Single entry — that IS the observed value
+    if len(items) == 1:
+        return items[0][0], items[0][1]
+    last_ref, last_val = items[-1]
+    try:
+        is_boolean_threshold = float(last_val) in (0.0, 1.0)
+    except (TypeError, ValueError):
+        is_boolean_threshold = False
+    if is_boolean_threshold:
+        # Skip the threshold step; the reduce step is the one below
+        return items[-2]
+    return last_ref, last_val
+
+
 def _format_observed_value(values: dict) -> str:
     """Render the Grafana webhook's `values` dict for inclusion in the LLM prompt.
 
-    Grafana sends values keyed by refId (e.g. {"B": 82.3} for a rule with a
-    single 'reduce' step at refId B). Multi-step rules emit multiple keys —
-    we want to show them all so the LLM sees both raw + derived values.
-    Returns an empty string if there's nothing useful in the dict.
+    Shows the primary metric value prominently and lists other refIds for
+    context. See pick_primary_value() for why we avoid the threshold step.
     """
     if not values:
         return ""
-    # Prefer the most "downstream" ref ID (alphabetically last — B > A, C > B)
-    # as the primary, then include the rest as supporting.
-    items = sorted(values.items())
-    primary_ref, primary_val = items[-1]
+    primary_ref, primary_val = pick_primary_value(values)
     out = [f"{primary_val} (refId={primary_ref})"]
-    if len(items) > 1:
-        rest = ", ".join(f"{k}={v}" for k, v in items[:-1])
+    # Show the rest for transparency (including the boolean threshold)
+    rest_items = [(k, v) for k, v in sorted(values.items()) if k != primary_ref]
+    if rest_items:
+        rest = ", ".join(f"{k}={v}" for k, v in rest_items)
         out.append(f"[other refIds: {rest}]")
     return " ".join(out)
 

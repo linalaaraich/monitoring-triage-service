@@ -60,6 +60,40 @@ async def lifespan(app: FastAPI):
     )
 
     logger.info("Triage service started — listening on :8090")
+
+    # Startup downtime backfill: if the service was down while Grafana fired
+    # alerts, pull those from Grafana's annotation API and re-enqueue them
+    # through the normal pipeline. Kicked off as a fire-and-forget task so
+    # it never blocks service readiness — if Grafana is slow, /health still
+    # responds within the k8s readiness probe window.
+    import asyncio as _asyncio
+    from app.startup_backfill import run_startup_backfill
+
+    async def _backfill_after_startup():
+        # Small delay so the event loop is fully warm and the MCP clients
+        # are done their first health pings. Avoids a cold-boot stampede.
+        await _asyncio.sleep(5)
+        try:
+            cur = await _store._db.execute(
+                "SELECT MAX(timestamp) AS ts FROM rca_history"
+            )
+            row = await cur.fetchone()
+            last_seen = row["ts"] if row and "ts" in row.keys() else None
+        except Exception as exc:
+            logger.warning("Could not read max(timestamp) for backfill: %s", exc)
+            last_seen = None
+        try:
+            n = await run_startup_backfill(last_seen)
+            if n:
+                logger.warning(
+                    "Startup backfill replayed %d alerts — check /decisions for backfill_* rows.",
+                    n,
+                )
+        except Exception as exc:
+            logger.error("Startup backfill failed: %s", exc, exc_info=True)
+
+    _asyncio.create_task(_backfill_after_startup())
+
     yield
 
     # Shutdown
@@ -608,34 +642,18 @@ def _quality_pill(quality: str | None) -> str:
 
 
 def _deep_chips(service: str | None, alert_name: str | None) -> str:
-    """Small Grafana-alerting / Jaeger shortcut chips for a decision row.
+    """Small shortcut chip in the decision row.
 
-    Scoped to what we can actually *deep-link* reliably on Grafana 13:
-      - Grafana: /alerting/list (302→login, then lands on the alerting page)
-      - Jaeger:  /search?service=<svc> (traced services only — works directly)
-    Loki has no standalone UI in Grafana 13 without a pre-pinned datasource
-    UID we don't have at template time. Rather than ship a URL that 404s,
-    we show the LogQL query as copyable text in the detail panel below,
-    not as a chip.
+    Only the Grafana alerting list chip is reliable today. Both the Loki
+    Explore URL (Grafana 13 format changed) and the Jaeger v2 search URL
+    have been emitting 404s on this deploy. Rather than ship broken chips
+    we show the LogQL/PromQL as copyable text in the detail panel below.
     """
-    import urllib.parse as _urllib
-    svc = (service or "").strip()
-    chips = []
-    # Jaeger — only for traced services (anything else 404s the Jaeger search).
-    if svc in ("spring-boot", "kong", "otel-collector"):
-        chips.append(
-            f'<a href="{settings.jaeger_url}/search?service={_urllib.quote(svc)}" '
-            f'class="deep-chip dc-jaeger" target="_blank" rel="noopener" '
-            f'title="Search {_html.escape(svc)} traces in Jaeger" '
-            f'onclick="event.stopPropagation()">Jaeger</a>'
-        )
-    # Grafana alerting list — the entry point; user drills in from there.
-    chips.append(
+    return (
         f'<a href="{settings.grafana_url}/alerting/list" class="deep-chip dc-grafana" '
         f'target="_blank" rel="noopener" title="Open Grafana alerting" '
         f'onclick="event.stopPropagation()">Grafana</a>'
     )
-    return "".join(chips)
 
 
 def _verdict_pill(verdict: str | None, action: str | None) -> str:
@@ -852,21 +870,14 @@ def _render_detail_panel(r: dict) -> str:
             f'</tr></thead><tbody>{rows}</tbody></table></div>'
         )
 
-    # Deep links into Grafana / Jaeger / Loki scoped to this service.
-    links = []
-    if service and service != "unknown":
-        logql_enc = _urllib.quote(f'{{service_name="{service}"}}')
-        links.append(
-            (f'{settings.grafana_url}/explore?left=%7B%22datasource%22:%22loki%22,'
-             f'%22queries%22:%5B%7B%22expr%22:%22{logql_enc}%22%7D%5D%7D',
-             f'Loki — {service} logs')
-        )
-    if service in ("spring-boot", "kong", "otel-collector"):
-        links.append(
-            (f'{settings.jaeger_url}/search?service={_urllib.quote(service)}',
-             f'Jaeger — {service} traces')
-        )
-    links.append((f'{settings.grafana_url}/alerting/list', 'Grafana — alerting list'))
+    # Deep links. The pre-filtered Loki URL format changed with Grafana 13
+    # (deprecated `left=` params silently 404) and the Jaeger v2 UI URL is
+    # also unreliable on the current deploy. Rather than emit chips that
+    # 404, we only emit the one link we know always works (Grafana's
+    # alerting list) and show the raw LogQL/PromQL queries as copyable
+    # text in the panel above. Users can paste them into Explore manually
+    # — slightly less slick but never broken.
+    links = [(f'{settings.grafana_url}/alerting/list', 'Grafana — alerting list')]
     links_html = ''.join(
         f'<a class="panel-link" href="{url}" target="_blank" rel="noopener">{_html.escape(label)}</a>'
         for url, label in links

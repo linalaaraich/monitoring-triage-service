@@ -261,7 +261,7 @@ class TriagePipeline:
         # more shot with an explicit "you hedged — do better" instruction
         # appended to the history context. Only retry if the gate is on and
         # we haven't already spent too much of the pipeline budget.
-        quality = _classify_rca_quality(decision.rca, decision.reason)
+        quality = _classify_rca_quality(decision.rca, decision.reason, decision.suggested_actions, decision.evidence)
         total_so_far = int((time.monotonic() - pipeline_start) * 1000)
         retry_budget_ms = settings.pipeline_timeout * 1000 - total_so_far - 5000  # 5s safety margin
         if (
@@ -286,7 +286,7 @@ class TriagePipeline:
             )
             llm_duration.observe(retry_ms / 1000)
             llm_ms += retry_ms
-            retry_quality = _classify_rca_quality(retry_decision.rca, retry_decision.reason)
+            retry_quality = _classify_rca_quality(retry_decision.rca, retry_decision.reason, retry_decision.suggested_actions, retry_decision.evidence)
             if retry_quality == "actionable":
                 logger.info("Retry produced actionable RCA — replacing first-pass verdict")
                 decision = retry_decision
@@ -309,15 +309,18 @@ class TriagePipeline:
         # PromQL, suggested actions, evidence, correlated alerts) so the
         # dashboard can render them without having to re-query Grafana later.
         import json as _json
+        from app.llm_client import pick_primary_value
         # Format observed value once, reuse in both email and dashboard.
+        # Uses the shared picker so we don't emit the threshold boolean as
+        # the "observed value."
         values = alert.values or {}
         observed_str = ""
         if values:
-            items = sorted(values.items())
-            primary_ref, primary_val = items[-1]
+            primary_ref, primary_val = pick_primary_value(values)
             observed_str = f"{primary_val} (refId={primary_ref})"
-            if len(items) > 1:
-                observed_str += " [" + ", ".join(f"{k}={v}" for k, v in items[:-1]) + "]"
+            rest = [(k, v) for k, v in sorted(values.items()) if k != primary_ref]
+            if rest:
+                observed_str += " [" + ", ".join(f"{k}={v}" for k, v in rest) + "]"
 
         record = RCARecord(
             alert_source=source,
@@ -327,7 +330,7 @@ class TriagePipeline:
             severity=decision.severity,
             triage_decision="investigate",
             llm_verdict=decision.decision.value.lower(),
-            llm_confidence=None,
+            llm_confidence=f"{decision.confidence:.2f}" if decision.confidence is not None else None,
             rca_report=decision.rca,
             llm_reasoning=decision.reason,
             action_taken="emailed" if decision.decision == Decision.ESCALATE else "suppressed",

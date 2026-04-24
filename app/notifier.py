@@ -118,14 +118,15 @@ def _observed_value_block(alert: GrafanaAlert) -> str:
     if not values and not expr:
         return ""
 
-    items = sorted(values.items()) if values else []
+    from app.llm_client import pick_primary_value
     value_display = ""
-    if items:
-        primary_ref, primary_val = items[-1]
+    if values:
+        primary_ref, primary_val = pick_primary_value(values)
         value_display = f"<strong>{primary_val}</strong> <span class=\"mute\">(refId={primary_ref})</span>"
-        if len(items) > 1:
-            rest = ", ".join(f"{k}={v}" for k, v in items[:-1])
-            value_display += f' <span class="mute">[{rest}]</span>'
+        rest = [(k, v) for k, v in sorted(values.items()) if k != primary_ref]
+        if rest:
+            rest_str = ", ".join(f"{k}={v}" for k, v in rest)
+            value_display += f' <span class="mute">[{rest_str}]</span>'
     else:
         value_display = '<span class="mute">(not in webhook payload)</span>'
 
@@ -170,28 +171,16 @@ def _deep_links(alert: GrafanaAlert) -> dict[str, str]:
     are present after the 2026-04-23 rule enrichment.
     """
     links: dict[str, str] = {}
-    service = alert.service or ""
 
     # Grafana — generatorURL from webhook is authoritative when populated
     if alert.generatorURL:
         links["Open alert in Grafana"] = alert.generatorURL
 
-    # Loki — service-scoped log query
-    if service and service != "unknown":
-        logql = f'{{service_name="{service}"}}'
-        import urllib.parse
-        encoded = urllib.parse.quote(logql)
-        # Grafana Explore URL — opens Loki panel pre-filtered to the service.
-        links["View logs in Grafana (Loki)"] = (
-            f'{settings.grafana_url}/explore?left=%7B%22datasource%22:%22loki%22,'
-            f'%22queries%22:%5B%7B%22expr%22:%22{encoded}%22%7D%5D%7D'
-        )
-
-    # Jaeger — service-scoped trace view (only for traced services)
-    if service in ("spring-boot", "kong", "otel-collector"):
-        import urllib.parse
-        encoded = urllib.parse.quote(service)
-        links["View traces in Jaeger"] = f'{settings.jaeger_url}/search?service={encoded}'
+    # Loki and Jaeger deep-links: the pre-filtered Explore URL format
+    # changed with Grafana 13 and the Jaeger v2 UI URL is inconsistent on
+    # the current deploy. Rather than email broken chips that 404, we
+    # omit them entirely — the LogQL/PromQL queries are rendered as
+    # copyable text elsewhere in the email body.
 
     # Pre-existing alert annotations (runbook etc)
     for key, label in [

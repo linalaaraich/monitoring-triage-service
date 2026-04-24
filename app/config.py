@@ -73,6 +73,18 @@ class Settings(BaseSettings):
     jaeger_url: str = "http://52.202.21.192:16686"
     loki_url: str = "http://52.202.21.192:3100"
 
+    # Grafana read API auth, for the startup downtime backfill (see
+    # app/startup_backfill.py). Empty defaults disable the backfill.
+    grafana_api_user: str = "admin"
+    grafana_api_password: str = ""
+    # On startup, if (now - max(rca_history.timestamp)) > this threshold,
+    # query Grafana's annotation API for fire transitions in the gap and
+    # replay each unique (alertname, service) through the pipeline.
+    # Default 15 min covers laptop lid-close naps without triggering on
+    # every normal restart. Disabled entirely when grafana_api_password="".
+    startup_backfill_threshold_minutes: int = 15
+    startup_backfill_max_gap_hours: int = 24  # cap to avoid replaying a week
+
     # IP-to-hostname map for turning raw alert instances like "10.0.1.194:9100"
     # into "observability-rca-k3s / node-exporter" in emails + dashboard.
     # Keys are IPs (no port); values are friendly hostnames. Port→role

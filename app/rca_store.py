@@ -30,27 +30,58 @@ CREATE TABLE IF NOT EXISTS rca_history (
 """
 
 
-def _classify_rca_quality(rca_report: str | None, reasoning: str | None) -> str:
-    """Tag a decision as 'actionable' or 'data_starved'.
+def _is_empty_json_list(s) -> bool:
+    """True if the value is missing, or represents an empty list.
 
-    Pure regex-based post-hoc classifier — runs on the final RCA text AFTER
-    the LLM produces it. 'data_starved' means the model hedged with
-    phrases like 'insufficient data', 'no recent data', 'cannot determine'
-    rather than naming a cause. These records get surfaced in future
-    prompts so the model sees its past hedges and doesn't default to them.
+    Accepts both JSON-serialized strings (as stored in the DB) and raw
+    Python lists (as emitted by the LLM parser). The classifier is called
+    from both the pipeline (raw lists) and the store (JSON strings).
+    """
+    if s is None:
+        return True
+    if isinstance(s, (list, tuple)):
+        return len(s) == 0
+    if isinstance(s, str):
+        s = s.strip()
+        return s in ("", "null", "[]")
+    return False
 
-    Keep the classifier simple — missing a tag (false negative) is much
-    cheaper than a false positive that teaches the LLM to avoid the right
-    phrases. Err on the side of NOT flagging.
+
+def _classify_rca_quality(
+    rca_report: str | None,
+    reasoning: str | None,
+    suggested_actions: str | None = None,
+    evidence: str | None = None,
+) -> str:
+    """Tag a decision as 'actionable', 'data_starved', or 'needs_review'.
+
+    Ordering matters — most severe tag wins:
+    1. needs_review: the LLM produced no actions AND no evidence. The RCA
+       prose may SOUND confident, but without a single concrete action
+       or cited value an operator can't act on it. We would rather surface
+       this as "a human should look" than pretend it's actionable.
+    2. data_starved: the RCA text explicitly hedged with phrases like
+       "insufficient data", "cannot determine". These get surfaced in
+       future prompts so the LLM sees its past hedges and doesn't repeat.
+    3. actionable: everything else.
+
+    Missing a tag (false negative) is cheaper than a false positive that
+    teaches the LLM to avoid the right phrases — err on NOT flagging.
     """
     import re
     combined = " ".join(filter(None, [rca_report or "", reasoning or ""])).lower()
     if not combined.strip():
         return "data_starved"
 
-    # Phrases that nearly always mean the LLM gave up. Be strict about the
-    # pattern — "data" alone is common in good RCAs, so we anchor on
-    # explicit hedge words before/after it.
+    # Rule 1: no actions + no evidence -> needs_review regardless of prose.
+    # The dashboard's prior behavior was to call empty-but-confident RCAs
+    # "actionable," which lied to the operator. Either the LLM emitted
+    # zero concrete artifacts or the parser dropped them — either way the
+    # human needs to look at it, not trust the tag.
+    if _is_empty_json_list(suggested_actions) and _is_empty_json_list(evidence):
+        return "needs_review"
+
+    # Rule 2: hedge phrases anywhere in the narrative.
     hedge_patterns = [
         r"\binsufficient (?:data|information|context)\b",
         r"\bno (?:recent |available )?(?:metrics|logs|traces|data)\b",
@@ -110,7 +141,12 @@ class RCAStore:
         # whether the producer thought to set it. Keeps the pipeline code
         # from having to know about the classifier.
         if record.rca_quality is None:
-            record.rca_quality = _classify_rca_quality(record.rca_report, record.llm_reasoning)
+            record.rca_quality = _classify_rca_quality(
+                record.rca_report,
+                record.llm_reasoning,
+                record.suggested_actions,
+                record.evidence,
+            )
 
         await self._db.execute(
             """INSERT INTO rca_history
