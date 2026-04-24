@@ -53,17 +53,121 @@ F. evidence items must cite a SPECIFIC metric value, log line, or trace ID — n
          "Loki line `[ANOMALY] java.lang.OutOfMemoryError: Java heap space` appeared 4x in last 60s",
          "Jaeger trace 7f3a2c1d9b4e: GET /api/employee took 2347ms, span waits on MySQL connection pool"
 
-You MUST respond with ONLY valid JSON matching this exact schema:
+G. Match the suggested_actions to the service's actual deployment type. The alert labels include a `deployment_type` field (one of: k8s, docker-vm, systemd, external). If deployment_type=docker-vm do NOT emit kubectl commands — use `ssh deploy@<host> docker ps` / `docker logs <container>` / `systemctl status <unit>`. If deployment_type=k8s use kubectl. If deployment_type=systemd use systemctl on the host directly. Mixing deployment types in suggested_actions is a rejectable error.
+
+H. If the alert has correlated neighbors (see "Neighboring alerts" section), your RCA MUST explicitly explain the relationship: either (a) "X caused Y because ...", (b) "X and Y share common cause Z", or (c) "X and Y are unrelated, coincident timing." Don't silently ignore correlations — they are a signal the operator is already looking at.
+
+## Response schema (enforced at decode time)
+
+You MUST return JSON matching the schema below. The Ollama runtime validates at decode — invalid JSON is IMPOSSIBLE, but semantic quality is still on you.
+
 {
   "decision": "ESCALATE" | "DISMISS" | "INCONCLUSIVE",
   "severity": "critical" | "warning" | "info",
-  "confidence": <float between 0.0 and 1.0>,
-  "reason": "<one-line summary of why this decision was made>",
-  "rca": "<detailed root cause analysis (2-5 sentences), always citing the observed metric value from the alert>",
-  "anomaly_summary": "<summary of Drain3 anomaly findings>",
-  "suggested_actions": ["<action 1>", "<action 2>"],
-  "evidence": ["<metric/log/trace evidence used>"]
-}"""
+  "confidence": <float 0.0-1.0>,
+  "reason": "<one-line summary>",
+  "rca": "<2-5 sentences; start by restating observed value + PromQL>",
+  "anomaly_summary": "<Drain3 findings or '' if none>",
+  "suggested_actions": [<2-4 concrete commands/queries/URLs — see rule E>],
+  "evidence": [<specific metric values / log lines / trace IDs — see rule F>]
+}
+
+## Few-shot examples
+
+The three examples below show expected quality. Match this shape, not just the schema.
+
+### Example 1 — ESCALATE with clear metric signal
+
+INPUT:
+  alertname=HighCpuUsage, service=k3s-node, deployment_type=systemd
+  observed_value=94.4 (refId=B) [A=94.4, C=1], threshold=85, unit=percent
+  metric interpretation: CPU busy = 94.4% (idle = 5.6%), 9.4 percentage points above 80% threshold, sustained for 1 min
+  loki: 0 lines (expected for node-level alert)
+  jaeger: 0 traces (expected for infrastructure metric)
+  correlated: HighMemoryUsage same host within ±5 min
+
+EXPECTED OUTPUT:
+{
+  "decision": "ESCALATE",
+  "severity": "warning",
+  "confidence": 0.85,
+  "reason": "CPU busy 94.4% sustained on 10.0.1.194 — 9.4pp over threshold; coincident memory pressure points to load spike or runaway process.",
+  "rca": "PromQL `100 - (avg by(instance) (rate(node_cpu_seconds_total{mode=\\"idle\\"}[1m])) * 100)` returned 94.4% on instance 10.0.1.194:9100, placing the host well above the 85% threshold. Correlated HighMemoryUsage on the same host within 5 minutes suggests either a workload-level spike (pod burst) or a runaway process consuming both CPU and RAM. Node-level logs aren't in Loki for this service (expected — no app pipeline), so host-level introspection is needed.",
+  "anomaly_summary": "",
+  "suggested_actions": [
+    "ssh deploy@observability-rca-k3s 'top -b -n 1 | head -20' — identify the hottest process",
+    "kubectl top pods -A --sort-by=cpu | head -10 — see which workload is consuming CPU",
+    "Query Grafana: rate(node_cpu_seconds_total{instance=\\"10.0.1.194:9100\\"}[5m]) by (mode) — confirm mode (user vs system vs iowait)"
+  ],
+  "evidence": [
+    "node_cpu_seconds_total{instance=\\"10.0.1.194:9100\\",mode=\\"idle\\"} rate = 5.6% (observed value 94.4% busy)",
+    "Correlated HighMemoryUsage alert on same instance fired 2 minutes prior"
+  ]
+}
+
+### Example 2 — DISMISS noise / self-resolving
+
+INPUT:
+  alertname=HighP95Latency, service=spring-boot, deployment_type=k8s
+  observed_value=1020 (refId=B), threshold=1000, unit=milliseconds
+  metric interpretation: p95 = 1020 ms, 20 ms above 1000 ms threshold (2% over), spike duration 1 sample (10s)
+  prometheus: p95 dropped back to 340 ms within next scrape interval
+  loki: 50 lines all INFO, no errors
+  jaeger: 12 traces, slowest 340 ms — all under threshold
+  prior decisions: this rule has fired 14 times in last 24h, all DISMISS
+
+EXPECTED OUTPUT:
+{
+  "decision": "DISMISS",
+  "severity": "info",
+  "confidence": 0.75,
+  "reason": "Single-sample spike 20ms over threshold; next scrape p95 back to 340ms; no supporting log/trace anomalies.",
+  "rca": "PromQL `histogram_quantile(0.95, ...)` reported 1020 ms at fire time, briefly crossing the 1000 ms threshold by 2%. The next scrape interval dropped p95 back to 340 ms, and the slowest Jaeger trace in window was 340 ms — no individual request exceeded the threshold. 50 Loki lines show no errors or exceptions. This matches the pattern seen 14 times in the last 24h on this rule, all of which have been dismissed.",
+  "anomaly_summary": "0 of 50 lines anomalous",
+  "suggested_actions": [
+    "Consider raising the HighP95Latency threshold from 1000ms to 1200ms — current firing rate is mostly noise",
+    "Query Grafana: histogram_quantile(0.99, ...) to see if p99 captures real spikes while p95 stays quiet"
+  ],
+  "evidence": [
+    "Prometheus histogram_quantile(0.95) = 1020 ms at fire, 340 ms at next scrape (+10s)",
+    "Jaeger slowest trace in window: 340 ms GET /api/employee — below threshold",
+    "14 prior DISMISS decisions for this rule in last 24h (signal: threshold too tight)"
+  ]
+}
+
+### Example 3 — data-thin but still actionable (replaces old INCONCLUSIVE behavior)
+
+INPUT:
+  alertname=TargetDown, service=monitoring, deployment_type=docker-vm
+  observed_value=0 (refId=B) [A=0, C=1], threshold=1, unit=boolean
+  metric interpretation: up = 0 on instance 10.0.1.68:9100 — scrape target unreachable for 2+ min
+  prometheus: empty (target itself is what's down — can't query it directly)
+  loki: 0 lines for service=monitoring — this is Grafana on docker-vm, not k8s, so no app-pipeline logs here
+  jaeger: 0 traces (not a traced service)
+  prior decisions: none for this specific instance
+
+EXPECTED OUTPUT:
+{
+  "decision": "ESCALATE",
+  "severity": "critical",
+  "confidence": 0.70,
+  "reason": "Scrape target 10.0.1.68:9100 (node-exporter on monitoring-vm) unreachable 2+ min; metric/log/trace pillars expected-empty because we can't probe the down target or its logs.",
+  "rca": "PromQL `up == 0` returned 0 for instance 10.0.1.68:9100 — the node-exporter on the monitoring VM. Metrics from this target are unavailable by definition (that's what's being alerted), and Loki has no service=monitoring logs because Grafana/node-exporter on the monitoring VM are deployed via docker-compose, not k8s, and ship logs directly via docker rather than through the app log pipeline. The most likely causes, in order, are: (1) node-exporter container stopped or crashed on monitoring-vm, (2) network path between Prometheus and monitoring-vm is broken, (3) Prometheus scrape config drift.",
+  "anomaly_summary": "",
+  "suggested_actions": [
+    "ssh deploy@observability-rca-monitoring 'docker ps --filter name=node-exporter' — verify the container is running",
+    "ssh deploy@observability-rca-monitoring 'curl -sf http://localhost:9100/metrics | head -5' — verify the scrape endpoint is alive",
+    "Query Grafana: up{instance=\\"10.0.1.68:9100\\"}[30m] — see when the target went down"
+  ],
+  "evidence": [
+    "up{instance=\\"10.0.1.68:9100\\"} = 0 (target unreachable for 2+ min)",
+    "Loki empty: expected for service=monitoring (deployment_type=docker-vm, no app log pipeline)"
+  ]
+}
+
+---
+
+Respond with valid JSON only. Start your RCA by restating the observed value and PromQL."""
 
 
 def pick_primary_value(values: dict) -> tuple[str | None, float | None]:
@@ -155,9 +259,20 @@ class LLMClient:
         context: GatheredContext,
         drain_summary: str,
         history_context: str = "",
+        correlated: list[dict] | None = None,
+        metric_facts=None,  # app.metric_interpreter.MetricFacts, but avoid import cycle
+        tool_result_block: str | None = None,
     ) -> tuple[LLMDecision, int]:
-        """Run LLM investigation. Returns (decision, duration_ms)."""
-        messages = self._build_prompt(alert, context, drain_summary, history_context)
+        """Run LLM investigation. Returns (decision, duration_ms).
+
+        If tool_result_block is given, it's appended to the user_content as
+        additional evidence from a bounded-agency retry (see app.bounded_agency).
+        """
+        messages = self._build_prompt(alert, context, drain_summary, history_context, correlated, metric_facts)
+        if tool_result_block:
+            # Append to the final user message so the tool result is read
+            # together with the original evidence.
+            messages[-1]["content"] += "\n\n" + tool_result_block
 
         start = time.monotonic()
         raw_response = await self._call_ollama_with_resilience(messages)
@@ -207,6 +322,73 @@ class LLMClient:
 
         return decision, duration_ms
 
+    async def request_tool_or_decide(
+        self,
+        alert: GrafanaAlert,
+        context: GatheredContext,
+        drain_summary: str,
+        history_context: str,
+        correlated: list[dict] | None,
+        metric_facts,
+    ) -> tuple[dict | None, int]:
+        """Bounded-agency first half: ask the LLM to either request ONE
+        tool call from the whitelist OR emit a final decision.
+
+        Returns (parsed_response_dict, duration_ms). The caller introspects
+        the dict: if it has `tool_request`, execute + re-prompt via
+        investigate(). Otherwise treat as a completed decision (try to
+        parse into LLMDecision).
+
+        Doesn't use structured outputs — the response can be either shape,
+        so we use format=json and parse leniently.
+        """
+        from app.bounded_agency import TOOLS_DESCRIPTION
+        messages = self._build_prompt(alert, context, drain_summary, history_context, correlated, metric_facts)
+        messages[-1]["content"] += (
+            "\n\n## YOUR FIRST PASS WAS DATA-STARVED\n\n"
+            "Your first response hedged with 'insufficient data' or similar. You now have "
+            "the chance to request ONE additional MCP query before committing to a verdict.\n\n"
+            + TOOLS_DESCRIPTION
+            + "\n\nEmit either `{\"tool_request\": {\"name\": ..., \"args\": {...}}}` OR "
+            "the normal decision JSON. Choose the tool that is MOST likely to resolve your uncertainty. "
+            "Don't use a tool if the current evidence already suffices."
+        )
+
+        start = time.monotonic()
+        # Use format=json (not structured schema) — the response can be
+        # either shape (tool_request or decision).
+        try:
+            resp = await self._client.post(
+                f"{settings.ollama_url}/api/chat",
+                json={
+                    "model": settings.ollama_model,
+                    "messages": messages,
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0, "num_ctx": 16384},
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            raw = data.get("message", {}).get("content", "")
+        except Exception as exc:
+            logger.warning("Agency LLM call failed: %s", exc)
+            return None, int((time.monotonic() - start) * 1000)
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            # Fallback: strip markdown if present
+            text = raw.strip()
+            if text.startswith("```"):
+                text = "\n".join(text.split("\n")[1:-1])
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return None, duration_ms
+        return parsed, duration_ms
+
     # ------------------------------------------------------------------
     # Prompt construction
     # ------------------------------------------------------------------
@@ -217,6 +399,8 @@ class LLMClient:
         context: GatheredContext,
         drain_summary: str,
         history_context: str,
+        correlated: list[dict] | None = None,
+        metric_facts=None,
     ) -> list[dict]:
         rule_expr = alert.annotations.get("expr", "") or "(rule expression not provided — ask the alert owner to add annotations.expr)"
         observed_value = _format_observed_value(alert.values)
@@ -229,10 +413,43 @@ class LLMClient:
         # fills `values` with {"<refId>": <number>} when the rule fires.
         value_line = f"{observed_value}" if observed_value else "(no observed value in webhook payload)"
 
+        # P1.1 — Pre-LLM metric interpreter. The one-liner is authoritative
+        # ground truth (computed deterministically from PromQL + values).
+        # LLM should cite it verbatim, not re-derive it.
+        interpreter_block = ""
+        deployment_type = "unknown"
+        if metric_facts is not None:
+            interpreter_block = (
+                "\n## Pre-computed metric facts (ground truth — cite verbatim)\n"
+                + metric_facts.as_prompt_block()
+                + "\n\nDO NOT re-derive these numbers. DO NOT re-interpret the unit. "
+                "The interpretation line IS the answer to 'what does the observed value mean.'"
+            )
+            deployment_type = metric_facts.deployment_type
+
+        # P1.4 — Correlated alerts as first-class prompt section. Moved out of
+        # history_context so the prompt rule H about explaining the
+        # relationship has a clear place to bind to.
+        correlated_block = ""
+        if correlated:
+            lines = [
+                f"\n## Neighboring alerts (±5 min of this one) — {len(correlated)} found",
+                "You MUST address these in your RCA per rule H. Options: (a) this caused them, "
+                "(b) they caused this, (c) common cause, (d) coincidence (explicitly stated).\n",
+            ]
+            for c in correlated[:8]:
+                lines.append(
+                    f"  - {c.get('timestamp','?')[:19]}  {c.get('alert_name','?')}  "
+                    f"service={c.get('affected_service','?')}  "
+                    f"verdict={c.get('llm_verdict') or '-'}  "
+                    f"quality={c.get('rca_quality') or '-'}"
+                )
+            correlated_block = "\n".join(lines) + "\n"
+
         user_content = f"""## Alert Details
 - **Name:** {alert.alertname}
 - **Severity:** {alert.severity}
-- **Service:** {alert.service}
+- **Service:** {alert.service}  (deployment_type: {deployment_type})
 - **Component:** {component}
 - **Primary signal:** {signal}  (prioritise the matching pillar when investigating)
 - **Instance:** {alert.instance}
@@ -245,7 +462,8 @@ class LLMClient:
 ## Rule fired because of THIS metric
 - **PromQL:** `{rule_expr}`
 - **Observed value at fire time:** {value_line}
-
+{interpreter_block}
+{correlated_block}
 The observed value above is ground-truth signal from Prometheus at the moment the rule's threshold was crossed. Cite this value explicitly in your RCA — do not say "insufficient data" if the alert itself carries a value.
 
 ## Pre-Gathered Context
@@ -348,8 +566,42 @@ Analyze this alert using the context above. Respond with ONLY valid JSON. Start 
         triage_fallback_total.labels(reason="retries_exhausted").inc()
         return None
 
+    # JSON schema for Ollama's structured outputs (format=<schema>). Ollama
+    # >=0.5 enforces this at decode time so invalid JSON is impossible, not
+    # just unlikely. The schema mirrors LLMDecision but is hand-written here
+    # to keep it inline-simple (no $defs/$refs, which some Ollama versions
+    # don't follow cleanly). Keep this in sync with LLMDecision in models.py.
+    _RESPONSE_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "decision": {"type": "string", "enum": ["ESCALATE", "DISMISS", "INCONCLUSIVE"]},
+            "severity": {"type": "string", "enum": ["critical", "warning", "info"]},
+            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "reason": {"type": "string"},
+            "rca": {"type": "string"},
+            "anomaly_summary": {"type": "string"},
+            "suggested_actions": {"type": "array", "items": {"type": "string"}},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": [
+            "decision", "severity", "confidence", "reason", "rca",
+            "anomaly_summary", "suggested_actions", "evidence",
+        ],
+    }
+
     async def _call_ollama(self, messages: list[dict]) -> str:
-        """Make a single HTTP request to the Ollama chat API."""
+        """Make a single HTTP request to the Ollama chat API.
+
+        Uses three 2026-04-24 behaviors (P0.5):
+          - temperature=0 — default 0.8 is far too random for triage; same
+            alert should produce same verdict unless context actually differs.
+          - num_ctx=16384 — explicit context window. qwen2.5:7b advertises
+            32K but effective degrades past ~16K; 500 Loki lines + traces
+            can push us close. Cap explicitly.
+          - format=schema (not just format="json") — Ollama enforces the
+            JSON schema at decode time. Invalid JSON is impossible, which
+            eliminates the parse-retry path entirely.
+        """
         start = time.monotonic()
         try:
             resp = await self._client.post(
@@ -358,7 +610,11 @@ Analyze this alert using the context above. Respond with ONLY valid JSON. Start 
                     "model": settings.ollama_model,
                     "messages": messages,
                     "stream": False,
-                    "format": "json",
+                    "format": self._RESPONSE_SCHEMA,
+                    "options": {
+                        "temperature": 0,
+                        "num_ctx": 16384,
+                    },
                 },
             )
             resp.raise_for_status()

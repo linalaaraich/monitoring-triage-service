@@ -1,7 +1,30 @@
 import logging
 from collections import Counter
+from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from zoneinfo import ZoneInfo
+
+
+# Keep render-time-zone logic in sync with app.main._to_local_time.
+# Duplicated instead of imported to avoid circular deps (notifier is
+# imported from pipeline which is imported before main).
+_LOCAL_TZ = ZoneInfo("Africa/Casablanca")
+
+
+def _to_local_time(iso_utc_str: str | None, with_zone_label: bool = False) -> str:
+    if not iso_utc_str:
+        return ""
+    s = iso_utc_str.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return iso_utc_str
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local = dt.astimezone(_LOCAL_TZ)
+    base = local.strftime("%Y-%m-%d %H:%M:%S")
+    return f"{base} Casablanca" if with_zone_label else base
 
 import aiosmtplib
 
@@ -150,7 +173,7 @@ def _correlated_alerts_block(correlated: list[dict]) -> str:
     rows = []
     for c in correlated[:10]:
         rows.append(
-            f'<tr><td class="v mono-inline">{c.get("timestamp","")[:19]}</td>'
+            f'<tr><td class="v mono-inline">{_to_local_time(c.get("timestamp"))}</td>'
             f'<td class="v">{c.get("alert_name","?")}</td>'
             f'<td class="v">{c.get("affected_service","?")}</td>'
             f'<td class="v">{c.get("llm_verdict") or "—"}</td></tr>'

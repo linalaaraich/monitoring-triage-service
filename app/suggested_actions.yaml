@@ -1,0 +1,137 @@
+# Action templates for the triage service.
+#
+# When the LLM returns suggested_actions=[] (or an all-vague list rejected
+# by the response validator), the pipeline falls back to these templates
+# keyed by alertname pattern. Templates are deployment-type aware — the
+# wrong command family for a service is worse than no suggestion at all
+# (audit 2026-04-24: LLM was emitting `kubectl` for service=monitoring
+# which is Grafana on a docker-compose VM).
+#
+# Placeholder substitution happens at fill time (see app/action_templates.py):
+#   {instance}        — raw "ip:port" from alert.labels["instance"]
+#   {instance_host}   — friendly hostname from settings.instance_hosts
+#   {service}         — alert.labels["service"]
+#   {grafana}         — settings.grafana_url
+#   {job}             — alert.labels["job"] if present, else falls through
+#
+# First matching rule wins. Match order is top-to-bottom, so put more
+# specific patterns above catch-all defaults.
+
+rules:
+
+  # ---- CPU alerts ------------------------------------------------------
+  - match: "^(High|Medium|Critical)CpuUsage$"
+    by_deployment_type:
+      k8s:
+        - "kubectl top nodes --sort-by=cpu"
+        - "kubectl top pods -A --sort-by=cpu | head -15"
+        - "ssh deploy@{instance_host} 'top -b -n 1 | head -20' — identify the hottest process on node {instance_host}"
+      systemd:
+        - "ssh deploy@{instance_host} 'top -b -n 1 | head -20' — identify the hottest process"
+        - "ssh deploy@{instance_host} 'ps aux --sort=-pcpu | head -10' — top CPU consumers by process"
+        - "Query Grafana: rate(node_cpu_seconds_total{{instance=\"{instance}\"}}[5m]) by (mode) — confirm CPU mode breakdown (user/system/iowait)"
+      docker-vm:
+        - "ssh deploy@{instance_host} 'top -b -n 1 | head -20'"
+        - "ssh deploy@{instance_host} 'docker stats --no-stream' — containers by CPU"
+      unknown:
+        - "Query Grafana: 100 - (avg by(instance) (rate(node_cpu_seconds_total{{mode=\"idle\"}}[5m])) * 100) — confirm CPU usage over time"
+
+  # ---- Memory alerts ---------------------------------------------------
+  - match: "^(High|Medium|Critical)MemoryUsage$"
+    by_deployment_type:
+      k8s:
+        - "kubectl top pods -A --sort-by=memory | head -15"
+        - "ssh deploy@{instance_host} 'free -h && cat /proc/meminfo | head -5'"
+        - "Query Grafana: (1 - node_memory_MemAvailable_bytes{{instance=\"{instance}\"}} / node_memory_MemTotal_bytes{{instance=\"{instance}\"}}) * 100"
+      systemd:
+        - "ssh deploy@{instance_host} 'free -h'"
+        - "ssh deploy@{instance_host} 'ps aux --sort=-rss | head -10' — top RAM consumers"
+      docker-vm:
+        - "ssh deploy@{instance_host} 'docker stats --no-stream' — containers by memory"
+        - "ssh deploy@{instance_host} 'free -h'"
+
+  # ---- Disk alerts -----------------------------------------------------
+  - match: "^(High|Critical|DiskFilling).*(DiskUsage|Up).*$"
+    by_deployment_type:
+      k8s:
+        - "ssh deploy@{instance_host} 'df -h /'"
+        - "ssh deploy@{instance_host} 'du -sh /var/lib/rancher/k3s/storage/* 2>/dev/null | sort -h | tail -10' — k3s local-path volumes"
+      systemd:
+        - "ssh deploy@{instance_host} 'df -h /'"
+        - "ssh deploy@{instance_host} 'du -sh /var/log/* 2>/dev/null | sort -h | tail -10' — log dir usage"
+      docker-vm:
+        - "ssh deploy@{instance_host} 'df -h /'"
+        - "ssh deploy@{instance_host} 'docker system df' — docker disk usage breakdown"
+
+  # ---- TargetDown / service down --------------------------------------
+  - match: "^TargetDown$"
+    by_deployment_type:
+      k8s:
+        - "kubectl get pods -A -o wide | grep -v Running"
+        - "kubectl describe pod <pod> -n <ns> — examine failing pods"
+        - "Query Grafana: up{{instance=\"{instance}\"}}[30m] — see exactly when the target went down"
+      systemd:
+        - "ssh deploy@{instance_host} 'systemctl status node-exporter.service'"
+        - "ssh deploy@{instance_host} 'curl -sSf http://localhost:9100/metrics | head -5' — verify endpoint"
+      docker-vm:
+        - "ssh deploy@{instance_host} 'docker ps --format \"{{.Names}} {{.Status}}\"' — which containers are down"
+        - "ssh deploy@{instance_host} 'docker logs --tail 50 <container>' — last-50-lines on the failing container"
+      unknown:
+        - "Check Prometheus targets page: {grafana}/targets"
+
+  - match: "^OTelCollectorDown$"
+    by_deployment_type:
+      k8s:
+        - "kubectl get pods -n observability -l app.kubernetes.io/component=otel-collector"
+        - "kubectl logs -n observability -l app.kubernetes.io/component=otel-collector --tail=100"
+      docker-vm:
+        - "ssh deploy@{instance_host} 'docker logs --tail 100 otel-collector'"
+
+  # ---- Latency alerts --------------------------------------------------
+  - match: "^HighP95Latency$"
+    by_deployment_type:
+      k8s:
+        - "Query Jaeger: service={service}, minDuration=1s, last 30min — find slow traces"
+        - "kubectl logs -n app -l app.kubernetes.io/name=spring-boot --tail=200 | grep -iE 'slow|timeout|error'"
+        - "Query Grafana: rate(http_server_requests_seconds_count{{container=\"spring-boot\"}}[5m]) by (uri) — high-traffic endpoints"
+
+  - match: "^HighKongP95Latency$"
+    by_deployment_type:
+      k8s:
+        - "Query Jaeger: service=kong, minDuration=1s — slow gateway-layer traces"
+        - "kubectl logs -n network -l app.kubernetes.io/instance=kong --tail=200 | grep -iE 'upstream|timeout'"
+        - "Query Grafana: rate(kong_request_latency_ms_sum[5m]) / rate(kong_request_latency_ms_count[5m]) — avg latency trend"
+
+  # ---- OTel span drop rate --------------------------------------------
+  - match: "^OTelCollectorHighSpanDropRate$"
+    by_deployment_type:
+      k8s:
+        - "kubectl describe pod -n observability -l app.kubernetes.io/component=otel-collector — look for memory limits / OOM events"
+        - "kubectl logs -n observability -l app.kubernetes.io/component=otel-collector --tail=200 | grep -iE 'drop|full|queue'"
+        - "Query Grafana: rate(otelcol_processor_dropped_spans_total[5m]) by (processor) — which processor drops"
+
+  # ---- Loki ingestion / storage ---------------------------------------
+  - match: "^Loki(High|Critical)DiskUsage$"
+    by_deployment_type:
+      docker-vm:
+        - "ssh deploy@{instance_host} 'df -h /' — confirm the monitoring VM is out of space"
+        - "ssh deploy@{instance_host} 'du -sh /var/lib/docker/volumes/monitoring-vm_loki_data/_data 2>/dev/null' — Loki storage usage"
+      unknown:
+        - "Check Grafana storage panel: {grafana}"
+
+  - match: "^LokiIngestionRateLow$"
+    by_deployment_type:
+      docker-vm:
+        - "ssh deploy@{instance_host} 'docker logs --tail 100 loki' — Loki server errors"
+        - "ssh deploy@{instance_host} 'docker logs --tail 100 otel-collector | grep -iE \"loki|exporter\"' — pipeline send errors"
+
+  # ---- Catch-all default (empty = LLM gets no help, but nothing wrong either) -
+  - match: "^.*$"
+    by_deployment_type:
+      k8s:
+        - "kubectl describe pod -A | grep -A 5 {service} — start from pod state"
+      docker-vm:
+        - "ssh deploy@{instance_host} 'docker ps' — container state on the deployment host"
+      systemd:
+        - "ssh deploy@{instance_host} 'systemctl status' — host daemon state"
+      unknown: []   # No vague advice. Empty is preferable.

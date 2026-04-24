@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     # Adds up to ~25 s to the pipeline on cold inferences; disable if latency
     # budget is tight or Ollama is on a small GPU.
     triage_data_starved_retry_enabled: bool = True
+    # P1.5 — bounded-agency retry. When the first pass is data_starved or
+    # INCONCLUSIVE, allow the LLM to request EXACTLY ONE additional
+    # whitelisted MCP query, then re-decide with that new evidence. At
+    # most one extra call; deterministic given the same inputs; uses
+    # existing MCPs — no agent framework. See app/bounded_agency.py.
+    triage_bounded_agency_enabled: bool = True
 
     # RCA history
     rca_db_path: str = "/var/lib/triage-service/rca_history.db"
@@ -65,6 +71,18 @@ class Settings(BaseSettings):
     drain3_state_dir: str = "/var/lib/triage-service/drain3_state"
     drain3_poll_interval: int = 30
     drain3_anomaly_threshold: int = 5
+    # P1.7: drain3 → /webhook/drain3 self-alerting.
+    # After each ingest batch, if the anomaly rate in the sliding window is
+    # above drain3_alert_rate_threshold AND at least drain3_alert_min_lines
+    # have been ingested in that window, self-POST a Drain3Webhook to our
+    # own /webhook/drain3 endpoint. This makes drain3 a visible alert source
+    # on the dashboard (the endpoint existed; nothing called it before).
+    # Cooldown prevents thrash.
+    drain3_alert_enabled: bool = True
+    drain3_alert_rate_threshold: float = 0.10      # 10% anomalous lines → alert
+    drain3_alert_min_lines: int = 100              # minimum sample size per window
+    drain3_alert_cooldown_seconds: int = 600       # 10 min between alerts
+    drain3_self_webhook_url: str = "http://localhost:8090/webhook/drain3"
 
     # Public UIs for deep-links in the escalation email + dashboard.
     # Defaults assume the tailnet/MagicDNS layout; override per-deployment
@@ -84,6 +102,41 @@ class Settings(BaseSettings):
     # every normal restart. Disabled entirely when grafana_api_password="".
     startup_backfill_threshold_minutes: int = 15
     startup_backfill_max_gap_hours: int = 24  # cap to avoid replaying a week
+
+    # Service name → deployment type map. Used by:
+    #   - metric_interpreter.py to attach deployment_type to MetricFacts
+    #   - suggested_actions.yaml template selector
+    #   - response_validator.py to reject architecture-mismatched actions
+    # Keys are the "service" label on the alert (from the alert rule), values
+    # are one of:
+    #   k8s         — deployed as a k3s workload; kubectl commands apply
+    #   docker-vm   — deployed via docker-compose on a plain VM; ssh + docker
+    #                 ps/logs apply, kubectl does NOT
+    #   systemd     — host-level daemon (node-exporter via systemd unit);
+    #                 systemctl + journalctl apply
+    #   external    — third-party SaaS or outside our infra; no actions other
+    #                 than "contact vendor" are valid
+    # Unknown service labels default to "unknown" which suppresses
+    # architecture-specific suggestions (templates emit generic actions only).
+    service_deployment_type: dict[str, str] = {
+        # k3s workloads (live in the k3s cluster, namespace=app/frontend/network/observability)
+        "spring-boot":   "k8s",
+        "spring-boot-app": "k8s",
+        "springboot-app": "k8s",
+        "kong":          "k8s",
+        "otel-collector": "k8s",
+        "mysql":         "k8s",
+        "frontend":      "k8s",
+        # monitoring-vm docker-compose stack
+        "prometheus":    "docker-vm",
+        "loki":          "docker-vm",
+        "jaeger":        "docker-vm",
+        "grafana":       "docker-vm",
+        "monitoring":    "docker-vm",  # label used by TargetDown for anything on monitoring-vm
+        # Host-level (systemd or equivalent daemons on the k3s node + VMs)
+        "k3s-node":      "systemd",
+        "node-exporter": "systemd",
+    }
 
     # IP-to-hostname map for turning raw alert instances like "10.0.1.194:9100"
     # into "observability-rca-k3s / node-exporter" in emails + dashboard.

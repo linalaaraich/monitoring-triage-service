@@ -76,11 +76,42 @@ class TriagePipeline:
     async def _process_alert(self, alert: GrafanaAlert, source: str):
         pipeline_start = time.monotonic()
 
-        # Step 1: Deduplication
-        is_dup = await self.dedup.check(alert.alertname, alert.instance, alert.status)
+        # Step 1: Deduplication (P1.6 — fingerprint-window).
+        # On second+ fire of the same fingerprint within the window, persist
+        # a short-path `suppressed_duplicate` record linking to the prior
+        # RCA instead of silent drop. Operators see the flap as a compact
+        # row, not a gap.
+        is_dup, prior_decision_id = await self.dedup.check(alert.fingerprint, alert.status)
         if is_dup:
             alerts_deduplicated.inc()
-            logger.info("Alert %s deduplicated — skipping", alert.alertname)
+            logger.info(
+                "Alert %s deduplicated (fingerprint=%s, prior_rca=%s) — persisting short-path record",
+                alert.alertname, alert.fingerprint[:12] if alert.fingerprint else "-",
+                prior_decision_id or "pending",
+            )
+            # Short-path record so the dashboard shows it
+            short = RCARecord(
+                alert_source=source,
+                alert_name=alert.alertname,
+                alert_fingerprint=alert.fingerprint,
+                affected_service=alert.service,
+                severity=alert.severity,
+                triage_decision="suppressed_duplicate",
+                llm_verdict=None,
+                rca_report=(
+                    f"Duplicate fire within {self.dedup.window}s dedup window. "
+                    f"See prior RCA {prior_decision_id or '(pending)'} for the full analysis."
+                ),
+                action_taken=(
+                    f"see_previous_rca:{prior_decision_id}" if prior_decision_id else "see_previous_rca:pending"
+                ),
+                investigation_duration_ms=int((time.monotonic() - pipeline_start) * 1000),
+                rca_quality="actionable",
+            )
+            try:
+                await self.store.save_decision(short)
+            except Exception as exc:
+                logger.warning("Failed to persist suppressed_duplicate record: %s", exc)
             return
 
         # Step 1b (AI-04, Layer 2): Pre-LLM suppression.
@@ -209,22 +240,10 @@ class TriagePipeline:
         correlated = await self.store.get_correlated_alerts(
             fingerprint=alert.fingerprint, at=alert_time, window_minutes=5,
         )
+        # Correlation is now rendered as a dedicated prompt section by
+        # llm_client._build_prompt (P1.4). No duplication in history_context.
         history = await self.store.get_alert_frequency(alert.alertname)
         history_context = ""
-        if correlated:
-            history_context += (
-                f"Correlated alerts within ±5 min of this one ({len(correlated)}):\n"
-            )
-            for c in correlated[:8]:
-                history_context += (
-                    f"  • {c['timestamp'][:19]}  {c['alert_name']} "
-                    f"(service={c.get('affected_service','?')}, verdict={c.get('llm_verdict') or '-'})\n"
-                )
-            history_context += (
-                "If these alerts are on related services or components, treat them "
-                "as a cascade and reason about the common root cause (noisy neighbor, "
-                "shared dependency, shared node). If they're unrelated, ignore.\n\n"
-            )
         if history["count"] > 0:
             history_context = (
                 f"This alert has fired {history['count']} time(s) in the last "
@@ -251,16 +270,64 @@ class TriagePipeline:
                         "specific hypothesis even if the MCP pillars are thin."
                     )
 
-        # Step 6: Call LLM
+        # Step 6: Call LLM. Pre-compute metric facts (P1.1 interpreter) so
+        # the prompt carries authoritative ground-truth for the observed
+        # value, unit, threshold delta, and deployment type. Correlation
+        # (P1.4) becomes a first-class prompt section, moved out of
+        # history_context.
+        from app.metric_interpreter import interpret as interpret_metric
+        from app.response_validator import validate as validate_decision
+        metric_facts = interpret_metric(alert)
         decision, llm_ms = await self.llm.investigate(
-            alert, ctx, anomaly_summary, history_context
+            alert, ctx, anomaly_summary, history_context,
+            correlated=correlated,
+            metric_facts=metric_facts,
         )
         llm_duration.observe(llm_ms / 1000)
+
+        # P1.3 — Response validator. Prunes vague actions + arch-mismatched
+        # commands + records banned-phrase hits. The validator MUTATES
+        # decision.suggested_actions (drops rejects), so by the time we hit
+        # P1.2 template fallback below, kept_actions is the "real" LLM output.
+        validation = validate_decision(
+            decision,
+            deployment_type=metric_facts.deployment_type,
+            confidence_floor=0.3,
+        )
+        if validation.violations:
+            logger.info(
+                "Validator found %d violation(s) for %s: %s",
+                len(validation.violations),
+                alert.alertname,
+                "; ".join(validation.violations[:3]),
+            )
 
         # Step 6b: If the first-pass RCA looks data-starved, give the LLM ONE
         # more shot with an explicit "you hedged — do better" instruction
         # appended to the history context. Only retry if the gate is on and
         # we haven't already spent too much of the pipeline budget.
+        # P1.2 — if LLM produced no concrete actions, fall back to the
+        # deployment-type-branched template. This is the final backstop
+        # against bug #7 (empty suggested_actions on nearly every row).
+        # Track the fill source so we can measure template-vs-LLM rates
+        # in the evaluation dashboard.
+        suggested_actions_source = "llm"
+        if not decision.suggested_actions:
+            from app.action_templates import fill_template
+            templated = fill_template(
+                alertname=alert.alertname,
+                service=alert.service,
+                deployment_type=metric_facts.deployment_type,
+                labels=alert.labels,
+            )
+            if templated:
+                decision.suggested_actions = templated
+                suggested_actions_source = "template"
+                logger.info(
+                    "Filled empty suggested_actions from template for %s (deployment=%s, %d actions)",
+                    alert.alertname, metric_facts.deployment_type, len(templated),
+                )
+
         quality = _classify_rca_quality(decision.rca, decision.reason, decision.suggested_actions, decision.evidence)
         total_so_far = int((time.monotonic() - pipeline_start) * 1000)
         retry_budget_ms = settings.pipeline_timeout * 1000 - total_so_far - 5000  # 5s safety margin
@@ -269,30 +336,94 @@ class TriagePipeline:
             and settings.triage_data_starved_retry_enabled
             and retry_budget_ms > 10_000
         ):
-            logger.warning(
-                "First-pass RCA tagged data_starved (verdict=%s) — retrying with anti-hedge prompt",
-                decision.decision.value,
+            retry_decision = None
+            retry_ms = 0
+            used_agency = False
+
+            if settings.triage_bounded_agency_enabled:
+                from app.bounded_agency import (
+                    parse_tool_request,
+                    execute_tool,
+                    tool_result_to_prompt_block,
+                )
+                logger.info(
+                    "First-pass data_starved for %s — invoking bounded-agency retry (P1.5)",
+                    alert.alertname,
+                )
+                parsed, agency_ms = await self.llm.request_tool_or_decide(
+                    alert, ctx, anomaly_summary, history_context,
+                    correlated=correlated, metric_facts=metric_facts,
+                )
+                llm_ms += agency_ms
+                llm_duration.observe(agency_ms / 1000)
+
+                if parsed is not None:
+                    tool_req = parse_tool_request(parsed)
+                    if tool_req is not None:
+                        # Model asked for one tool call — execute + re-prompt.
+                        logger.info(
+                            "Agency: LLM requested tool %s with args %s",
+                            tool_req.name, tool_req.args,
+                        )
+                        tool_result = await execute_tool(tool_req, self.context_gatherer, self.store)
+                        tool_block = tool_result_to_prompt_block(tool_result)
+                        retry_decision, rd_ms = await self.llm.investigate(
+                            alert, ctx, anomaly_summary, history_context,
+                            correlated=correlated, metric_facts=metric_facts,
+                            tool_result_block=tool_block,
+                        )
+                        llm_duration.observe(rd_ms / 1000)
+                        llm_ms += rd_ms
+                        retry_ms = agency_ms + rd_ms
+                        used_agency = True
+                    else:
+                        # Model chose to emit a decision directly without a tool — try to parse
+                        try:
+                            from app.models import LLMDecision as _LLMDecision
+                            retry_decision = _LLMDecision(**parsed)
+                            retry_ms = agency_ms
+                            used_agency = True
+                        except Exception as e:
+                            logger.debug("Agency response couldn't be parsed as LLMDecision: %s", e)
+
+            # Plain anti-hedge retry as fallback (bounded-agency disabled
+            # or produced nothing usable).
+            if retry_decision is None:
+                logger.info(
+                    "Falling back to plain anti-hedge retry for %s (agency_enabled=%s)",
+                    alert.alertname, settings.triage_bounded_agency_enabled,
+                )
+                retry_history = history_context + (
+                    "\n\n⚠ RETRY — your first response just said 'insufficient data' without naming a cause. "
+                    "Look at the alert's PromQL and observed value above: those ARE data. "
+                    "Even if the three pillars came back thin, propose a concrete hypothesis and two specific "
+                    "commands/queries a human can run to confirm. Do NOT use the phrases 'insufficient data', "
+                    "'cannot determine', or 'no recent data'."
+                )
+                retry_decision, fallback_ms = await self.llm.investigate(
+                    alert, ctx, anomaly_summary, retry_history,
+                    correlated=correlated, metric_facts=metric_facts,
+                )
+                llm_duration.observe(fallback_ms / 1000)
+                llm_ms += fallback_ms
+                retry_ms = (retry_ms or 0) + fallback_ms
+
+            retry_quality = _classify_rca_quality(
+                retry_decision.rca, retry_decision.reason,
+                retry_decision.suggested_actions, retry_decision.evidence,
             )
-            retry_history = history_context + (
-                "\n\n⚠ RETRY — your first response just said 'insufficient data' without naming a cause. "
-                "Look at the alert's PromQL and observed value above: those ARE data. "
-                "Even if the three pillars came back thin, propose a concrete hypothesis (e.g. "
-                "'load-test traffic spiked node CPU; CPU-throttling the triage container is the "
-                "likely secondary effect') and two specific commands/queries a human can run to confirm. "
-                "Do NOT use the phrases 'insufficient data', 'cannot determine', or 'no recent data' in this response."
-            )
-            retry_decision, retry_ms = await self.llm.investigate(
-                alert, ctx, anomaly_summary, retry_history
-            )
-            llm_duration.observe(retry_ms / 1000)
-            llm_ms += retry_ms
-            retry_quality = _classify_rca_quality(retry_decision.rca, retry_decision.reason, retry_decision.suggested_actions, retry_decision.evidence)
             if retry_quality == "actionable":
-                logger.info("Retry produced actionable RCA — replacing first-pass verdict")
+                logger.info(
+                    "Retry produced actionable RCA — replacing first-pass verdict (used_agency=%s)",
+                    used_agency,
+                )
                 decision = retry_decision
                 quality = "actionable"
             else:
-                logger.info("Retry still data_starved — keeping first-pass verdict, tagging as data_starved")
+                logger.info(
+                    "Retry still data_starved — keeping first-pass verdict (used_agency=%s)",
+                    used_agency,
+                )
 
         elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
         pipeline_duration.observe(elapsed_ms / 1000)
@@ -375,3 +506,9 @@ class TriagePipeline:
 
         # Step 9: Save to RCA history (always — even on notifier failure)
         await self.store.save_decision(record)
+
+        # P1.6 — tell dedup which decision_id covers this fingerprint, so
+        # subsequent duplicates within the window persist short-path records
+        # pointing at this RCA.
+        if alert.fingerprint:
+            await self.dedup.record_first_decision(alert.fingerprint, record.id)

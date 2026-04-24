@@ -54,6 +54,13 @@ class DrainAnalyzer:
         # Guards every read/write of self._miner, _total_lines, _total_anomalies.
         self._lock = threading.Lock()
 
+        # P1.7 — self-alerting state. After each ingest batch we compare
+        # the current batch's anomaly rate against the threshold; if
+        # crossed + cooldown OK, POST a Drain3Webhook to our own
+        # /webhook/drain3 endpoint so anomalies show up as a visible
+        # alert source on the dashboard.
+        self._last_alert_ts: float = 0.0  # monotonic, 0 = never fired
+
     def analyze(self, log_line: str) -> AnalyzeResult:
         with self._lock:
             result = self._miner.add_log_message(log_line)
@@ -196,7 +203,11 @@ class DrainAnalyzer:
                             # other HTTP handlers. Route through analyze() so
                             # anomaly counters actually reflect all observed
                             # traffic, not just alert-time annotate_lines calls.
-                            await asyncio.to_thread(self._ingest_batch_sync, lines)
+                            anomalous = await asyncio.to_thread(self._ingest_batch_sync, lines)
+                            # P1.7 — if this batch spiked, self-webhook the
+                            # triage pipeline so drain3 becomes a visible
+                            # alert source on the dashboard.
+                            await self.maybe_fire_alert(batch_total=len(lines), anomalous=anomalous)
                     else:
                         logger.debug("Drain3 Loki poll returned %d", resp.status_code)
             except asyncio.CancelledError:
@@ -204,7 +215,7 @@ class DrainAnalyzer:
             except Exception as e:
                 logger.debug("Drain3 background ingestion error: %s", e)
 
-    def _ingest_batch_sync(self, lines: list[str]) -> None:
+    def _ingest_batch_sync(self, lines: list[str]) -> list[str]:
         """Process a batch of log lines through analyze() on the calling thread.
 
         Called from the background ingest loop via asyncio.to_thread. Runs
@@ -212,12 +223,73 @@ class DrainAnalyzer:
         add_log_message so _total_anomalies reflects all ingested traffic,
         not just alert-time annotation. This gives the dashboard's Drain3
         panel an accurate anomaly-rate over time instead of stuck at 0.
+
+        Returns the list of anomalous lines seen in THIS batch — the
+        caller uses this to decide whether to trigger a self-webhook
+        alert (P1.7).
         """
+        anomalous_lines: list[str] = []
         for line in lines:
             try:
-                self.analyze(line)
+                result = self.analyze(line)
+                if result.is_new_pattern or result.match_count < settings.drain3_anomaly_threshold:
+                    anomalous_lines.append(line)
             except Exception as e:
                 logger.debug("Drain3 analyze failed for one line (non-fatal): %s", e)
+        return anomalous_lines
+
+    async def maybe_fire_alert(self, batch_total: int, anomalous: list[str]) -> None:
+        """P1.7: if this batch crossed the alert-rate threshold and we're
+        past cooldown, POST a Drain3Webhook to our own /webhook/drain3.
+
+        This is how drain3 shows up as a first-class alert source on the
+        dashboard — the endpoint always existed, but nothing was firing
+        to it. Called from the ingest loop after each batch.
+        """
+        if not settings.drain3_alert_enabled:
+            return
+        if batch_total < settings.drain3_alert_min_lines:
+            return
+        rate = len(anomalous) / max(batch_total, 1)
+        if rate < settings.drain3_alert_rate_threshold:
+            return
+
+        import time as _time
+        now = _time.monotonic()
+        cooldown = settings.drain3_alert_cooldown_seconds
+        if self._last_alert_ts and (now - self._last_alert_ts) < cooldown:
+            logger.info(
+                "Drain3 anomaly rate %.2f crossed threshold but within cooldown (%.0fs remaining)",
+                rate, cooldown - (now - self._last_alert_ts),
+            )
+            return
+
+        # Fire self-webhook. Keep the HTTP client short-lived so failures
+        # (e.g. triage still starting) don't park a long-running task.
+        from datetime import datetime, timezone
+        payload = {
+            "anomalous_lines": anomalous[:50],   # cap for wire size
+            "anomaly_rate": round(rate, 4),
+            "new_templates": [],  # Drain3Webhook schema wants this; can be empty
+            "service": "drain3",  # routes to the drain3 branch of the triage pipeline
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(settings.drain3_self_webhook_url, json=payload)
+                if resp.status_code in (200, 202):
+                    self._last_alert_ts = now
+                    logger.warning(
+                        "Drain3 self-alert fired: rate=%.2f (%d/%d lines anomalous), webhook=%d",
+                        rate, len(anomalous), batch_total, resp.status_code,
+                    )
+                else:
+                    logger.warning(
+                        "Drain3 self-alert webhook returned %d — %s",
+                        resp.status_code, resp.text[:100],
+                    )
+        except Exception as e:
+            logger.warning("Drain3 self-alert POST failed (non-fatal): %s", e)
 
     async def stop_background_ingestion(self):
         if self._background_task:

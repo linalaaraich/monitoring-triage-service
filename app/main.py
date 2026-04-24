@@ -2,6 +2,42 @@ import html as _html
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+
+# All DB timestamps are stored in UTC (datetime.utcnow().isoformat()). The
+# operator audience is in Casablanca — render times in GMT+1 so people
+# reading the dashboard at 14:00 local don't mentally subtract an hour
+# from every row. Label timestamps with "Casablanca" to keep it obvious
+# which zone is in view.
+_LOCAL_TZ = ZoneInfo("Africa/Casablanca")
+
+
+def _to_local_time(iso_utc_str: str | None, with_zone_label: bool = False) -> str:
+    """Parse an ISO UTC timestamp string and render it in Africa/Casablanca.
+
+    Accepts:
+      - "2026-04-24T10:35:21.982747" (no tz — assume UTC, as saved by utcnow())
+      - "2026-04-24T10:35:21+00:00"  (tz-aware UTC)
+      - "" / None                    — returns ""
+
+    Returns "YYYY-MM-DD HH:MM:SS" (and " Casablanca" if with_zone_label=True).
+    Falls back to the raw input on parse failure — don't crash the dashboard
+    over a malformed timestamp.
+    """
+    if not iso_utc_str:
+        return ""
+    s = iso_utc_str.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return iso_utc_str  # graceful fallback
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local = dt.astimezone(_LOCAL_TZ)
+    base = local.strftime("%Y-%m-%d %H:%M:%S")
+    return f"{base} Casablanca" if with_zone_label else base
 
 from fastapi import BackgroundTasks, FastAPI, Query
 from fastapi.responses import HTMLResponse, Response
@@ -742,7 +778,7 @@ def _render_detail_panel(r: dict) -> str:
     import urllib.parse as _urllib
 
     did = _html.escape(r.get('id') or '')
-    ts_full = _html.escape(r.get('timestamp') or '')
+    ts_full = _html.escape(_to_local_time(r.get('timestamp'), with_zone_label=True))
     fingerprint = _html.escape(r.get('alert_fingerprint') or '—')
     triage = _html.escape(r.get('triage_decision') or '—')
     confidence = _html.escape(str(r.get('llm_confidence') or '—'))
@@ -754,7 +790,7 @@ def _render_detail_panel(r: dict) -> str:
     # Meta-grid (top) — identity + core LLM facts.
     meta_html = (
         '<div class="meta-grid">'
-        f'  <div class="m"><div class="lbl">Timestamp (UTC)</div><div class="val">{ts_full}</div></div>'
+        f'  <div class="m"><div class="lbl">Timestamp (local)</div><div class="val">{ts_full}</div></div>'
         f'  <div class="m"><div class="lbl">Decision ID</div><div class="val">{did}</div></div>'
         f'  <div class="m"><div class="lbl">Alert fingerprint</div><div class="val">{fingerprint}</div></div>'
         f'  <div class="m"><div class="lbl">Service</div><div class="val normal">{_html.escape(service)}</div></div>'
@@ -855,7 +891,7 @@ def _render_detail_panel(r: dict) -> str:
         correlated = []
     if correlated:
         rows = ''.join(
-            f'<tr><td class="mono">{_html.escape((c.get("timestamp") or "")[:19])}</td>'
+            f'<tr><td class="mono">{_html.escape(_to_local_time(c.get("timestamp")))}</td>'
             f'<td>{_html.escape(c.get("alert_name") or "?")}</td>'
             f'<td>{_html.escape(c.get("affected_service") or "?")}</td>'
             f'<td>{_html.escape(c.get("llm_verdict") or "—")}</td>'
@@ -914,7 +950,7 @@ async def dashboard():
     body_rows = ""
     for r in rows:
         did = _html.escape(r.get('id') or '')
-        ts = _html.escape((r.get('timestamp') or '')[:19].replace('T', ' '))
+        ts = _html.escape(_to_local_time(r.get('timestamp')))
         alert_name = r.get('alert_name') or '—'
         service = r.get('affected_service') or '—'
         severity = (r.get('severity') or '').lower()
