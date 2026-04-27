@@ -226,377 +226,584 @@ async def drain3_stats():
 
 
 _DASHBOARD_CSS = """
+  /* Figma-aligned design tokens. Dark by default, .light variant flips
+     surface/text/border. Semantic colors (red/amber/green/blue/purple)
+     map onto pre-existing helper class names so the Python renderers
+     (_verdict_pill, _source_tag, _quality_pill, etc.) keep working
+     unchanged. The legacy sage/--ink/--card aliases are preserved for
+     the same reason, just retargeted to the new palette. */
   :root {
-    --bg: #f6f7f3;
-    --card: #ffffff;
-    --card-alt: #fbfcf8;
-    --ink: #1f2a23;
-    --ink-soft: #3f4a42;
-    --muted: #6b7a6f;
-    --rule: rgba(30, 55, 40, .10);
-    --rule-hi: rgba(30, 55, 40, .22);
-    --sage: #5d8c6b;
-    --sage-strong: #3e7d4d;
-    --sage-soft: #eef6ee;
-    --ok: #3e7d4d;
-    --warn: #a1642b;
-    --warn-soft: #f6efe3;
-    --danger: #a1393a;
-    --danger-soft: #f6ebe6;
-    --info: #4a7393;
-    --info-soft: #eaf0f5;
+    --bg: #0B0D10;
+    --surface: #13161B;
+    --surface-2: #1A1E25;
+    --surface-3: #21262E;
+    --border: #262B33;
+    --border-strong: #353B46;
+    --text-primary: #E6E8EB;
+    --text-secondary: #9BA3AF;
+    --text-muted: #6B7280;
+    --red: #E5484D;
+    --red-soft: rgba(229, 72, 77, 0.12);
+    --amber: #F5A524;
+    --amber-soft: rgba(245, 165, 36, 0.12);
+    --green: #2BA471;
+    --green-soft: rgba(43, 164, 113, 0.12);
+    --blue: #3E8FE6;
+    --blue-soft: rgba(62, 143, 230, 0.12);
+    --purple: #6E56CF;
+    --purple-soft: rgba(110, 86, 207, 0.12);
+
+    /* Legacy aliases — keep so existing helper output classes resolve. */
+    --card: var(--surface);
+    --card-alt: var(--surface-2);
+    --ink: var(--text-primary);
+    --ink-soft: var(--text-secondary);
+    --muted: var(--text-muted);
+    --rule: var(--border);
+    --rule-hi: var(--border-strong);
+    --sage: var(--blue);
+    --sage-strong: var(--blue);
+    --sage-soft: var(--blue-soft);
+    --ok: var(--green);
+    --warn: var(--amber);
+    --warn-soft: var(--amber-soft);
+    --danger: var(--red);
+    --danger-soft: var(--red-soft);
+    --info: var(--blue);
+    --info-soft: var(--blue-soft);
+
+    --radius: 6px;
+    --radius-lg: 8px;
+    --row-h: 36px;
+    --gutter: 24px;
+  }
+  body.light {
+    --bg: #FFFFFF;
+    --surface: #F7F8FA;
+    --surface-2: #EFF1F4;
+    --surface-3: #E5E8EC;
+    --border: #E2E5EA;
+    --border-strong: #CFD3D9;
+    --text-primary: #0B0D10;
+    --text-secondary: #4B5563;
+    --text-muted: #6B7280;
+    --red-soft: rgba(229, 72, 77, 0.10);
+    --amber-soft: rgba(245, 165, 36, 0.14);
+    --green-soft: rgba(43, 164, 113, 0.10);
+    --blue-soft: rgba(62, 143, 230, 0.10);
+    --purple-soft: rgba(110, 86, 207, 0.10);
   }
   * { margin:0; padding:0; box-sizing:border-box; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", Arial, sans-serif;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
     background: var(--bg);
-    color: var(--ink);
+    color: var(--text-primary);
     line-height: 1.5;
-    padding: 28px 32px 56px;
+    font-size: 14px;
     -webkit-font-smoothing: antialiased;
+    transition: background-color .15s, color .15s;
   }
-  .container { max-width: 1280px; margin: 0 auto; }
 
-  .header { margin-bottom: 22px; }
-  .header .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+  /* App shell — TopBar + LeftNav + main content. Mirrors the Figma
+     layout (h-screen flex column, then flex-1 row). */
+  .app-shell { display: flex; flex-direction: column; min-height: 100vh; }
+  .app-body { display: flex; flex: 1; min-height: 0; }
+  .main-area { flex: 1; min-width: 0; overflow-x: hidden; padding: var(--gutter) calc(var(--gutter) + 4px) 56px; }
+
+  .topbar {
+    height: 56px; padding: 0 var(--gutter);
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .topbar-left { display: flex; align-items: center; gap: 24px; }
+  .wordmark {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 16px; font-weight: 600; letter-spacing: -0.2px;
+    color: var(--text-primary);
+  }
+  .env-switch {
+    display: inline-flex; gap: 2px; padding: 3px;
+    background: var(--surface-2); border-radius: var(--radius);
+  }
+  .env-switch button {
+    padding: 4px 12px; font-size: 12px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    background: transparent; border: none; color: var(--text-secondary);
+    border-radius: 4px; cursor: pointer; transition: background-color .12s, color .12s;
+  }
+  .env-switch button.active { background: var(--bg); color: var(--text-primary); }
+  .topbar-right { display: flex; align-items: center; gap: 14px; }
+  .icon-btn {
+    background: transparent; border: 1px solid transparent;
+    width: 32px; height: 32px; border-radius: var(--radius);
+    color: var(--text-primary); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 14px; transition: background-color .12s, border-color .12s;
+  }
+  .icon-btn:hover { background: var(--surface-2); border-color: var(--border); }
+  .topbar .guide-link {
+    font-size: 12px; color: var(--text-secondary);
+    text-decoration: none; padding: 6px 10px; border-radius: var(--radius);
+    border: 1px solid var(--border); transition: color .12s, border-color .12s;
+  }
+  .topbar .guide-link:hover { color: var(--text-primary); border-color: var(--border-strong); }
+  .topbar .refresh {
+    font-size: 12px; color: var(--text-secondary);
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;
+    padding: 6px 10px; border-radius: var(--radius);
+  }
+  .topbar input[type=checkbox] { accent-color: var(--blue); }
+  .refresh-state { font-size: 11px; color: var(--amber); font-style: italic; margin-left: 4px; }
+
+  .leftnav {
+    width: 56px; flex-shrink: 0;
+    background: var(--surface); border-right: 1px solid var(--border);
+    transition: width .15s ease;
+  }
+  .leftnav:hover, .leftnav.expanded { width: 220px; }
+  .leftnav nav { padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; }
+  .leftnav a, .leftnav .navitem-disabled {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 10px; border-radius: var(--radius);
+    color: var(--text-secondary); text-decoration: none;
+    font-size: 13px; white-space: nowrap; overflow: hidden;
+    transition: background-color .12s, color .12s;
+  }
+  .leftnav a:hover { background: var(--surface-2); color: var(--text-primary); }
+  .leftnav a.active { background: var(--surface-2); color: var(--text-primary); }
+  .leftnav a.active::before {
+    content: ""; position: absolute; left: 0; width: 3px; height: 18px;
+    background: var(--blue); border-radius: 0 2px 2px 0;
+  }
+  .leftnav a { position: relative; }
+  .leftnav .navitem-disabled { opacity: 0.5; cursor: not-allowed; }
+  .leftnav .navitem-disabled .nav-tag {
+    margin-left: auto; font-size: 9px; font-weight: 700; letter-spacing: .4px;
+    text-transform: uppercase; color: var(--purple);
+    padding: 1px 6px; border: 1px solid var(--purple); border-radius: 4px;
+    background: var(--purple-soft);
+  }
+  .leftnav .nav-icon {
+    width: 18px; height: 18px; flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 14px; line-height: 1;
+  }
+  .leftnav .nav-label { opacity: 0; transition: opacity .15s; }
+  .leftnav:hover .nav-label, .leftnav.expanded .nav-label { opacity: 1; }
+
+  .container { max-width: 1320px; margin: 0 auto; }
+
+  .header { margin-bottom: 18px; }
+  .header .eyebrow {
+    font-size: 11px; font-weight: 600; letter-spacing: 1.4px;
+    text-transform: uppercase; color: var(--text-secondary); margin-bottom: 6px;
+  }
   .header h1 {
-    font-size: 26px; font-weight: 700; letter-spacing: -.3px; color: var(--ink);
+    font-size: 20px; font-weight: 500; letter-spacing: -0.2px;
+    color: var(--text-primary);
   }
-  .header h1 .accent { color: var(--sage-strong); }
-  .header .subtitle { margin-top: 4px; color: var(--muted); font-size: 13px; }
+  .header h1 .accent { color: var(--blue); }
+  .header .subtitle { margin-top: 4px; color: var(--text-secondary); font-size: 13px; }
 
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px; margin-bottom: 20px;
+  }
   .stat {
-    background: var(--card);
-    border: 1px solid var(--rule);
-    padding: 14px 18px;
-    border-radius: 12px;
-    display: flex; flex-direction: column; gap: 4px;
-    transition: border-color .15s;
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 14px 16px; border-radius: var(--radius);
+    display: flex; flex-direction: column; gap: 6px;
+    transition: border-color .12s;
   }
-  .stat:hover { border-color: var(--rule-hi); }
-  .stat .num { font-size: 26px; font-weight: 700; letter-spacing: -.3px; line-height: 1.2; color: var(--ink); }
-  .stat .lbl { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .4px; text-transform: uppercase; }
-  .stat.t-total { border-left: 3px solid var(--sage); }
-  .stat.t-esc { border-left: 3px solid var(--danger); }
-  .stat.t-esc .num { color: var(--danger); }
-  .stat.t-dismiss { border-left: 3px solid var(--ok); }
-  .stat.t-dismiss .num { color: var(--ok); }
-  .stat.t-timeout { border-left: 3px solid var(--warn); }
-  .stat.t-timeout .num { color: var(--warn); }
-  .stat.t-suppress { border-left: 3px solid var(--info); }
-  .stat.t-suppress .num { color: var(--info); }
+  .stat:hover { border-color: var(--border-strong); }
+  .stat .lbl {
+    color: var(--text-secondary); font-size: 11px; font-weight: 500;
+    letter-spacing: .3px; order: 1;
+  }
+  .stat .num {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 24px; font-weight: 500; letter-spacing: -0.4px;
+    line-height: 1.1; color: var(--text-primary); order: 2;
+  }
+  .stat.t-total { border-top: 1px solid var(--blue); }
+  .stat.t-esc .num { color: var(--red); }
+  .stat.t-dismiss .num { color: var(--green); }
+  .stat.t-timeout .num { color: var(--amber); }
+  .stat.t-suppress .num { color: var(--text-secondary); }
 
-  .toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .toolbar {
+    display: flex; gap: 12px; align-items: center;
+    margin-bottom: 12px; flex-wrap: wrap;
+  }
   .toolbar input[type=text] {
-    background: var(--card); border: 1px solid var(--rule); color: var(--ink);
-    padding: 9px 14px; border-radius: 8px; font-size: 13px; min-width: 280px;
-    font-family: inherit; transition: border-color .15s, box-shadow .15s;
+    background: var(--surface); border: 1px solid var(--border); color: var(--text-primary);
+    padding: 7px 12px; border-radius: var(--radius); font-size: 13px;
+    min-width: 320px; font-family: inherit;
+    transition: border-color .12s, box-shadow .12s;
   }
   .toolbar input[type=text]:focus {
-    outline: none; border-color: var(--sage); box-shadow: 0 0 0 3px rgba(93,140,107,.15);
+    outline: none; border-color: var(--blue);
+    box-shadow: 0 0 0 3px rgba(62, 143, 230, 0.15);
   }
-  .toolbar input[type=text]::placeholder { color: var(--muted); }
-  .toolbar .hint { font-size: 12px; color: var(--muted); }
+  .toolbar input[type=text]::placeholder { color: var(--text-muted); }
+  .toolbar .hint { font-size: 12px; color: var(--text-muted); }
   .toolbar .spacer { flex: 1; }
-  .toolbar label.refresh {
-    font-size: 12px; color: var(--muted);
-    display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;
-  }
-  .toolbar input[type=checkbox] { accent-color: var(--sage); }
-  .refresh-state { font-size: 11px; color: var(--warn); font-style: italic; margin-left: 6px; }
-  .toolbar .explainer-link {
-    font-size: 12px; color: var(--sage-strong); text-decoration: none;
-    border-bottom: 1px dotted var(--sage); padding-bottom: 1px;
-  }
-  .toolbar .explainer-link:hover { color: var(--ink); border-bottom-color: var(--ink); }
   .raw-code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 10.5px; color: var(--muted); margin-left: 4px;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10.5px; color: var(--text-muted); margin-left: 4px;
   }
 
   .table-card {
-    background: var(--card); border: 1px solid var(--rule); border-radius: 12px;
-    overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden;
   }
   table { border-collapse: collapse; width: 100%; }
   thead th {
-    background: var(--sage-soft); color: var(--ink-soft);
-    font-weight: 700; font-size: 10.5px; letter-spacing: .8px;
-    text-transform: uppercase; text-align: left;
-    padding: 11px 14px; border-bottom: 1px solid var(--rule);
-    position: sticky; top: 0; z-index: 1;
+    background: var(--surface-2); color: var(--text-secondary);
+    font-weight: 500; font-size: 11px; letter-spacing: .2px;
+    text-align: left;
+    padding: 8px 14px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 56px; z-index: 1;
   }
-  tbody tr.summary { cursor: pointer; transition: background .12s; }
+  tbody tr.summary { cursor: pointer; transition: background-color .12s; height: var(--row-h); }
   tbody tr.summary td {
-    padding: 11px 14px; font-size: 13px; border-bottom: 1px solid var(--rule);
-    vertical-align: middle; color: var(--ink-soft);
+    padding: 8px 14px; font-size: 13px; border-bottom: 1px solid var(--border);
+    vertical-align: middle; color: var(--text-primary);
   }
-  tbody tr.summary td:nth-child(3) { color: var(--ink); font-weight: 500; }
-  tbody tr.summary:hover { background: var(--card-alt); }
-  tbody tr.summary.open { background: var(--sage-soft); }
+  tbody tr.summary td:nth-child(3) { color: var(--text-primary); font-weight: 500; }
+  tbody tr.summary:hover { background: var(--surface-2); }
+  tbody tr.summary.open { background: var(--surface-2); }
   tbody tr.summary.open td { border-bottom-color: transparent; }
 
   td.chev { width: 28px; text-align: center; }
   .chev-icon {
     display: inline-block; width: 0; height: 0;
-    border-left: 5px solid var(--muted);
+    border-left: 5px solid var(--text-muted);
     border-top: 4px solid transparent;
     border-bottom: 4px solid transparent;
     transition: transform .15s;
   }
-  tbody tr.summary.open .chev-icon { transform: rotate(90deg); border-left-color: var(--sage-strong); }
+  tbody tr.summary.open .chev-icon { transform: rotate(90deg); border-left-color: var(--blue); }
 
-  td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; white-space: nowrap; }
+  td.mono, .mono {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px; white-space: nowrap;
+  }
 
+  /* Source tag — semantic dot + mono label, no chunky pill background.
+     Keeps the tag-* class names so _source_tag() does not need to change. */
   .tag {
-    display: inline-block; padding: 2px 8px; border-radius: 10px;
-    font-size: 10.5px; font-weight: 700; border: 1px solid; letter-spacing: .3px;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 2px 8px; border-radius: var(--radius);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px; font-weight: 500;
+    border: 1px solid var(--border); background: var(--surface-2);
+    color: var(--text-secondary); letter-spacing: 0;
+    text-transform: lowercase;
   }
-  .tag-grafana { color: var(--warn); border-color: rgba(161,100,43,.35); background: var(--warn-soft); }
-  .tag-drain3 { color: var(--info); border-color: rgba(74,115,147,.35); background: var(--info-soft); }
-  .tag-default { color: var(--muted); border-color: var(--rule); background: var(--bg); }
+  .tag::before {
+    content: ""; display: inline-block;
+    width: 6px; height: 6px; border-radius: 50%;
+    background: currentColor;
+  }
+  .tag-grafana { color: var(--amber); }
+  .tag-drain3 { color: var(--blue); }
+  .tag-default { color: var(--text-muted); }
 
-  .sev { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
-  .sev-critical { color: var(--danger); }
-  .sev-warning { color: var(--warn); }
-  .sev-info, .sev-low { color: var(--muted); }
+  /* Severity — small color dot + mono label. */
+  .sev {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px; font-weight: 500; text-transform: lowercase; letter-spacing: 0;
+    color: var(--text-secondary);
+  }
+  .sev::before {
+    content: ""; display: inline-block;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--text-muted);
+  }
+  .sev-critical { color: var(--text-primary); }
+  .sev-critical::before { background: var(--red); }
+  .sev-warning { color: var(--text-primary); }
+  .sev-warning::before { background: var(--amber); }
+  .sev-info, .sev-low { color: var(--text-secondary); }
+  .sev-info::before, .sev-low::before { background: var(--blue); }
 
+  /* Verdict pill — Figma's StatusDot + mono label. */
   .pill {
-    display: inline-block; padding: 3px 10px; border-radius: 999px;
-    font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 2px 8px; border-radius: var(--radius);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px; font-weight: 500; text-transform: uppercase;
+    letter-spacing: .3px; border: 1px solid transparent;
   }
-  .pill-escalate { background: var(--danger-soft); color: var(--danger); border: 1px solid rgba(161,57,58,.30); }
-  .pill-dismiss  { background: var(--sage-soft); color: var(--sage-strong); border: 1px solid rgba(62,125,77,.32); }
-  .pill-inconclusive { background: var(--warn-soft); color: var(--warn); border: 1px solid rgba(161,100,43,.30); }
-  .pill-none { background: var(--bg); color: var(--muted); border: 1px solid var(--rule); }
+  .pill::before {
+    content: ""; display: inline-block;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: currentColor;
+  }
+  .pill-escalate { color: var(--red); background: var(--red-soft); border-color: var(--red); }
+  .pill-dismiss  { color: var(--green); background: var(--green-soft); border-color: var(--green); }
+  .pill-inconclusive { color: var(--amber); background: var(--amber-soft); border-color: var(--amber); }
+  .pill-none { color: var(--text-muted); background: transparent; border-color: var(--border); }
 
-  /* Quality pill — indicates whether the RCA text actually named a cause
-     or just hedged with "insufficient data". data_starved rows are what
-     future LLM prompts cite as "don't repeat this". */
+  /* Quality pill — flat capsule, no shouty caps, sits next to the verdict. */
   .quality {
-    display: inline-block; padding: 2px 8px; border-radius: 10px;
-    font-size: 10px; font-weight: 700; letter-spacing: .4px;
-    text-transform: uppercase; margin-left: 6px; vertical-align: middle;
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 500; letter-spacing: 0;
+    margin-left: 6px; vertical-align: middle; color: #fff;
   }
-  .quality-actionable { background: transparent; color: var(--muted); border: 1px solid var(--rule); }
-  .quality-data_starved {
-    background: var(--warn-soft); color: var(--warn);
-    border: 1px solid rgba(161,100,43,.35);
-  }
+  .quality-actionable { background: var(--green); }
+  .quality-data_starved { background: var(--amber); }
   .quality-data_starved::before { content: "⚠ "; }
 
-  .action { font-size: 12px; color: var(--ink-soft); }
-  .action-emailed { color: var(--danger); }
-  .action-emailed_raw { color: var(--warn); }
-  .action-suppressed { color: var(--ok); }
+  .action { font-size: 12px; color: var(--text-secondary); }
+  .action-emailed { color: var(--red); }
+  .action-emailed_raw { color: var(--amber); }
+  .action-suppressed { color: var(--green); }
 
   tbody tr.detail { display: none; }
   tbody tr.detail.open { display: table-row; }
-  tbody tr.detail > td { padding: 0; background: var(--card-alt); border-bottom: 1px solid var(--rule); }
+  tbody tr.detail > td {
+    padding: 0; background: var(--bg);
+    border-bottom: 1px solid var(--border);
+  }
 
   .panel {
-    padding: 20px 24px 22px;
-    border-left: 3px solid var(--sage);
-    background: linear-gradient(90deg, var(--sage-soft), var(--card-alt) 70%);
+    padding: 20px 22px 22px;
+    border-left: 2px solid var(--blue);
+    background: var(--bg);
   }
   .panel .meta-grid {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 14px 24px; margin-bottom: 18px;
+    gap: 12px 24px; margin-bottom: 18px;
   }
   .panel .m { display: flex; flex-direction: column; gap: 3px; }
   .panel .m .lbl {
-    font-size: 10px; font-weight: 700; letter-spacing: 1px;
-    text-transform: uppercase; color: var(--muted);
+    font-size: 11px; font-weight: 500; letter-spacing: .2px;
+    color: var(--text-secondary);
   }
   .panel .m .val {
-    font-size: 12.5px; color: var(--ink); font-weight: 500;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12.5px; color: var(--text-primary); font-weight: 500;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     word-break: break-all;
   }
   .panel .m .val.normal {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-    font-weight: 500;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    font-weight: 400;
   }
 
   .section { margin-top: 16px; }
   .section h3 {
-    font-size: 13px; font-weight: 700; color: var(--ink);
-    margin-bottom: 8px; letter-spacing: .2px;
+    font-size: 13px; font-weight: 500; color: var(--text-primary);
+    margin-bottom: 8px; letter-spacing: 0;
   }
   .section .body {
-    background: var(--card); border: 1px solid var(--rule); border-radius: 8px;
-    padding: 14px 16px; color: var(--ink-soft); font-size: 13.5px; line-height: 1.65;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px; color: var(--text-primary);
+    font-size: 13.5px; line-height: 1.65;
     white-space: pre-wrap; word-break: break-word;
   }
-  .section .body.empty { color: var(--muted); font-style: italic; }
+  .section .body.empty { color: var(--text-muted); font-style: italic; }
+  .section .body em { color: var(--text-muted); font-style: italic; }
 
   tbody tr.empty td {
-    text-align: center; color: var(--muted); padding: 36px 14px;
+    text-align: center; color: var(--text-muted); padding: 36px 14px;
     font-style: italic; font-size: 13px;
   }
 
   .drain-card {
-    background: var(--card);
-    border: 1px solid var(--rule);
-    border-left: 3px solid var(--info);
-    border-radius: 12px;
-    padding: 16px 20px 18px;
-    margin-bottom: 20px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px; margin-bottom: 20px;
   }
   .drain-card .drain-header {
     display: flex; align-items: baseline; gap: 12px;
     margin-bottom: 14px;
   }
   .drain-card .drain-header .eyebrow {
-    font-size: 10.5px; font-weight: 700; letter-spacing: 1.5px;
-    text-transform: uppercase; color: var(--muted);
+    font-size: 11px; font-weight: 500; letter-spacing: .3px;
+    color: var(--text-secondary);
   }
   .drain-card .drain-header h2 {
-    font-size: 15px; font-weight: 700; color: var(--ink);
-    letter-spacing: -.2px;
+    font-size: 14px; font-weight: 500; color: var(--text-primary);
+    letter-spacing: -0.1px;
   }
   .drain-card .drain-header .anomaly-rate {
     margin-left: auto;
-    font-size: 12px; color: var(--muted);
+    font-size: 12px; color: var(--text-secondary);
   }
-  .drain-card .drain-header .anomaly-rate strong { color: var(--info); font-weight: 700; }
+  .drain-card .drain-header .anomaly-rate strong {
+    color: var(--blue); font-weight: 500;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
   .drain-tiles {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 12px; margin-bottom: 14px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px; margin-bottom: 14px;
   }
   .drain-tile {
-    display: flex; flex-direction: column; gap: 3px;
+    display: flex; flex-direction: column; gap: 4px;
     padding: 10px 14px;
-    background: var(--card-alt);
-    border: 1px solid var(--rule);
-    border-radius: 8px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: var(--radius);
   }
-  .drain-tile .num { font-size: 20px; font-weight: 700; color: var(--ink); letter-spacing: -.2px; }
   .drain-tile .lbl {
-    font-size: 10.5px; font-weight: 600; letter-spacing: .4px;
-    text-transform: uppercase; color: var(--muted);
+    font-size: 11px; font-weight: 500; letter-spacing: .2px;
+    color: var(--text-secondary); order: 1;
   }
-  .drain-patterns { margin-top: 4px; }
+  .drain-tile .num {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 18px; font-weight: 500; color: var(--text-primary);
+    letter-spacing: -0.2px; order: 2;
+  }
+  .drain-patterns { margin-top: 6px; }
   .drain-patterns summary {
     cursor: pointer; user-select: none; list-style: none;
-    font-size: 10.5px; font-weight: 700; letter-spacing: 1px;
-    text-transform: uppercase; color: var(--muted);
+    font-size: 11px; font-weight: 500; letter-spacing: 0;
+    color: var(--text-secondary);
     padding: 4px 0; display: inline-flex; align-items: center; gap: 6px;
   }
   .drain-patterns summary::-webkit-details-marker { display: none; }
   .drain-patterns summary::before {
     content: ""; display: inline-block; width: 0; height: 0;
-    border-left: 4px solid var(--muted);
+    border-left: 4px solid var(--text-muted);
     border-top: 3px solid transparent; border-bottom: 3px solid transparent;
     transition: transform .15s;
   }
   .drain-patterns[open] summary::before { transform: rotate(90deg); }
-  .drain-patterns summary:hover { color: var(--ink); }
+  .drain-patterns summary:hover { color: var(--text-primary); }
   .drain-patterns ol {
     padding-left: 22px; margin-top: 6px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 12px; color: var(--ink-soft);
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px; color: var(--text-secondary);
   }
   .drain-patterns ol li { padding: 2px 0; word-break: break-word; }
   .drain-patterns .none {
-    color: var(--muted); font-style: italic; font-size: 12px; margin-top: 6px;
+    color: var(--text-muted); font-style: italic; font-size: 12px; margin-top: 6px;
   }
 
-  /* Deep-link chips on decision row: tiny Grafana/Loki/Jaeger shortcuts */
+  /* Deep-link chips on decision row — Figma-style outlined chips. */
   .deep-chip {
-    display: inline-block; padding: 2px 8px; border-radius: 6px;
-    font-size: 10px; font-weight: 700; letter-spacing: .3px; text-transform: uppercase;
-    border: 1px solid var(--rule); color: var(--muted); text-decoration: none;
-    margin-left: 4px; transition: border-color .12s, color .12s;
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: var(--radius);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px; font-weight: 500; letter-spacing: 0;
+    border: 1px solid var(--border); color: var(--text-secondary);
+    background: var(--surface-2); text-decoration: none;
+    margin-left: 6px; transition: border-color .12s, color .12s;
   }
-  .deep-chip:hover { border-color: var(--sage-strong); color: var(--sage-strong); }
-  .deep-chip.dc-grafana { color: var(--warn); border-color: rgba(161,100,43,.25); }
-  .deep-chip.dc-grafana:hover { background: var(--warn-soft); }
-  .deep-chip.dc-loki { color: var(--info); border-color: rgba(74,115,147,.25); }
-  .deep-chip.dc-loki:hover { background: var(--info-soft); }
-  .deep-chip.dc-jaeger { color: var(--sage-strong); border-color: rgba(62,125,77,.25); }
-  .deep-chip.dc-jaeger:hover { background: var(--sage-soft); }
+  .deep-chip:hover { border-color: var(--blue); color: var(--blue); }
+  .deep-chip.dc-grafana { color: var(--amber); }
+  .deep-chip.dc-grafana:hover { border-color: var(--amber); }
+  .deep-chip.dc-loki { color: var(--blue); }
+  .deep-chip.dc-loki:hover { border-color: var(--blue); }
+  .deep-chip.dc-jaeger { color: var(--green); }
+  .deep-chip.dc-jaeger:hover { border-color: var(--green); }
 
   /* Detail-panel richer layout — sub-cards for observed value, actions,
-     evidence, correlated alerts, deep links. Matches email parity so the
-     UI is the "go deep" destination. */
+     evidence, correlated alerts, deep links. */
   .obs-card {
-    background: var(--card); border: 1px solid var(--rule);
-    border-left: 4px solid var(--info);
-    border-radius: 10px; padding: 14px 18px; margin-bottom: 14px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 2px solid var(--blue);
+    border-radius: var(--radius); padding: 14px 18px; margin-bottom: 14px;
   }
   .obs-card .obs-row { display: flex; gap: 14px; align-items: baseline; margin-bottom: 6px; }
-  .obs-card .lbl { font-size: 10.5px; font-weight: 700; letter-spacing: 1px;
-    text-transform: uppercase; color: var(--muted); min-width: 140px; }
-  .obs-card .val { font-size: 20px; font-weight: 700; color: var(--ink); }
+  .obs-card .obs-row:last-child { margin-bottom: 0; }
+  .obs-card .lbl {
+    font-size: 11px; font-weight: 500; letter-spacing: .2px;
+    color: var(--text-secondary); min-width: 140px;
+  }
+  .obs-card .val {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 18px; font-weight: 500; color: var(--text-primary);
+    letter-spacing: -0.2px;
+  }
   .obs-card .expr {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 12px; color: var(--ink-soft); word-break: break-all;
-    background: var(--card-alt); padding: 6px 10px; border-radius: 6px; flex: 1;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px; color: var(--text-primary); word-break: break-all;
+    background: var(--surface-2); padding: 6px 10px;
+    border: 1px solid var(--border); border-radius: var(--radius); flex: 1;
   }
 
   .panel-list {
     list-style: none; padding: 0; margin: 0;
-    background: var(--card); border: 1px solid var(--rule); border-radius: 8px;
-    overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden;
   }
   .panel-list li {
-    padding: 9px 14px; border-bottom: 1px solid var(--rule);
-    font-size: 13px; color: var(--ink-soft); word-break: break-word;
+    padding: 9px 14px; border-bottom: 1px solid var(--border);
+    font-size: 13px; color: var(--text-primary); word-break: break-word;
   }
   .panel-list li:last-child { border-bottom: none; }
   .panel-list li .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 12px;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px; color: var(--text-secondary);
   }
 
-  .correlated-table { width: 100%; border-collapse: collapse; font-size: 12px; background: var(--card); border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
-  .correlated-table th, .correlated-table td { padding: 7px 12px; text-align: left; border-bottom: 1px solid var(--rule); }
-  .correlated-table th { background: var(--sage-soft); font-weight: 700; font-size: 10.5px; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); }
+  .correlated-table {
+    width: 100%; border-collapse: collapse; font-size: 12px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden;
+  }
+  .correlated-table th, .correlated-table td {
+    padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border);
+  }
+  .correlated-table th {
+    background: var(--surface-2); font-weight: 500; font-size: 11px;
+    letter-spacing: .2px; color: var(--text-secondary);
+  }
   .correlated-table tr:last-child td { border-bottom: none; }
-  .correlated-table td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: var(--muted); }
+  .correlated-table td.mono {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    color: var(--text-secondary);
+  }
 
   .panel-links { display: flex; gap: 8px; flex-wrap: wrap; }
   .panel-link {
-    display: inline-block; padding: 6px 12px; border-radius: 6px;
-    font-size: 12px; font-weight: 600;
-    background: var(--card); border: 1px solid var(--rule); color: var(--ink-soft);
-    text-decoration: none; transition: border-color .15s, color .15s;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: var(--radius);
+    font-size: 12px; font-weight: 500;
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text-primary); text-decoration: none;
+    transition: border-color .12s, background-color .12s;
   }
-  .panel-link:hover { border-color: var(--sage-strong); color: var(--sage-strong); }
+  .panel-link:hover { border-color: var(--blue); background: var(--surface-2); }
+  .panel-link::after {
+    content: "↗"; color: var(--text-muted); font-size: 11px;
+  }
 
-  /* Placeholder for sections where the LLM emitted nothing — still render
-     the section so the UI is consistent + the absence is visible. */
+  /* Placeholder for sections where the LLM emitted nothing. */
   .panel-empty {
-    background: var(--card-alt); border: 1px dashed var(--rule);
-    border-radius: 8px; padding: 12px 16px;
-    color: var(--muted); font-size: 12.5px; font-style: italic;
+    background: var(--surface); border: 1px dashed var(--border);
+    border-radius: var(--radius); padding: 12px 16px;
+    color: var(--text-muted); font-size: 12.5px; font-style: italic;
     line-height: 1.6;
   }
 
-  /* Copyable PromQL / LogQL rows — since Grafana 13 deep-link format is
-     brittle across versions, we hand the user the query as text. */
+  /* Copyable PromQL / LogQL rows. */
   .query-row {
     display: flex; gap: 12px; align-items: center;
     margin-bottom: 8px; flex-wrap: wrap;
   }
   .query-lbl {
-    font-size: 10.5px; font-weight: 700; letter-spacing: .8px;
-    text-transform: uppercase; color: var(--muted);
-    min-width: 120px;
+    font-size: 11px; font-weight: 500; letter-spacing: .2px;
+    color: var(--text-secondary); min-width: 120px;
   }
   .query-code {
-    flex: 1; padding: 8px 12px; border-radius: 6px;
-    background: var(--card-alt); border: 1px solid var(--rule);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 12px; color: var(--ink-soft);
+    flex: 1; padding: 8px 12px; border-radius: var(--radius);
+    background: var(--surface); border: 1px solid var(--border);
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px; color: var(--text-primary);
     word-break: break-all;
-    user-select: all; /* triple-click to select all for copying */
+    user-select: all;
   }
 
-  @media (max-width: 700px) {
-    body { padding: 18px; }
+  @media (max-width: 900px) {
+    .leftnav { display: none; }
+    .topbar { padding: 0 16px; }
+    .main-area { padding: 16px; }
     .toolbar input[type=text] { min-width: 0; width: 100%; }
     thead th:nth-child(4), tbody td:nth-child(4),
     thead th:nth-child(5), tbody td:nth-child(5) { display: none; }
@@ -665,7 +872,22 @@ _DASHBOARD_JS = """
       if (label) label.textContent = '';
     }
   }
+  function toggleTheme() {
+    var isLight = document.body.classList.toggle('light');
+    try { localStorage.setItem('triage-theme', isLight ? 'light' : 'dark'); } catch (e) {}
+    var btn = document.getElementById('theme-toggle');
+    if (btn) btn.textContent = isLight ? '☾' : '☼';
+  }
+  function restoreTheme() {
+    try {
+      var saved = localStorage.getItem('triage-theme');
+      if (saved === 'light') document.body.classList.add('light');
+    } catch (e) {}
+    var btn = document.getElementById('theme-toggle');
+    if (btn) btn.textContent = document.body.classList.contains('light') ? '☾' : '☼';
+  }
   document.addEventListener('DOMContentLoaded', function() {
+    restoreTheme();
     var f = document.getElementById('filter');
     if (f) f.addEventListener('input', applyFilter);
     applyFilter();
@@ -822,8 +1044,86 @@ def _source_tag(source: str) -> str:
     return f'<span class="tag {cls}">{_html.escape(source or "—")}</span>'
 
 
+_NAV_ITEMS = [
+    # (slug, label, icon, enabled, route_or_none)
+    # Decisions and Guide are real today. Everything else is the Figma /
+    # Epic 5 surface area — wired into the chrome so the design space is
+    # visible to reviewers + on-call eyes get used to the layout, but
+    # disabled until US-5.x lands. Unicode glyphs avoid an icon dep.
+    ("incidents",  "Incidents",         "◎", False, None),
+    ("alerts",     "Alerts",            "◊", False, None),
+    ("anomalies",  "Drain3 Anomalies",  "≋", False, None),
+    ("services",   "Services",          "▦", False, None),
+    ("baselines",  "Baselines",         "⌇", False, None),
+    ("decisions",  "Decisions History", "↻", True,  "/dashboard"),
+    ("evaluation", "Evaluation",        "✓", False, None),
+    ("guide",      "Dashboard Guide",   "?", True,  "/dashboard/guide"),
+]
+
+
+def _render_topbar(active: str = "decisions") -> str:
+    """TopBar: Triage wordmark + env switcher + auto-refresh + theme toggle.
+
+    Mirrors src/app/components/TopBar.tsx from the Figma source. Auto-refresh
+    moved here from the in-page toolbar so the operator always sees its
+    state regardless of scroll position. Env switcher is a static
+    placeholder — there's only one prod environment today; staging is a
+    visual reservation for the multi-env Epic 5 follow-up."""
+    return (
+        '<header class="topbar">'
+        '  <div class="topbar-left">'
+        '    <div class="wordmark">Triage</div>'
+        '    <div class="env-switch" role="tablist" aria-label="Environment">'
+        '      <button type="button" class="active" aria-pressed="true">prod</button>'
+        '      <button type="button" disabled title="Staging environment will land with Epic 5">staging</button>'
+        '    </div>'
+        '  </div>'
+        '  <div class="topbar-right">'
+        '    <label class="refresh">'
+        '      <input id="refresh" type="checkbox" checked onchange="toggleRefresh()" />'
+        '      <span>Auto-refresh 30s</span>'
+        '      <span id="refresh-state" class="refresh-state"></span>'
+        '    </label>'
+        '    <a class="guide-link" href="/dashboard/guide" title="Operator reference for every column, code, and abbreviation">What do these mean?</a>'
+        '    <button type="button" id="theme-toggle" class="icon-btn" onclick="toggleTheme()" title="Toggle light / dark theme" aria-label="Toggle theme">☼</button>'
+        '  </div>'
+        '</header>'
+    )
+
+
+def _render_leftnav(active: str = "decisions") -> str:
+    """LeftNav: collapsed-by-default rail; hover or focus expands.
+
+    Mirrors src/app/components/LeftNav.tsx. The Figma design ships nine
+    top-level routes; only Decisions History (this page) and Dashboard
+    Guide are wired up server-side today, so the rest are rendered as
+    visually-consistent disabled rows tagged with an "EPIC 5" badge so an
+    on-call engineer reading the chrome immediately sees what's planned
+    vs what's live. Keeps the chrome honest — no dead links."""
+    items_html = []
+    for slug, label, icon, enabled, route in _NAV_ITEMS:
+        is_active = slug == active
+        if enabled:
+            cls = "active" if is_active else ""
+            items_html.append(
+                f'<a href="{route}" class="{cls}" title="{_html.escape(label)}">'
+                f'  <span class="nav-icon">{icon}</span>'
+                f'  <span class="nav-label">{_html.escape(label)}</span>'
+                f'</a>'
+            )
+        else:
+            items_html.append(
+                f'<div class="navitem-disabled" title="{_html.escape(label)} — landing with Epic 5 (UEBA)">'
+                f'  <span class="nav-icon">{icon}</span>'
+                f'  <span class="nav-label">{_html.escape(label)}</span>'
+                f'  <span class="nav-tag">epic 5</span>'
+                f'</div>'
+            )
+    return f'<aside class="leftnav"><nav>{"".join(items_html)}</nav></aside>'
+
+
 def _render_drain3_panel(stats: dict) -> str:
-    """Surface DrainAnalyzer.get_stats() as a sage-styled card on /dashboard.
+    """Surface DrainAnalyzer.get_stats() as a card on /dashboard.
 
     Tiles: templates learned, lines processed, anomalies flagged. Header carries
     the current anomaly rate; bottom lists the five most recent templates so
@@ -1107,45 +1407,53 @@ async def dashboard():
     return (
         f'<!DOCTYPE html><html lang="en"><head>'
         f'<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
-        f'<title>RCA Decisions · Triage Service</title>'
+        f'<title>Triage · Decisions</title>'
+        f'<link rel="preconnect" href="https://fonts.googleapis.com">'
+        f'<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+        f'<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">'
         f'<style>{_DASHBOARD_CSS}</style>'
         f'</head><body>'
-        f'<div class="container">'
-        f'  <div class="header">'
-        f'    <div class="eyebrow">AI root-cause triage</div>'
-        f'    <h1>Decision <span class="accent">history</span></h1>'
-        f'    <div class="subtitle">Recent verdicts produced by the triage pipeline. Click any row to review the full root-cause analysis.</div>'
-        f'  </div>'
-        f'  <div class="stats">'
-        f'    <div class="stat t-total"><div class="num">{total}</div><div class="lbl">Total decisions</div></div>'
-        f'    <div class="stat t-esc" title="Verdict was ESCALATE and an email was sent"><div class="num">{escalated}</div><div class="lbl">Notified</div></div>'
-        f'    <div class="stat t-dismiss" title="Verdict was DISMISS — alert judged not actionable"><div class="num">{dismissed}</div><div class="lbl">Dismissed</div></div>'
-        f'    <div class="stat t-suppress" title="Pre-LLM dedup — same fingerprint already seen in window"><div class="num">{suppressed_pre}</div><div class="lbl">Deduped</div></div>'
-        f'    <div class="stat t-timeout" title="Pipeline exceeded its budget — raw alert forwarded with no LLM verdict"><div class="num">{timed_out}</div><div class="lbl">Timed out</div></div>'
-        f'  </div>'
-        f'  {_render_drain3_panel(drain_stats)}'
-        f'  <div class="toolbar">'
-        f'    <input id="filter" type="text" placeholder="Filter by alert name, service, verdict, or RCA text" autocomplete="off" />'
-        f'    <span class="hint" id="match-count"></span>'
-        f'    <span class="spacer"></span>'
-        f'    <a class="explainer-link" href="/dashboard/guide" title="Read the dashboard guide — every column, code, and abbreviation explained">What do these mean?</a>'
-        f'    <label class="refresh"><input id="refresh" type="checkbox" checked onchange="toggleRefresh()" /> Auto-refresh every 30 seconds <span id="refresh-state" class="refresh-state"></span></label>'
-        f'  </div>'
-        f'  <div class="table-card">'
-        f'    <table>'
-        f'      <thead><tr>'
-        f'        <th></th>'
-        f'        <th title="Wall-clock time the decision was persisted, in Casablanca local zone (GMT+1)">Time</th>'
-        f'        <th title="Alert rule name as configured in Grafana">Alert</th>'
-        f'        <th title="Where the alert came from: grafana=metric rule, drain3=log-template anomaly">Source</th>'
-        f'        <th title="The service the alert is about">Service</th>'
-        f'        <th title="Alert severity: critical / warning / info">Severity</th>'
-        f'        <th title="LLM verdict (escalate / dismiss / inconclusive) + RCA quality pill (fits / thin / review)">Verdict</th>'
-        f'        <th title="What the pipeline did downstream of the verdict (Notified / Suppressed / Dropped / Notified-no-LLM)">Action</th>'
-        f'        <th title="End-to-end pipeline duration including MCP context-gathering + LLM inference">Duration</th>'
-        f'      </tr></thead>'
-        f'      <tbody>{body_rows}</tbody>'
-        f'    </table>'
+        f'<div class="app-shell">'
+        f'{_render_topbar(active="decisions")}'
+        f'  <div class="app-body">'
+        f'{_render_leftnav(active="decisions")}'
+        f'    <main class="main-area">'
+        f'      <div class="container">'
+        f'        <div class="header">'
+        f'          <div class="eyebrow">AI root-cause triage</div>'
+        f'          <h1>Decisions <span class="accent">history</span></h1>'
+        f'          <div class="subtitle">Recent verdicts produced by the triage pipeline. Click any row to review the full root-cause analysis.</div>'
+        f'        </div>'
+        f'        <div class="stats">'
+        f'          <div class="stat t-total"><div class="num">{total}</div><div class="lbl">Total decisions</div></div>'
+        f'          <div class="stat t-esc" title="Verdict was ESCALATE and an email was sent"><div class="num">{escalated}</div><div class="lbl">Notified</div></div>'
+        f'          <div class="stat t-dismiss" title="Verdict was DISMISS — alert judged not actionable"><div class="num">{dismissed}</div><div class="lbl">Dismissed</div></div>'
+        f'          <div class="stat t-suppress" title="Pre-LLM dedup — same fingerprint already seen in window"><div class="num">{suppressed_pre}</div><div class="lbl">Deduped</div></div>'
+        f'          <div class="stat t-timeout" title="Pipeline exceeded its budget — raw alert forwarded with no LLM verdict"><div class="num">{timed_out}</div><div class="lbl">Timed out</div></div>'
+        f'        </div>'
+        f'        {_render_drain3_panel(drain_stats)}'
+        f'        <div class="toolbar">'
+        f'          <input id="filter" type="text" placeholder="Filter by alert name, service, verdict, or RCA text" autocomplete="off" />'
+        f'          <span class="hint" id="match-count"></span>'
+        f'        </div>'
+        f'        <div class="table-card">'
+        f'          <table>'
+        f'            <thead><tr>'
+        f'              <th></th>'
+        f'              <th title="Wall-clock time the decision was persisted, in Casablanca local zone (GMT+1)">Time (local)</th>'
+        f'              <th title="Alert rule name as configured in Grafana">Alert</th>'
+        f'              <th title="Where the alert came from: grafana=metric rule, drain3=log-template anomaly">Source</th>'
+        f'              <th title="The service the alert is about">Service</th>'
+        f'              <th title="Alert severity: critical / warning / info">Severity</th>'
+        f'              <th title="LLM verdict (escalate / dismiss / inconclusive) + RCA quality pill (fits / thin / review)">Verdict</th>'
+        f'              <th title="What the pipeline did downstream of the verdict (Notified / Suppressed / Dropped / Notified-no-LLM)">Action</th>'
+        f'              <th title="End-to-end pipeline duration including MCP context-gathering + LLM inference">Duration</th>'
+        f'            </tr></thead>'
+        f'            <tbody>{body_rows}</tbody>'
+        f'          </table>'
+        f'        </div>'
+        f'      </div>'
+        f'    </main>'
         f'  </div>'
         f'</div>'
         f'<script>{_DASHBOARD_JS}</script>'
@@ -1154,165 +1462,290 @@ async def dashboard():
 
 
 _GUIDE_CSS = """
+  /* Guide page reuses the same Figma palette + TopBar/LeftNav chrome as
+     /dashboard. Tokens duplicated rather than imported because each page
+     ships its <style> inline; intentional scope, intentional duplication. */
   :root {
-    --bg: #f6f7f3;
-    --card: #ffffff;
-    --card-alt: #fbfcf8;
-    --ink: #1f2a23;
-    --ink-soft: #3f4a42;
-    --muted: #6b7a6f;
-    --rule: #e0e6df;
-    --rule-strong: #c8d3c5;
-    --sage: #5d8c6b;
-    --sage-strong: #3e7d4d;
-    --sage-soft: #eef6ee;
-    --warn: #a1642b;
-    --warn-soft: #f6efe3;
-    --danger: #b04550;
-    --danger-soft: #f6e4e6;
+    --bg: #0B0D10;
+    --surface: #13161B;
+    --surface-2: #1A1E25;
+    --border: #262B33;
+    --border-strong: #353B46;
+    --text-primary: #E6E8EB;
+    --text-secondary: #9BA3AF;
+    --text-muted: #6B7280;
+    --red: #E5484D;
+    --amber: #F5A524;
+    --green: #2BA471;
+    --blue: #3E8FE6;
+    --purple: #6E56CF;
+    --red-soft: rgba(229,72,77,0.12);
+    --amber-soft: rgba(245,165,36,0.12);
+    --green-soft: rgba(43,164,113,0.12);
+    --blue-soft: rgba(62,143,230,0.12);
+    --purple-soft: rgba(110,86,207,0.12);
+    --radius: 6px;
+    --radius-lg: 8px;
+    --gutter: 24px;
+  }
+  body.light {
+    --bg: #FFFFFF; --surface: #F7F8FA; --surface-2: #EFF1F4;
+    --border: #E2E5EA; --border-strong: #CFD3D9;
+    --text-primary: #0B0D10; --text-secondary: #4B5563; --text-muted: #6B7280;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html { scroll-behavior: smooth; }
   body {
-    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
-    background: var(--bg); color: var(--ink); line-height: 1.65; font-size: 15px;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg); color: var(--text-primary);
+    line-height: 1.65; font-size: 14px;
     -webkit-font-smoothing: antialiased;
+    transition: background-color .15s, color .15s;
   }
   code, pre, .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 0.88em;
   }
-  .container { max-width: 1080px; margin: 0 auto; padding: 0 36px 60px; }
-  .header {
-    padding: 36px 36px 28px; max-width: 1080px; margin: 0 auto;
+
+  /* App shell — identical to /dashboard so navigating between the two
+     pages feels seamless. */
+  .app-shell { display: flex; flex-direction: column; min-height: 100vh; }
+  .app-body { display: flex; flex: 1; min-height: 0; }
+  .main-area { flex: 1; min-width: 0; overflow-x: hidden; padding: var(--gutter) calc(var(--gutter) + 4px) 60px; }
+
+  .topbar {
+    height: 56px; padding: 0 var(--gutter);
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
   }
+  .topbar-left { display: flex; align-items: center; gap: 24px; }
+  .wordmark {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 16px; font-weight: 600; letter-spacing: -0.2px;
+    color: var(--text-primary);
+  }
+  .env-switch { display: inline-flex; gap: 2px; padding: 3px; background: var(--surface-2); border-radius: var(--radius); }
+  .env-switch button {
+    padding: 4px 12px; font-size: 12px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    background: transparent; border: none; color: var(--text-secondary);
+    border-radius: 4px; cursor: pointer;
+  }
+  .env-switch button.active { background: var(--bg); color: var(--text-primary); }
+  .topbar-right { display: flex; align-items: center; gap: 14px; }
+  .topbar .guide-link {
+    font-size: 12px; color: var(--text-secondary);
+    text-decoration: none; padding: 6px 10px; border-radius: var(--radius);
+    border: 1px solid var(--border);
+  }
+  .topbar .guide-link.active {
+    color: var(--text-primary); border-color: var(--blue);
+  }
+  .icon-btn {
+    background: transparent; border: 1px solid transparent;
+    width: 32px; height: 32px; border-radius: var(--radius);
+    color: var(--text-primary); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 14px;
+  }
+  .icon-btn:hover { background: var(--surface-2); border-color: var(--border); }
+
+  .leftnav {
+    width: 56px; flex-shrink: 0;
+    background: var(--surface); border-right: 1px solid var(--border);
+    transition: width .15s ease;
+  }
+  .leftnav:hover { width: 220px; }
+  .leftnav nav { padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; }
+  .leftnav a, .leftnav .navitem-disabled {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 10px; border-radius: var(--radius);
+    color: var(--text-secondary); text-decoration: none;
+    font-size: 13px; white-space: nowrap; overflow: hidden;
+    position: relative;
+  }
+  .leftnav a:hover { background: var(--surface-2); color: var(--text-primary); }
+  .leftnav a.active { background: var(--surface-2); color: var(--text-primary); }
+  .leftnav a.active::before {
+    content: ""; position: absolute; left: 0; width: 3px; height: 18px;
+    background: var(--blue); border-radius: 0 2px 2px 0;
+  }
+  .leftnav .navitem-disabled { opacity: 0.5; cursor: not-allowed; }
+  .leftnav .navitem-disabled .nav-tag {
+    margin-left: auto; font-size: 9px; font-weight: 700; letter-spacing: .4px;
+    text-transform: uppercase; color: var(--purple);
+    padding: 1px 6px; border: 1px solid var(--purple); border-radius: 4px;
+    background: var(--purple-soft);
+  }
+  .leftnav .nav-icon {
+    width: 18px; height: 18px; flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 14px; line-height: 1;
+  }
+  .leftnav .nav-label { opacity: 0; transition: opacity .15s; }
+  .leftnav:hover .nav-label { opacity: 1; }
+
+  .container { max-width: 1080px; margin: 0 auto; padding: 0; }
+  .header { padding: 0 0 24px; }
   .header .eyebrow {
-    font-size: 11px; font-weight: 700; letter-spacing: 1.4px;
-    text-transform: uppercase; color: var(--sage-strong); margin-bottom: 8px;
+    font-size: 11px; font-weight: 500; letter-spacing: 1.2px;
+    text-transform: uppercase; color: var(--text-secondary); margin-bottom: 6px;
   }
   .header h1 {
-    font-size: 30px; font-weight: 700; letter-spacing: -0.4px;
-    margin-bottom: 10px; color: var(--ink);
+    font-size: 24px; font-weight: 500; letter-spacing: -0.3px;
+    margin-bottom: 8px; color: var(--text-primary);
   }
-  .header h1 .accent { color: var(--sage-strong); }
-  .header .subtitle { color: var(--ink-soft); max-width: 760px; }
+  .header h1 .accent { color: var(--blue); }
+  .header .subtitle { color: var(--text-secondary); max-width: 760px; }
   .header .nav-back {
     display: inline-flex; align-items: center; gap: 6px;
-    margin-top: 14px; padding: 6px 12px; border-radius: 8px;
-    background: var(--card); border: 1px solid var(--rule);
-    color: var(--sage-strong); font-size: 13px; font-weight: 600;
+    margin-top: 14px; padding: 6px 12px; border-radius: var(--radius);
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text-primary); font-size: 13px; font-weight: 500;
     text-decoration: none;
   }
-  .header .nav-back:hover { border-color: var(--sage); }
+  .header .nav-back:hover { border-color: var(--blue); color: var(--blue); }
+
   .layout {
-    display: grid; grid-template-columns: 240px 1fr; gap: 36px; margin-top: 8px;
+    display: grid; grid-template-columns: 240px 1fr; gap: 28px; margin-top: 8px;
   }
-  @media (max-width: 900px) {
+  @media (max-width: 1100px) {
     .layout { grid-template-columns: 1fr; }
     .toc { position: static; }
   }
+  @media (max-width: 900px) {
+    .leftnav { display: none; }
+    .topbar { padding: 0 16px; }
+    .main-area { padding: 16px; }
+  }
   .toc {
-    position: sticky; top: 16px; align-self: start;
-    background: var(--card); border: 1px solid var(--rule);
-    border-radius: 12px; padding: 18px 20px; font-size: 13px;
+    position: sticky; top: 76px; align-self: start;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px 18px; font-size: 13px;
   }
   .toc h4 {
-    font-size: 11px; font-weight: 700; letter-spacing: 1.2px;
-    text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+    font-size: 11px; font-weight: 500; letter-spacing: .3px;
+    color: var(--text-secondary); margin-bottom: 10px;
   }
   .toc ol { list-style: none; }
   .toc li { margin-bottom: 4px; }
   .toc a {
-    color: var(--ink-soft); text-decoration: none;
-    border-bottom: 1px dashed transparent;
+    color: var(--text-secondary); text-decoration: none;
   }
-  .toc a:hover { color: var(--sage-strong); border-bottom-color: var(--sage); }
+  .toc a:hover { color: var(--blue); }
   .toc li.sub { padding-left: 14px; font-size: 12px; }
-  .toc li.sub a { color: var(--muted); }
+  .toc li.sub a { color: var(--text-muted); }
   .content > .card {
-    background: var(--card); border: 1px solid var(--rule);
-    border-radius: 12px; padding: 22px 26px; margin-bottom: 18px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 22px 24px; margin-bottom: 16px;
   }
   .content h2 {
-    font-size: 22px; font-weight: 700; margin: 0 0 14px;
-    letter-spacing: -0.2px; color: var(--ink); scroll-margin-top: 16px;
-    padding-bottom: 8px; border-bottom: 1px solid var(--rule);
+    font-size: 18px; font-weight: 500; margin: 0 0 14px;
+    letter-spacing: -0.1px; color: var(--text-primary); scroll-margin-top: 76px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--border);
   }
   .content h3 {
-    font-size: 16px; font-weight: 700; margin: 22px 0 8px;
-    color: var(--ink); scroll-margin-top: 16px;
+    font-size: 14px; font-weight: 500; margin: 22px 0 8px;
+    color: var(--text-primary); scroll-margin-top: 76px;
   }
-  .content h4 { font-size: 13px; font-weight: 700; margin: 16px 0 4px; color: var(--ink); }
-  .content p { margin-bottom: 12px; color: var(--ink-soft); }
-  .content p strong { color: var(--ink); font-weight: 600; }
-  .content ul, .content ol { margin: 6px 0 14px 22px; color: var(--ink-soft); }
+  .content h4 { font-size: 13px; font-weight: 500; margin: 16px 0 4px; color: var(--text-primary); }
+  .content p { margin-bottom: 10px; color: var(--text-secondary); }
+  .content p strong { color: var(--text-primary); font-weight: 500; }
+  .content ul, .content ol { margin: 6px 0 14px 22px; color: var(--text-secondary); }
   .content li { margin-bottom: 5px; }
   .content code {
-    background: var(--sage-soft); border: 1px solid var(--rule);
-    padding: 1px 6px; border-radius: 4px; font-size: 0.85em; color: var(--sage-strong);
+    background: var(--surface-2); border: 1px solid var(--border);
+    padding: 1px 6px; border-radius: 4px; font-size: 0.85em; color: var(--blue);
   }
   .content pre {
-    background: var(--card-alt); border: 1px solid var(--rule);
-    padding: 12px 14px; border-radius: 8px; margin: 10px 0 14px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    padding: 12px 14px; border-radius: var(--radius); margin: 10px 0 14px;
     overflow-x: auto; line-height: 1.5;
   }
-  .content pre code { background: none; border: none; padding: 0; color: var(--ink); }
+  .content pre code { background: none; border: none; padding: 0; color: var(--text-primary); }
   .content a {
-    color: var(--sage-strong); text-decoration: none;
-    border-bottom: 1px dashed rgba(62, 125, 77, 0.4);
+    color: var(--blue); text-decoration: none;
+    border-bottom: 1px dashed rgba(62, 143, 230, 0.4);
   }
   .content a:hover { border-bottom-style: solid; }
   table {
     width: 100%; border-collapse: collapse; margin: 8px 0 16px; font-size: 13px;
   }
   table th, table td {
-    padding: 9px 12px; border-bottom: 1px solid var(--rule);
+    padding: 9px 12px; border-bottom: 1px solid var(--border);
     text-align: left; vertical-align: top;
   }
   table th {
-    font-size: 11px; font-weight: 700; letter-spacing: 1px;
-    text-transform: uppercase; color: var(--muted); background: var(--sage-soft);
+    font-size: 11px; font-weight: 500; letter-spacing: .2px;
+    color: var(--text-secondary); background: var(--surface-2);
   }
-  table tr:hover td { background: var(--card-alt); }
+  table tr:hover td { background: var(--surface-2); }
   table td.code-cell {
-    font-family: ui-monospace, monospace; font-size: 12.5px;
-    color: var(--sage-strong); white-space: nowrap;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12.5px;
+    color: var(--blue); white-space: nowrap;
   }
-  table td.label-cell { font-weight: 600; color: var(--ink); white-space: nowrap; }
+  table td.label-cell { font-weight: 500; color: var(--text-primary); white-space: nowrap; }
   .pill {
-    display: inline-block; font-size: 11px; font-weight: 600;
-    padding: 2px 8px; border-radius: 10px; border: 1px solid;
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 500; padding: 2px 8px;
+    border-radius: var(--radius); border: 1px solid transparent;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    text-transform: lowercase;
   }
-  .pill.sage { color: var(--sage-strong); border-color: var(--sage); background: var(--sage-soft); }
-  .pill.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
-  .pill.danger { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
-  .pill.ink { color: var(--ink); border-color: var(--rule-strong); background: var(--card-alt); }
+  .pill::before {
+    content: ""; display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; background: currentColor;
+  }
+  .pill.sage { color: var(--green); background: var(--green-soft); border-color: var(--green); }
+  .pill.warn { color: var(--amber); background: var(--amber-soft); border-color: var(--amber); }
+  .pill.danger { color: var(--red); background: var(--red-soft); border-color: var(--red); }
+  .pill.ink { color: var(--text-secondary); background: var(--surface-2); border-color: var(--border); }
   .glossary dt {
-    font-family: ui-monospace, monospace; font-size: 13px;
-    color: var(--sage-strong); margin-top: 10px; font-weight: 600;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 13px;
+    color: var(--blue); margin-top: 10px; font-weight: 500;
   }
   .glossary dt:first-child { margin-top: 0; }
-  .glossary dd { margin: 3px 0 0 18px; color: var(--ink-soft); font-size: 14px; }
+  .glossary dd { margin: 3px 0 0 18px; color: var(--text-secondary); font-size: 13.5px; }
   .scenario {
-    background: var(--sage-soft); border: 1px solid var(--rule);
-    border-radius: 8px; padding: 14px 18px; margin: 12px 0;
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-left: 2px solid var(--blue);
+    border-radius: var(--radius); padding: 14px 18px; margin: 12px 0;
   }
-  .scenario h4 { color: var(--sage-strong); margin-top: 0; font-size: 13px; }
-  .scenario p { font-size: 14px; }
+  .scenario h4 { color: var(--blue); margin-top: 0; font-size: 13px; }
+  .scenario p { font-size: 13.5px; }
   .callout {
-    border-left: 3px solid var(--sage); border-radius: 0 8px 8px 0;
-    padding: 12px 16px; margin: 14px 0; background: var(--sage-soft);
+    border-left: 2px solid var(--blue); border-radius: 0 var(--radius) var(--radius) 0;
+    padding: 12px 16px; margin: 14px 0; background: var(--blue-soft);
   }
   .callout-label {
-    font-size: 11px; font-weight: 700; letter-spacing: 1px;
-    text-transform: uppercase; color: var(--sage-strong); margin-bottom: 5px;
+    font-size: 11px; font-weight: 500; letter-spacing: .3px;
+    color: var(--blue); margin-bottom: 5px;
   }
   .deep-link {
     display: inline-block; margin-top: 8px; font-size: 12px;
-    color: var(--muted); border-bottom: 1px dotted var(--muted);
+    color: var(--text-muted); border-bottom: 1px dotted var(--text-muted);
     text-decoration: none;
   }
-  .deep-link:hover { color: var(--sage-strong); border-bottom-color: var(--sage); }
+  .deep-link:hover { color: var(--blue); border-bottom-color: var(--blue); }
+"""
+
+
+_GUIDE_JS = """
+  function toggleTheme() {
+    var isLight = document.body.classList.toggle('light');
+    try { localStorage.setItem('triage-theme', isLight ? 'light' : 'dark'); } catch (e) {}
+    var btn = document.getElementById('theme-toggle');
+    if (btn) btn.textContent = isLight ? '☾' : '☼';
+  }
+  document.addEventListener('DOMContentLoaded', function() {
+    try {
+      var saved = localStorage.getItem('triage-theme');
+      if (saved === 'light') document.body.classList.add('light');
+    } catch (e) {}
+    var btn = document.getElementById('theme-toggle');
+    if (btn) btn.textContent = document.body.classList.contains('light') ? '☾' : '☼';
+  });
 """
 
 
@@ -1329,8 +1762,18 @@ async def dashboard_guide():
     """
     return f"""<!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard Guide · Triage Service</title>
+<title>Triage · Dashboard Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>{_GUIDE_CSS}</style></head><body>
+
+<div class="app-shell">
+{_render_topbar(active="guide")}
+  <div class="app-body">
+{_render_leftnav(active="guide")}
+    <main class="main-area">
+      <div class="container">
 
 <div class="header">
   <div class="eyebrow">AI root-cause triage · operator reference</div>
@@ -1341,7 +1784,6 @@ async def dashboard_guide():
   <a href="/dashboard" class="nav-back">← Back to decisions</a>
 </div>
 
-<div class="container">
 <div class="layout">
 
 <aside class="toc">
@@ -1621,8 +2063,13 @@ async def dashboard_guide():
 
 </article>
 </div>
+
+      </div>
+    </main>
+  </div>
 </div>
 
+<script>{_GUIDE_JS}</script>
 </body></html>"""
 
 
