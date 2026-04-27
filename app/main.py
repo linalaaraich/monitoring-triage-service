@@ -307,7 +307,7 @@ _DASHBOARD_CSS = """
   /* App shell — TopBar + LeftNav + main content. Mirrors the Figma
      layout (h-screen flex column, then flex-1 row). */
   .app-shell { display: flex; flex-direction: column; min-height: 100vh; }
-  .app-body { display: flex; flex: 1; min-height: 0; }
+  .app-body { display: flex; flex: 1; min-height: 0; position: relative; }
   .main-area { flex: 1; min-width: 0; overflow-x: hidden; padding: var(--gutter) calc(var(--gutter) + 4px) 56px; }
 
   .topbar {
@@ -333,13 +333,18 @@ _DASHBOARD_CSS = """
     border-radius: 4px; cursor: pointer; transition: background-color .12s, color .12s;
   }
   .env-switch button.active { background: var(--bg); color: var(--text-primary); }
-  .topbar-right { display: flex; align-items: center; gap: 14px; }
+  .env-switch button:disabled {
+    opacity: 0.4; cursor: not-allowed;
+    color: var(--text-muted);
+  }
+  .env-switch button:disabled:hover { background: transparent; }
+  .topbar-right { display: flex; align-items: center; gap: 12px; }
   .icon-btn {
     background: transparent; border: 1px solid transparent;
     width: 32px; height: 32px; border-radius: var(--radius);
     color: var(--text-primary); cursor: pointer;
     display: inline-flex; align-items: center; justify-content: center;
-    font-size: 14px; transition: background-color .12s, border-color .12s;
+    font-size: 16px; line-height: 1; transition: background-color .12s, border-color .12s;
   }
   .icon-btn:hover { background: var(--surface-2); border-color: var(--border); }
   .topbar .guide-link {
@@ -348,22 +353,45 @@ _DASHBOARD_CSS = """
     border: 1px solid var(--border); transition: color .12s, border-color .12s;
   }
   .topbar .guide-link:hover { color: var(--text-primary); border-color: var(--border-strong); }
+  /* Auto-refresh chip — visually paired with .guide-link so the topbar
+     reads as a row of evenly-bordered controls. */
   .topbar .refresh {
     font-size: 12px; color: var(--text-secondary);
-    display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;
-    padding: 6px 10px; border-radius: var(--radius);
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 5px 10px; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--surface);
+    cursor: pointer; user-select: none;
+    transition: border-color .12s;
   }
-  .topbar input[type=checkbox] { accent-color: var(--blue); }
+  .topbar .refresh:hover { border-color: var(--border-strong); }
+  .topbar .refresh input[type=checkbox] {
+    margin: 0; accent-color: var(--blue); cursor: pointer;
+  }
   .refresh-state { font-size: 11px; color: var(--amber); font-style: italic; margin-left: 4px; }
 
+  /* Leftnav overlays the main-area on hover instead of reflowing it.
+     The rail keeps a fixed 56px footprint via the .leftnav-spacer; the
+     real .leftnav is absolutely positioned and grows over the content
+     when expanded. Prevents the entire table from shifting horizontally
+     every time the cursor brushes the rail. */
+  .leftnav-spacer { width: 56px; flex-shrink: 0; }
   .leftnav {
-    width: 56px; flex-shrink: 0;
+    position: absolute; top: 0; bottom: 0; left: 0;
+    width: 56px; z-index: 9;
     background: var(--surface); border-right: 1px solid var(--border);
-    transition: width .15s ease;
+    transition: width .15s ease, box-shadow .15s ease;
+    overflow: hidden;
   }
-  .leftnav:hover, .leftnav.expanded { width: 220px; }
+  .leftnav:hover, .leftnav.expanded {
+    width: 220px;
+    box-shadow: 4px 0 16px rgba(0,0,0,0.25);
+  }
+  body.light .leftnav:hover, body.light .leftnav.expanded {
+    box-shadow: 4px 0 16px rgba(15,23,42,0.08);
+  }
   .leftnav nav { padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; }
   .leftnav a, .leftnav .navitem-disabled {
+    position: relative;
     display: flex; align-items: center; gap: 12px;
     padding: 8px 10px; border-radius: var(--radius);
     color: var(--text-secondary); text-decoration: none;
@@ -373,10 +401,11 @@ _DASHBOARD_CSS = """
   .leftnav a:hover { background: var(--surface-2); color: var(--text-primary); }
   .leftnav a.active { background: var(--surface-2); color: var(--text-primary); }
   .leftnav a.active::before {
-    content: ""; position: absolute; left: 0; width: 3px; height: 18px;
+    content: ""; position: absolute;
+    left: 0; top: 50%; transform: translateY(-50%);
+    width: 3px; height: 18px;
     background: var(--blue); border-radius: 0 2px 2px 0;
   }
-  .leftnav a { position: relative; }
   .leftnav .navitem-disabled { opacity: 0.5; cursor: not-allowed; }
   .leftnav .navitem-disabled .nav-tag {
     margin-left: auto; font-size: 9px; font-weight: 700; letter-spacing: .4px;
@@ -426,10 +455,19 @@ _DASHBOARD_CSS = """
     font-size: 24px; font-weight: 500; letter-spacing: -0.4px;
     line-height: 1.1; color: var(--text-primary); order: 2;
   }
-  .stat.t-total { border-top: 1px solid var(--blue); }
+  /* Each tile carries a 2px semantic stripe up top so the row reads as
+     a consistent KPI strip rather than one accented tile next to four
+     plain ones. The number color matches the stripe. */
+  .stat { border-top: 2px solid var(--text-muted); }
+  .stat.t-total { border-top-color: var(--blue); }
+  .stat.t-total .num { color: var(--blue); }
+  .stat.t-esc { border-top-color: var(--red); }
   .stat.t-esc .num { color: var(--red); }
+  .stat.t-dismiss { border-top-color: var(--green); }
   .stat.t-dismiss .num { color: var(--green); }
+  .stat.t-timeout { border-top-color: var(--amber); }
   .stat.t-timeout .num { color: var(--amber); }
+  .stat.t-suppress { border-top-color: var(--text-secondary); }
   .stat.t-suppress .num { color: var(--text-secondary); }
 
   .toolbar {
@@ -530,23 +568,29 @@ _DASHBOARD_CSS = """
   .sev-info, .sev-low { color: var(--text-secondary); }
   .sev-info::before, .sev-low::before { background: var(--blue); }
 
-  /* Verdict pill — Figma's StatusDot + mono label. */
+  /* Verdict — Figma's VerdictBadge: a colored dot followed by a mono
+     uppercase label, no fill, no border. The dot color carries the
+     semantic; the label stays in the primary text color so it reads as
+     calmly as the surrounding cells. */
   .pill {
     display: inline-flex; align-items: center; gap: 6px;
-    padding: 2px 8px; border-radius: var(--radius);
+    padding: 0; background: transparent; border: none;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px; font-weight: 500; text-transform: uppercase;
-    letter-spacing: .3px; border: 1px solid transparent;
+    letter-spacing: .3px;
+    color: var(--text-primary);
   }
   .pill::before {
     content: ""; display: inline-block;
     width: 8px; height: 8px; border-radius: 50%;
-    background: currentColor;
+    background: var(--text-muted);
+    flex-shrink: 0;
   }
-  .pill-escalate { color: var(--red); background: var(--red-soft); border-color: var(--red); }
-  .pill-dismiss  { color: var(--green); background: var(--green-soft); border-color: var(--green); }
-  .pill-inconclusive { color: var(--amber); background: var(--amber-soft); border-color: var(--amber); }
-  .pill-none { color: var(--text-muted); background: transparent; border-color: var(--border); }
+  .pill-escalate::before { background: var(--red); }
+  .pill-dismiss::before  { background: var(--green); }
+  .pill-inconclusive::before { background: var(--amber); }
+  .pill-none { color: var(--text-muted); }
+  .pill-none::before { background: var(--text-muted); }
 
   /* Quality pill — flat capsule, no shouty caps, sits next to the verdict. */
   .quality {
@@ -558,10 +602,11 @@ _DASHBOARD_CSS = """
   .quality-data_starved { background: var(--amber); }
   .quality-data_starved::before { content: "⚠ "; }
 
+  /* Action column reads as supporting metadata. Severity is already
+     conveyed by the verdict dot in the column to the left, so the
+     action label stays in secondary text — no double-coloring. */
   .action { font-size: 12px; color: var(--text-secondary); }
-  .action-emailed { color: var(--red); }
   .action-emailed_raw { color: var(--amber); }
-  .action-suppressed { color: var(--green); }
 
   tbody tr.detail { display: none; }
   tbody tr.detail.open { display: table-row; }
@@ -1119,7 +1164,14 @@ def _render_leftnav(active: str = "decisions") -> str:
                 f'  <span class="nav-tag">epic 5</span>'
                 f'</div>'
             )
-    return f'<aside class="leftnav"><nav>{"".join(items_html)}</nav></aside>'
+    # Emits a flex-layout spacer (occupies 56px) plus the real .leftnav,
+    # which is absolutely positioned and overlays the main-area on hover.
+    # Keeps the table from reflowing horizontally as the cursor brushes
+    # the rail.
+    return (
+        '<div class="leftnav-spacer"></div>'
+        f'<aside class="leftnav"><nav>{"".join(items_html)}</nav></aside>'
+    )
 
 
 def _render_drain3_panel(stats: dict) -> str:
@@ -1510,7 +1562,7 @@ _GUIDE_CSS = """
   /* App shell — identical to /dashboard so navigating between the two
      pages feels seamless. */
   .app-shell { display: flex; flex-direction: column; min-height: 100vh; }
-  .app-body { display: flex; flex: 1; min-height: 0; }
+  .app-body { display: flex; flex: 1; min-height: 0; position: relative; }
   .main-area { flex: 1; min-width: 0; overflow-x: hidden; padding: var(--gutter) calc(var(--gutter) + 4px) 60px; }
 
   .topbar {
@@ -1533,6 +1585,7 @@ _GUIDE_CSS = """
     border-radius: 4px; cursor: pointer;
   }
   .env-switch button.active { background: var(--bg); color: var(--text-primary); }
+  .env-switch button:disabled { opacity: 0.4; cursor: not-allowed; color: var(--text-muted); }
   .topbar-right { display: flex; align-items: center; gap: 14px; }
   .topbar .guide-link {
     font-size: 12px; color: var(--text-secondary);
@@ -1547,16 +1600,23 @@ _GUIDE_CSS = """
     width: 32px; height: 32px; border-radius: var(--radius);
     color: var(--text-primary); cursor: pointer;
     display: inline-flex; align-items: center; justify-content: center;
-    font-size: 14px;
+    font-size: 16px; line-height: 1;
   }
   .icon-btn:hover { background: var(--surface-2); border-color: var(--border); }
 
+  .leftnav-spacer { width: 56px; flex-shrink: 0; }
   .leftnav {
-    width: 56px; flex-shrink: 0;
+    position: absolute; top: 0; bottom: 0; left: 0;
+    width: 56px; z-index: 9;
     background: var(--surface); border-right: 1px solid var(--border);
-    transition: width .15s ease;
+    transition: width .15s ease, box-shadow .15s ease;
+    overflow: hidden;
   }
-  .leftnav:hover { width: 220px; }
+  .leftnav:hover {
+    width: 220px;
+    box-shadow: 4px 0 16px rgba(0,0,0,0.25);
+  }
+  body.light .leftnav:hover { box-shadow: 4px 0 16px rgba(15,23,42,0.08); }
   .leftnav nav { padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; }
   .leftnav a, .leftnav .navitem-disabled {
     display: flex; align-items: center; gap: 12px;
@@ -1568,7 +1628,9 @@ _GUIDE_CSS = """
   .leftnav a:hover { background: var(--surface-2); color: var(--text-primary); }
   .leftnav a.active { background: var(--surface-2); color: var(--text-primary); }
   .leftnav a.active::before {
-    content: ""; position: absolute; left: 0; width: 3px; height: 18px;
+    content: ""; position: absolute;
+    left: 0; top: 50%; transform: translateY(-50%);
+    width: 3px; height: 18px;
     background: var(--blue); border-radius: 0 2px 2px 0;
   }
   .leftnav .navitem-disabled { opacity: 0.5; cursor: not-allowed; }
