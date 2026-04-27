@@ -277,7 +277,11 @@ _DASHBOARD_CSS = """
     --row-h: 36px;
     --gutter: 24px;
   }
-  body.light {
+  /* Light-mode tokens are scoped to :root (the <html> element) rather
+     than body, so an inline <head> script can apply the class before
+     the body paints — eliminating the dark-flash on every auto-refresh
+     reload. */
+  :root.light {
     --bg: #FFFFFF;
     --surface: #F7F8FA;
     --surface-2: #EFF1F4;
@@ -322,22 +326,6 @@ _DASHBOARD_CSS = """
     font-size: 16px; font-weight: 600; letter-spacing: -0.2px;
     color: var(--text-primary);
   }
-  .env-switch {
-    display: inline-flex; gap: 2px; padding: 3px;
-    background: var(--surface-2); border-radius: var(--radius);
-  }
-  .env-switch button {
-    padding: 4px 12px; font-size: 12px;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    background: transparent; border: none; color: var(--text-secondary);
-    border-radius: 4px; cursor: pointer; transition: background-color .12s, color .12s;
-  }
-  .env-switch button.active { background: var(--bg); color: var(--text-primary); }
-  .env-switch button:disabled {
-    opacity: 0.4; cursor: not-allowed;
-    color: var(--text-muted);
-  }
-  .env-switch button:disabled:hover { background: transparent; }
   .topbar-right { display: flex; align-items: center; gap: 12px; }
   .icon-btn {
     background: transparent; border: 1px solid transparent;
@@ -386,7 +374,7 @@ _DASHBOARD_CSS = """
     width: 220px;
     box-shadow: 4px 0 16px rgba(0,0,0,0.25);
   }
-  body.light .leftnav:hover, body.light .leftnav.expanded {
+  :root.light .leftnav:hover, :root.light .leftnav.expanded {
     box-shadow: 4px 0 16px rgba(15,23,42,0.08);
   }
   .leftnav nav { padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; }
@@ -502,7 +490,6 @@ _DASHBOARD_CSS = """
     font-weight: 500; font-size: 11px; letter-spacing: .2px;
     text-align: left;
     padding: 8px 14px; border-bottom: 1px solid var(--border);
-    position: sticky; top: 56px; z-index: 1;
   }
   tbody tr.summary { cursor: pointer; transition: background-color .12s; height: var(--row-h); }
   tbody tr.summary td {
@@ -917,22 +904,18 @@ _DASHBOARD_JS = """
       if (label) label.textContent = '';
     }
   }
+  // Theme is applied synchronously in the <head> via an inline script
+  // before the body paints, so there is no dark-flash on reload. This
+  // handler only flips the class + persists + updates the button label.
   function toggleTheme() {
-    var isLight = document.body.classList.toggle('light');
+    var isLight = document.documentElement.classList.toggle('light');
     try { localStorage.setItem('triage-theme', isLight ? 'light' : 'dark'); } catch (e) {}
     var btn = document.getElementById('theme-toggle');
     if (btn) btn.textContent = isLight ? '☾' : '☼';
   }
-  function restoreTheme() {
-    try {
-      var saved = localStorage.getItem('triage-theme');
-      if (saved === 'light') document.body.classList.add('light');
-    } catch (e) {}
-    var btn = document.getElementById('theme-toggle');
-    if (btn) btn.textContent = document.body.classList.contains('light') ? '☾' : '☼';
-  }
   document.addEventListener('DOMContentLoaded', function() {
-    restoreTheme();
+    var btn = document.getElementById('theme-toggle');
+    if (btn) btn.textContent = document.documentElement.classList.contains('light') ? '☾' : '☼';
     var f = document.getElementById('filter');
     if (f) f.addEventListener('input', applyFilter);
     applyFilter();
@@ -1107,21 +1090,18 @@ _NAV_ITEMS = [
 
 
 def _render_topbar(active: str = "decisions") -> str:
-    """TopBar: Triage wordmark + env switcher + auto-refresh + theme toggle.
+    """TopBar: product wordmark + auto-refresh + guide link + theme toggle.
 
     Mirrors src/app/components/TopBar.tsx from the Figma source. Auto-refresh
     moved here from the in-page toolbar so the operator always sees its
-    state regardless of scroll position. Env switcher is a static
-    placeholder — there's only one prod environment today; staging is a
-    visual reservation for the multi-env Epic 5 follow-up."""
+    state regardless of scroll position. The Figma env-switcher (prod/
+    staging) was dropped — there is only one environment in production
+    today and the Epic 5 multi-env story isn't real yet, so the control
+    was a UI promise without backing."""
     return (
         '<header class="topbar">'
         '  <div class="topbar-left">'
-        '    <div class="wordmark">Triage</div>'
-        '    <div class="env-switch" role="tablist" aria-label="Environment">'
-        '      <button type="button" class="active" aria-pressed="true">prod</button>'
-        '      <button type="button" disabled title="Staging environment will land with Epic 5">staging</button>'
-        '    </div>'
+        '    <div class="wordmark">RCA Triage platform</div>'
         '  </div>'
         '  <div class="topbar-right">'
         '    <label class="refresh">'
@@ -1459,7 +1439,15 @@ async def dashboard():
     return (
         f'<!DOCTYPE html><html lang="en"><head>'
         f'<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
-        f'<title>Triage · Decisions</title>'
+        f'<title>RCA Triage platform · Decisions</title>'
+        # Apply the persisted theme class to <html> SYNCHRONOUSLY, before
+        # any rendering. The auto-refresh does a full page reload every
+        # 30s; without this the page paints with the dark default first
+        # and the JS-applied .light class arrives one frame later, which
+        # the operator sees as a flash on every reload. Putting this at
+        # the very top of <head> means the class is on documentElement
+        # before the CSS computes against it.
+        f'<script>(function(){{try{{if(localStorage.getItem("triage-theme")==="light")document.documentElement.classList.add("light");}}catch(e){{}}}})();</script>'
         f'<link rel="preconnect" href="https://fonts.googleapis.com">'
         f'<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
         f'<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">'
@@ -1540,7 +1528,9 @@ _GUIDE_CSS = """
     --radius-lg: 8px;
     --gutter: 24px;
   }
-  body.light {
+  /* Light-mode tokens scoped to :root so the head-inlined theme script
+     can apply them before the body paints — no dark-flash on reload. */
+  :root.light {
     --bg: #FFFFFF; --surface: #F7F8FA; --surface-2: #EFF1F4;
     --border: #E2E5EA; --border-strong: #CFD3D9;
     --text-primary: #0B0D10; --text-secondary: #4B5563; --text-muted: #6B7280;
@@ -1577,15 +1567,6 @@ _GUIDE_CSS = """
     font-size: 16px; font-weight: 600; letter-spacing: -0.2px;
     color: var(--text-primary);
   }
-  .env-switch { display: inline-flex; gap: 2px; padding: 3px; background: var(--surface-2); border-radius: var(--radius); }
-  .env-switch button {
-    padding: 4px 12px; font-size: 12px;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    background: transparent; border: none; color: var(--text-secondary);
-    border-radius: 4px; cursor: pointer;
-  }
-  .env-switch button.active { background: var(--bg); color: var(--text-primary); }
-  .env-switch button:disabled { opacity: 0.4; cursor: not-allowed; color: var(--text-muted); }
   .topbar-right { display: flex; align-items: center; gap: 14px; }
   .topbar .guide-link {
     font-size: 12px; color: var(--text-secondary);
@@ -1616,7 +1597,7 @@ _GUIDE_CSS = """
     width: 220px;
     box-shadow: 4px 0 16px rgba(0,0,0,0.25);
   }
-  body.light .leftnav:hover { box-shadow: 4px 0 16px rgba(15,23,42,0.08); }
+  :root.light .leftnav:hover { box-shadow: 4px 0 16px rgba(15,23,42,0.08); }
   .leftnav nav { padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; }
   .leftnav a, .leftnav .navitem-disabled {
     display: flex; align-items: center; gap: 12px;
@@ -1794,19 +1775,17 @@ _GUIDE_CSS = """
 
 
 _GUIDE_JS = """
+  // Theme applied synchronously by the inline <head> script before paint,
+  // so this handler only flips and persists.
   function toggleTheme() {
-    var isLight = document.body.classList.toggle('light');
+    var isLight = document.documentElement.classList.toggle('light');
     try { localStorage.setItem('triage-theme', isLight ? 'light' : 'dark'); } catch (e) {}
     var btn = document.getElementById('theme-toggle');
     if (btn) btn.textContent = isLight ? '☾' : '☼';
   }
   document.addEventListener('DOMContentLoaded', function() {
-    try {
-      var saved = localStorage.getItem('triage-theme');
-      if (saved === 'light') document.body.classList.add('light');
-    } catch (e) {}
     var btn = document.getElementById('theme-toggle');
-    if (btn) btn.textContent = document.body.classList.contains('light') ? '☾' : '☼';
+    if (btn) btn.textContent = document.documentElement.classList.contains('light') ? '☾' : '☼';
   });
 """
 
@@ -1824,7 +1803,8 @@ async def dashboard_guide():
     """
     return f"""<!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Triage · Dashboard Guide</title>
+<title>RCA Triage platform · Dashboard Guide</title>
+<script>(function(){{try{{if(localStorage.getItem("triage-theme")==="light")document.documentElement.classList.add("light");}}catch(e){{}}}})();</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
