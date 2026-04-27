@@ -3,13 +3,28 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # --- Grafana Alerting webhook payload ---
 
 class GrafanaAlert(BaseModel):
-    status: str  # "firing" or "resolved"
+    """One alert inside a Grafana webhook payload.
+
+    Permissive shape — every field has a safe default so we don't 422 on
+    any Grafana variant. The empirically-observed failure mode (debug
+    handler 2026-04-27) was a webhook batch where some alerts were
+    missing `status` (probably resolved-state edge cases or a Grafana 13
+    quirk). Rather than guess at the exact trigger we accept any payload
+    and let the pipeline ignore malformed entries downstream.
+
+    `model_config` allows unknown extra fields (Grafana adds new keys
+    over time — e.g. `silenceURL`, `dashboardURL`, `panelURL`, `imageURL`,
+    `valueString`) so a future Grafana upgrade doesn't break the webhook.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = "firing"  # "firing" or "resolved"; default = the common case
     labels: dict[str, str] = Field(default_factory=dict)
     annotations: dict[str, str] = Field(default_factory=dict)
     startsAt: str = ""
@@ -17,6 +32,19 @@ class GrafanaAlert(BaseModel):
     fingerprint: str = ""
     generatorURL: str = ""
     values: dict = Field(default_factory=dict)
+    valueString: str = ""
+
+    @field_validator("values", mode="before")
+    @classmethod
+    def _coerce_values(cls, v):
+        # Grafana sometimes sends `values: null` for resolved alerts
+        # or NoData transitions — treat as empty dict.
+        return v or {}
+
+    @field_validator("labels", "annotations", mode="before")
+    @classmethod
+    def _coerce_dict(cls, v):
+        return v or {}
 
     @property
     def alertname(self) -> str:
