@@ -1104,7 +1104,7 @@ async def dashboard():
         f'    <input id="filter" type="text" placeholder="Filter by alert name, service, verdict, or RCA text" autocomplete="off" />'
         f'    <span class="hint" id="match-count"></span>'
         f'    <span class="spacer"></span>'
-        f'    <a class="explainer-link" href="https://linalaaraich.github.io/monitoring-docs/dashboard-guide.html" target="_blank" rel="noopener" title="Read the dashboard guide — every column, code, and abbreviation explained">What do these mean?</a>'
+        f'    <a class="explainer-link" href="/dashboard/guide" title="Read the dashboard guide — every column, code, and abbreviation explained">What do these mean?</a>'
         f'    <label class="refresh"><input id="refresh" type="checkbox" checked onchange="toggleRefresh()" /> Auto-refresh every 30 seconds <span id="refresh-state" class="refresh-state"></span></label>'
         f'  </div>'
         f'  <div class="table-card">'
@@ -1127,6 +1127,479 @@ async def dashboard():
         f'<script>{_DASHBOARD_JS}</script>'
         f'</body></html>'
     )
+
+
+_GUIDE_CSS = """
+  :root {
+    --bg: #f6f7f3;
+    --card: #ffffff;
+    --card-alt: #fbfcf8;
+    --ink: #1f2a23;
+    --ink-soft: #3f4a42;
+    --muted: #6b7a6f;
+    --rule: #e0e6df;
+    --rule-strong: #c8d3c5;
+    --sage: #5d8c6b;
+    --sage-strong: #3e7d4d;
+    --sage-soft: #eef6ee;
+    --warn: #a1642b;
+    --warn-soft: #f6efe3;
+    --danger: #b04550;
+    --danger-soft: #f6e4e6;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg); color: var(--ink); line-height: 1.65; font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+  }
+  code, pre, .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.88em;
+  }
+  .container { max-width: 1080px; margin: 0 auto; padding: 0 36px 60px; }
+  .header {
+    padding: 36px 36px 28px; max-width: 1080px; margin: 0 auto;
+  }
+  .header .eyebrow {
+    font-size: 11px; font-weight: 700; letter-spacing: 1.4px;
+    text-transform: uppercase; color: var(--sage-strong); margin-bottom: 8px;
+  }
+  .header h1 {
+    font-size: 30px; font-weight: 700; letter-spacing: -0.4px;
+    margin-bottom: 10px; color: var(--ink);
+  }
+  .header h1 .accent { color: var(--sage-strong); }
+  .header .subtitle { color: var(--ink-soft); max-width: 760px; }
+  .header .nav-back {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-top: 14px; padding: 6px 12px; border-radius: 8px;
+    background: var(--card); border: 1px solid var(--rule);
+    color: var(--sage-strong); font-size: 13px; font-weight: 600;
+    text-decoration: none;
+  }
+  .header .nav-back:hover { border-color: var(--sage); }
+  .layout {
+    display: grid; grid-template-columns: 240px 1fr; gap: 36px; margin-top: 8px;
+  }
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    .toc { position: static; }
+  }
+  .toc {
+    position: sticky; top: 16px; align-self: start;
+    background: var(--card); border: 1px solid var(--rule);
+    border-radius: 12px; padding: 18px 20px; font-size: 13px;
+  }
+  .toc h4 {
+    font-size: 11px; font-weight: 700; letter-spacing: 1.2px;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+  }
+  .toc ol { list-style: none; }
+  .toc li { margin-bottom: 4px; }
+  .toc a {
+    color: var(--ink-soft); text-decoration: none;
+    border-bottom: 1px dashed transparent;
+  }
+  .toc a:hover { color: var(--sage-strong); border-bottom-color: var(--sage); }
+  .toc li.sub { padding-left: 14px; font-size: 12px; }
+  .toc li.sub a { color: var(--muted); }
+  .content > .card {
+    background: var(--card); border: 1px solid var(--rule);
+    border-radius: 12px; padding: 22px 26px; margin-bottom: 18px;
+  }
+  .content h2 {
+    font-size: 22px; font-weight: 700; margin: 0 0 14px;
+    letter-spacing: -0.2px; color: var(--ink); scroll-margin-top: 16px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--rule);
+  }
+  .content h3 {
+    font-size: 16px; font-weight: 700; margin: 22px 0 8px;
+    color: var(--ink); scroll-margin-top: 16px;
+  }
+  .content h4 { font-size: 13px; font-weight: 700; margin: 16px 0 4px; color: var(--ink); }
+  .content p { margin-bottom: 12px; color: var(--ink-soft); }
+  .content p strong { color: var(--ink); font-weight: 600; }
+  .content ul, .content ol { margin: 6px 0 14px 22px; color: var(--ink-soft); }
+  .content li { margin-bottom: 5px; }
+  .content code {
+    background: var(--sage-soft); border: 1px solid var(--rule);
+    padding: 1px 6px; border-radius: 4px; font-size: 0.85em; color: var(--sage-strong);
+  }
+  .content pre {
+    background: var(--card-alt); border: 1px solid var(--rule);
+    padding: 12px 14px; border-radius: 8px; margin: 10px 0 14px;
+    overflow-x: auto; line-height: 1.5;
+  }
+  .content pre code { background: none; border: none; padding: 0; color: var(--ink); }
+  .content a {
+    color: var(--sage-strong); text-decoration: none;
+    border-bottom: 1px dashed rgba(62, 125, 77, 0.4);
+  }
+  .content a:hover { border-bottom-style: solid; }
+  table {
+    width: 100%; border-collapse: collapse; margin: 8px 0 16px; font-size: 13px;
+  }
+  table th, table td {
+    padding: 9px 12px; border-bottom: 1px solid var(--rule);
+    text-align: left; vertical-align: top;
+  }
+  table th {
+    font-size: 11px; font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; color: var(--muted); background: var(--sage-soft);
+  }
+  table tr:hover td { background: var(--card-alt); }
+  table td.code-cell {
+    font-family: ui-monospace, monospace; font-size: 12.5px;
+    color: var(--sage-strong); white-space: nowrap;
+  }
+  table td.label-cell { font-weight: 600; color: var(--ink); white-space: nowrap; }
+  .pill {
+    display: inline-block; font-size: 11px; font-weight: 600;
+    padding: 2px 8px; border-radius: 10px; border: 1px solid;
+  }
+  .pill.sage { color: var(--sage-strong); border-color: var(--sage); background: var(--sage-soft); }
+  .pill.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+  .pill.danger { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+  .pill.ink { color: var(--ink); border-color: var(--rule-strong); background: var(--card-alt); }
+  .glossary dt {
+    font-family: ui-monospace, monospace; font-size: 13px;
+    color: var(--sage-strong); margin-top: 10px; font-weight: 600;
+  }
+  .glossary dt:first-child { margin-top: 0; }
+  .glossary dd { margin: 3px 0 0 18px; color: var(--ink-soft); font-size: 14px; }
+  .scenario {
+    background: var(--sage-soft); border: 1px solid var(--rule);
+    border-radius: 8px; padding: 14px 18px; margin: 12px 0;
+  }
+  .scenario h4 { color: var(--sage-strong); margin-top: 0; font-size: 13px; }
+  .scenario p { font-size: 14px; }
+  .callout {
+    border-left: 3px solid var(--sage); border-radius: 0 8px 8px 0;
+    padding: 12px 16px; margin: 14px 0; background: var(--sage-soft);
+  }
+  .callout-label {
+    font-size: 11px; font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; color: var(--sage-strong); margin-bottom: 5px;
+  }
+  .deep-link {
+    display: inline-block; margin-top: 8px; font-size: 12px;
+    color: var(--muted); border-bottom: 1px dotted var(--muted);
+    text-decoration: none;
+  }
+  .deep-link:hover { color: var(--sage-strong); border-bottom-color: var(--sage); }
+"""
+
+
+@app.get("/dashboard/guide", response_class=HTMLResponse)
+async def dashboard_guide():
+    """Local operator-reference guide for the dashboard.
+
+    Lina 2026-04-27: pulled this out of github-pages so the link stays
+    inside the same host as the dashboard itself, and recolored to match
+    the sage/white palette so it's visually coherent with /dashboard.
+    The fuller monitoring-docs version of the same content remains at
+    https://linalaaraich.github.io/monitoring-docs/dashboard-guide.html
+    for deep-dive reference, linked at the bottom of this page.
+    """
+    return f"""<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard Guide · Triage Service</title>
+<style>{_GUIDE_CSS}</style></head><body>
+
+<div class="header">
+  <div class="eyebrow">AI root-cause triage · operator reference</div>
+  <h1>Dashboard <span class="accent">guide</span></h1>
+  <p class="subtitle">Every column, every internal code, every abbreviation explained.
+  If a label in the triage UI is unclear, find it here. The same content as the
+  monitoring-docs page, served locally so the dashboard stays self-contained.</p>
+  <a href="/dashboard" class="nav-back">← Back to decisions</a>
+</div>
+
+<div class="container">
+<div class="layout">
+
+<aside class="toc">
+  <h4>Contents</h4>
+  <ol>
+    <li><a href="#stats">1. Stats tiles</a></li>
+    <li><a href="#drain3">2. Drain3 panel</a></li>
+    <li><a href="#columns">3. Table columns</a></li>
+    <li class="sub"><a href="#col-time">3.1 Time</a></li>
+    <li class="sub"><a href="#col-alert">3.2 Alert</a></li>
+    <li class="sub"><a href="#col-source">3.3 Source</a></li>
+    <li class="sub"><a href="#col-service">3.4 Service</a></li>
+    <li class="sub"><a href="#col-severity">3.5 Severity</a></li>
+    <li class="sub"><a href="#col-verdict">3.6 Verdict + quality</a></li>
+    <li class="sub"><a href="#col-action">3.7 Action</a></li>
+    <li class="sub"><a href="#col-duration">3.8 Duration</a></li>
+    <li><a href="#detail">4. The detail panel</a></li>
+    <li><a href="#glossary">5. Codes &amp; abbreviations</a></li>
+    <li><a href="#scenarios">6. Reading common rows</a></li>
+  </ol>
+</aside>
+
+<article class="content">
+
+<div class="card">
+  <h2 id="stats">1. Stats tiles</h2>
+  <p>The five tiles count rows in the loaded window (last 100 decisions):</p>
+  <table>
+    <thead><tr><th>Tile</th><th>Means</th><th>Source field</th></tr></thead>
+    <tbody>
+      <tr><td class="label-cell">Total decisions</td><td>Every row in the window, including suppressed and timed-out.</td><td><code>len(rows)</code></td></tr>
+      <tr><td class="label-cell">Notified</td><td>Verdict was ESCALATE and the email was sent successfully.</td><td><code>action_taken == "emailed"</code></td></tr>
+      <tr><td class="label-cell">Dismissed</td><td>Verdict was DISMISS — alert judged not actionable, no email.</td><td><code>action_taken == "suppressed"</code></td></tr>
+      <tr><td class="label-cell">Deduped</td><td>Pre-LLM dedup hit — same alert fingerprint already seen inside the window. No LLM call.</td><td><code>triage_decision == "triage_suppressed"</code></td></tr>
+      <tr><td class="label-cell">Timed out</td><td>Pipeline exceeded its budget (40 min total, 30 min per LLM call). Raw alert forwarded.</td><td><code>action_taken == "emailed_raw"</code></td></tr>
+    </tbody>
+  </table>
+  <p>Hover any tile for the precise definition.</p>
+</div>
+
+<div class="card">
+  <h2 id="drain3">2. Drain3 panel</h2>
+  <p>Drain3 is an online log-template miner that runs in-process. As Loki logs flow in
+  during context-gathering, Drain3 clusters lines into templates (e.g.
+  <code>"&lt;*&gt; ERROR connection pool exhausted"</code>). The panel shows live state:</p>
+  <table>
+    <thead><tr><th>Field</th><th>Means</th></tr></thead>
+    <tbody>
+      <tr><td class="label-cell">Anomaly rate</td><td>Fraction of recent ingested lines that landed on a low-frequency template. Above ~5% suggests something genuinely novel; near 0% means steady state.</td></tr>
+      <tr><td class="label-cell">Templates learned</td><td>Total distinct clusters in the in-memory state. Persisted to disk every 30s so restarts don't reset learning.</td></tr>
+      <tr><td class="label-cell">Lines processed</td><td>Lifetime count of log lines fed through Drain3.</td></tr>
+      <tr><td class="label-cell">Anomalies flagged</td><td>Count of lines tagged <code>[ANOMALY]</code> by the analyzer — those whose template is in the rare-frequency tail.</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2 id="columns">3. Table columns</h2>
+  <p>9 columns, left to right. The first is a chevron icon (click any row to expand it).</p>
+
+  <h3 id="col-time">3.1 Time</h3>
+  <p>When the decision was persisted, rendered in <strong>Africa/Casablanca local zone (GMT+1)</strong>.</p>
+
+  <h3 id="col-alert">3.2 Alert</h3>
+  <p>The Grafana alert rule's title (e.g. <code>HighP95Latency</code>, <code>TargetDown</code>).
+  Maps 1:1 to the rule name in
+  <code>monitoring-project/roles/grafana/templates/alertrules.yml.j2</code>. Synthetic alerts
+  from the Drain3 self-bridge get conventional names like <code>Drain3AnomalyDetected</code>.</p>
+
+  <h3 id="col-source">3.3 Source</h3>
+  <ul>
+    <li><strong><code>grafana</code></strong> — alert came in via <code>/webhook/grafana</code>.</li>
+    <li><strong><code>drain3</code></strong> — synthesized by the in-process self-bridge when the anomaly threshold was crossed.</li>
+  </ul>
+
+  <h3 id="col-service">3.4 Service</h3>
+  <p>The service the alert is about. Comes from <code>alert.labels.service</code>: <code>spring-boot</code>,
+  <code>kong</code>, <code>otel-collector</code>, <code>monitoring</code> (the Grafana host VM),
+  <code>k3s-node</code>, <code>loki</code>, <code>drain3</code>.</p>
+
+  <h3 id="col-severity">3.5 Severity</h3>
+  <p>Three values, color-coded:</p>
+  <ul>
+    <li><span class="pill danger">critical</span> — page now (TargetDown, OOMKill, OTel pipeline drop)</li>
+    <li><span class="pill warn">warning</span> — investigate within hours (most CPU/mem/latency rules)</li>
+    <li><span class="pill sage">info</span> — context only, not paging-worthy (Drain3, threshold-tuning hints)</li>
+  </ul>
+
+  <h3 id="col-verdict">3.6 Verdict + quality</h3>
+  <p>Two stacked elements: the LLM's verdict (left pill) and the post-hoc RCA quality (right pill).</p>
+  <p><strong>Verdict pill (LLM decision):</strong></p>
+  <ul>
+    <li><strong>escalate</strong> — LLM thinks this is a real issue → email sent.</li>
+    <li><strong>dismiss</strong> — LLM thinks this is noise / self-resolving → no email.</li>
+    <li><strong>inconclusive</strong> — LLM couldn't pick. Treated as ESCALATE downstream (safer).</li>
+    <li><strong>timeout</strong> — pipeline exceeded budget. No verdict; raw alert forwarded.</li>
+  </ul>
+  <p><strong>Quality pill (post-hoc tag):</strong></p>
+  <ul>
+    <li><strong>fits</strong> (raw <code>actionable</code>) — concrete RCA + at least one valid suggested action.</li>
+    <li><strong>thin</strong> (raw <code>data_starved</code>) — model hedged or evidence empty.</li>
+    <li><strong>review</strong> (raw <code>needs_review</code>) — confidence below floor (0.30) or validator flagged.</li>
+  </ul>
+
+  <h3 id="col-action">3.7 Action</h3>
+  <p>What the pipeline did downstream of the verdict. Renamed in 2026-04-27 from raw
+  pipeline codes to engineer-friendly labels (raw code preserved next to the label in a small
+  monospace tag for grep purposes):</p>
+  <table>
+    <thead><tr><th>Label</th><th>Raw code</th><th>Means</th></tr></thead>
+    <tbody>
+      <tr><td class="label-cell">Notified</td><td class="code-cell">emailed</td><td>Triage emailed the on-call (LLM produced a verdict).</td></tr>
+      <tr><td class="label-cell">Notified (no LLM)</td><td class="code-cell">emailed_raw</td><td>LLM unavailable or timed out — raw alert forwarded.</td></tr>
+      <tr><td class="label-cell">Suppressed</td><td class="code-cell">suppressed</td><td>Pre-LLM dedup or recent dismissed history.</td></tr>
+      <tr><td class="label-cell">Dropped</td><td class="code-cell">drop_alert</td><td>Below severity threshold or matched a quiet-hours rule.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="col-duration">3.8 Duration</h3>
+  <p>End-to-end pipeline duration: MCP context-gathering (~1–5s) + LLM inference (10–80s on the
+  laptop GPU) + validator + persistence. Format scales: under 1s → ms, 1–60s → "12.3 s",
+  over 60s → "N min M s".</p>
+</div>
+
+<div class="card">
+  <h2 id="detail">4. The detail panel</h2>
+  <p>Click any row to expand. Sections, top-down:</p>
+
+  <h3>Meta-grid</h3>
+  <p>9 fields giving the row's identity and core LLM facts: timestamp · decision ID ·
+  alert fingerprint · service · component/signal · instance · triage path (humanized)
+  · LLM confidence + quality · action + duration.</p>
+
+  <h3>Observed value + PromQL</h3>
+  <p>The lede card: the actual metric value at fire time and the PromQL that produced it.</p>
+
+  <h3>Root-cause analysis</h3>
+  <p>The LLM's narrative. 2–5 sentences typically, starting with a restatement of the
+  observed value + PromQL (mandated by SYSTEM_PROMPT rule A). 10-digit Unix timestamps
+  embedded by the LLM are auto-converted to <code>&lt;unix&gt; (&lt;Casablanca&gt;)</code> at render time.</p>
+
+  <h3>Suggested actions</h3>
+  <p><strong>Remediations only.</strong> As of 2026-04-27, the LLM is constrained to emit
+  state-changing commands (<code>kubectl rollout restart</code>, <code>helm rollback</code>,
+  <code>docker restart</code>, <code>systemctl restart</code>, <code>kubectl set resources</code>,
+  <code>terraform apply</code>) — never read-only inspections like <code>kubectl get</code> or
+  <code>Query Grafana: ...</code>. The triage service has already inspected the telemetry;
+  that data is in evidence/RCA.</p>
+  <p>Empty list = the model didn't have a concrete remediation. The pipeline falls back
+  to <code>app/suggested_actions.yaml</code> templates keyed by alertname × deployment type.
+  For Drain3 alerts with no correlation, the fallback is a "Shelved — awaiting recurrence" marker.</p>
+
+  <h3>Evidence</h3>
+  <p>Specific metric values, log lines, or trace IDs the LLM cited. Each entry must be
+  concrete; vague entries get rejected by the validator.</p>
+
+  <h3>Drain3 anomaly summary</h3>
+  <p>If the alert was sourced by Drain3, this section shows the anomalous templates that
+  triggered the fire. For Grafana-sourced alerts, anomalies found in the gathered Loki
+  context are also listed here.</p>
+
+  <h3>Correlated alerts (±5 min)</h3>
+  <p>Other alerts that fired within the window. The LLM is required (rule H) to address
+  these in the RCA — either "X caused Y", "they share cause Z", or "coincident timing."</p>
+</div>
+
+<div class="card">
+  <h2 id="glossary">5. Codes &amp; abbreviations</h2>
+
+  <h3>Internal codes (raw enum values stored in SQLite)</h3>
+  <dl class="glossary">
+    <dt>action_taken</dt>
+    <dd><code>emailed</code> · <code>emailed_raw</code> · <code>suppressed</code> · <code>drop_alert</code>. See <a href="#col-action">column 3.7</a>.</dd>
+
+    <dt>triage_decision</dt>
+    <dd>Higher-level pipeline path. <code>investigate</code> = ran the full LLM pipeline.
+    <code>triage_suppressed</code> = pre-LLM dedup short-path. <code>dismiss</code> /
+    <code>escalate</code> = LLM verdict (echoed). <code>dismiss_shelved</code> = Drain3
+    anomaly with no correlation, awaiting recurrence. <code>timeout_passthrough</code> =
+    pipeline exceeded budget.</dd>
+
+    <dt>rca_quality</dt>
+    <dd><code>actionable</code> (label: <em>fits</em>) · <code>data_starved</code> (label:
+    <em>thin</em>) · <code>needs_review</code> (label: <em>review</em>).</dd>
+
+    <dt>alert_source</dt>
+    <dd><code>grafana</code> or <code>drain3</code>.</dd>
+
+    <dt>llm_verdict</dt>
+    <dd><code>ESCALATE</code> · <code>DISMISS</code> · <code>INCONCLUSIVE</code>. Pipeline treats <code>INCONCLUSIVE</code> as ESCALATE downstream.</dd>
+
+    <dt>deployment_type</dt>
+    <dd><code>k8s</code> · <code>docker-vm</code> · <code>systemd</code> · <code>external</code> ·
+    <code>unknown</code>. Drives the architecture-mismatch validator and template selection.</dd>
+  </dl>
+
+  <h3>Acronyms used in the UI and emails</h3>
+  <dl class="glossary">
+    <dt>RCA</dt><dd>Root-cause analysis — the LLM's narrative.</dd>
+    <dt>MCP</dt><dd>Model Context Protocol — the contract by which the triage service queries Prometheus, Loki, Jaeger, Drain3, and rca-history (5 servers, all containerized).</dd>
+    <dt>p95 / p99</dt><dd>The 95th / 99th percentile of a latency distribution. <code>histogram_quantile(0.95, ...)</code> in PromQL.</dd>
+    <dt>OTel / OTLP</dt><dd>OpenTelemetry / its wire protocol. Spring-boot ships traces via OTLP; otel-collector forwards to Jaeger.</dd>
+    <dt>LogQL / PromQL</dt><dd>Loki's log query language / Prometheus' metric query language.</dd>
+    <dt>refId (A / B / C)</dt><dd>Grafana alert rules are 3-step pipelines: A=query, B=reduce, C=threshold-as-boolean. The observed value is B; C is just 0/1.</dd>
+    <dt>fingerprint</dt><dd>Stable hash Grafana computes over alert labels. Two webhooks with the same fingerprint are the same logical alert.</dd>
+    <dt>kill chain / cascade</dt><dd>A sequence of related alerts firing in close succession (disk-fills → DB-slow → connection-pool-exhaust → 503s).</dd>
+    <dt>shelved</dt><dd>Drain3-specific verdict: anomaly was detected but no correlation found. Logged with <code>triage_decision=dismiss_shelved</code>; if same template recurs ≥3 times in 7 days, escalate on pattern alone.</dd>
+    <dt>data_starved / thin</dt><dd>Quality tag indicating the LLM hedged because evidence was empty. Triggers a one-time bounded-agency retry (the LLM can request one extra MCP query before re-deciding).</dd>
+  </dl>
+</div>
+
+<div class="card">
+  <h2 id="scenarios">6. Reading common rows</h2>
+
+  <div class="scenario">
+    <h4>A — clean ESCALATE on a Java service</h4>
+    <p>Verdict: <strong>escalate</strong>. Quality: <strong>fits</strong>. Action: <strong>Notified</strong>.
+    Confidence ≥0.7. Suggested actions list two or three <code>kubectl set resources</code> /
+    <code>kubectl rollout restart</code> commands. Evidence cites a specific Loki line and a metric value.
+    The on-call has a clear next step.</p>
+  </div>
+
+  <div class="scenario">
+    <h4>B — DISMISS on a noisy threshold</h4>
+    <p>Verdict: <strong>dismiss</strong>. Quality: <strong>fits</strong>. Action: <strong>Dismissed</strong>
+    (no email). RCA explains the metric briefly crossed the threshold and immediately fell back.
+    Suggested actions point at the alertrules YAML — raise the threshold or add a <code>for: 2m</code> clause.</p>
+  </div>
+
+  <div class="scenario">
+    <h4>C — Drain3 anomaly, shelved</h4>
+    <p>Source: <strong>drain3</strong>. Verdict: <strong>dismiss</strong>. Triage path: <strong>Shelved</strong>
+    (raw: <code>dismiss_shelved</code>). Suggested actions contain the shelve marker. RCA explains the new
+    template that fired and that no metric/trace correlation was found. The system will escalate automatically
+    if the same template recurs ≥3 times in 7 days.</p>
+  </div>
+
+  <div class="scenario">
+    <h4>D — Deduped row</h4>
+    <p>Triage path: <strong>Deduped</strong>. Verdict: empty. Action: <strong>Suppressed</strong>.
+    The detail panel's "Action" line says <code>see_previous_rca:&lt;prior_id&gt;</code>. Click that
+    decision for the full RCA — this row is just a marker that the same fingerprint refired in window.</p>
+  </div>
+
+  <div class="scenario">
+    <h4>E — Timed out (Notified, no LLM)</h4>
+    <p>Verdict: <strong>timeout</strong>. Action: <strong>Notified (no LLM)</strong>. The pipeline exceeded
+    its budget. No RCA, no suggested actions — raw alert was forwarded. Investigate Ollama health if
+    you see a cluster of these (<code>docker logs ai-ollama</code>).</p>
+  </div>
+
+  <div class="scenario">
+    <h4>F — thin RCA (data_starved)</h4>
+    <p>Verdict: <strong>escalate</strong>. Quality: <strong>thin</strong>. RCA hedges because Loki had
+    0 lines or Jaeger was empty. Pipeline already retried once with bounded-agency. If still thin, the
+    alert is for a service that doesn't log through the app pipeline (k3s-node, monitoring-vm).</p>
+  </div>
+
+  <div class="callout">
+    <div class="callout-label">Tip</div>
+    <p>The <strong>Action</strong> column tells you what the system did downstream;
+    <strong>Verdict + Quality</strong> tells you what the LLM thought; the
+    <strong>Triage path</strong> in the detail panel tells you which pipeline branch the alert took.
+    If those three disagree, the row is interesting — open it and read the reasoning.</p>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Deeper reading</h3>
+  <p>This page covers the operator-facing UI. For the full architectural context — every
+  module, every config knob, every gotcha, the philosophy decisions log, the alerts-audit
+  with per-alert accuracy, and the Sprint 2 Epic 5 (UEBA) plan — see the monitoring-docs
+  site:</p>
+  <a class="deep-link" href="https://linalaaraich.github.io/monitoring-docs/dashboard-guide.html" target="_blank" rel="noopener">monitoring-docs version of this page (extended) →</a><br>
+  <a class="deep-link" href="https://linalaaraich.github.io/monitoring-docs/" target="_blank" rel="noopener">monitoring-docs home →</a>
+</div>
+
+</article>
+</div>
+</div>
+
+</body></html>"""
 
 
 @app.get("/metrics")
