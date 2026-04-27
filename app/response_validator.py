@@ -1,17 +1,25 @@
 """Programmatic validator for LLMDecision objects.
 
-Runs between the LLM call and persistence. Three checks, ordered by
-severity:
+Runs between the LLM call and persistence. Four checks:
 
   1. Banned-phrase scan on rca + reason. Phrases the prompt explicitly
      forbids (rule B: "insufficient data" etc.) — if present, the LLM
      ignored the rule. Returns the matched phrase so the caller can
      quote it back in a retry prompt.
 
-  2. Vague-action scan on suggested_actions. Entries like "check logs",
+  2a. Vague-action scan on suggested_actions. Entries like "check logs",
      "investigate further" are rejected. The rejected list is returned
      pruned; callers treat a fully-empty result as "no LLM actions —
      consider template fallback" (handled in the pipeline).
+
+  2b. Investigation-only scan (new 2026-04-27, after Lina's audit).
+     Actions that READ system state (kubectl get/describe/top/logs,
+     docker ps/logs/stats, "Query Grafana: ...", ssh ... 'top|df|ps')
+     are rejected. The triage service already runs those queries via
+     its MCP servers; the result belongs in rca/evidence, not in
+     suggested_actions. suggested_actions must CHANGE state — kubectl
+     rollout restart, kubectl set resources, helm rollback, docker
+     restart, systemctl restart, etc.
 
   3. Architecture-mismatch scan — if the alert's deployment_type is
      known (k8s/docker-vm/systemd) and the suggested_actions contain
@@ -53,7 +61,8 @@ _BANNED_PHRASE_PATTERNS: list[re.Pattern] = [
 # Pattern: must START with a vague verb AND have no shell/URL/query payload.
 # ---------------------------------------------------------------------------
 _VAGUE_ACTION_HEAD = re.compile(
-    r"^\s*(?:check|monitor|investigate|review|look into|verify|examine|inspect|audit)\s+",
+    r"^\s*(?:check|monitor|investigate|review|look into|verify|examine|inspect|audit|"
+    r"see|find|identify|ask|confirm|consider|look at|understand|determine)\s+",
     re.I,
 )
 _HAS_SPECIFIC_PAYLOAD = re.compile(
@@ -63,6 +72,81 @@ _HAS_SPECIFIC_PAYLOAD = re.compile(
     r"(?:`[^`]+`|https?://|\bkubectl\b|\bssh\b|\bdocker\b|\bsystemctl\b|\bcurl\b|\bjournalctl\b|=~|\{[^}]*=)",
     re.I,
 )
+
+# ---------------------------------------------------------------------------
+# Investigation-only actions — actions that READ state but don't CHANGE it.
+# These belong in the rca/evidence (the triage service does this work
+# itself), not in suggested_actions. Lina's audit 2026-04-27 found ~100% of
+# rows were emitting these; the prompt was rewritten to forbid them, this
+# validator is the safety net.
+#
+# Detection strategy: match on a tightly-scoped command shape (the exact
+# kubectl/docker subverbs that read, the "Query <observability tool>:"
+# preface, and certain ssh-and-do-only-readonly forms). Pure regex, no
+# AST. False negatives are fine (template fallback will provide a real
+# remediation). False positives would be costly so we keep patterns
+# specific.
+# ---------------------------------------------------------------------------
+_INVESTIGATION_ONLY_PATTERNS: tuple[re.Pattern, ...] = (
+    # kubectl read-only verbs
+    re.compile(r"\bkubectl\s+(?:get|describe|top|logs|exec|explain|api-resources|api-versions|cluster-info|config|version|wait)\b", re.I),
+    # docker read-only verbs (logs/ps/stats/inspect/version/info)
+    re.compile(r"\bdocker\s+(?:logs|ps|stats|inspect|version|info|images|history|diff|events|top|port|search)\b", re.I),
+    # "Query <observability tool>: ..." pattern — the system already queried these
+    re.compile(r"\bQuery\s+(?:Grafana|Prometheus|Loki|Jaeger|Tempo|Drain3)\b", re.I),
+    re.compile(r"\bOpen\s+(?:Grafana|Prometheus|Loki|Jaeger)\b", re.I),
+    re.compile(r"\bCheck\s+(?:Prometheus|Grafana|Loki|Jaeger)\s+(?:targets|panel|page|dashboard|UI)\b", re.I),
+    # ssh + read-only shell tools
+    re.compile(
+        r"\bssh\b[^']*'(?:[^']*\b(?:top|htop|ps|free|df|du|ls|cat|head|tail|grep|awk|sed|nproc|uptime|uname|w|who|last|netstat|ss|lsof|stat|file|wc|sort|tail|find|tree)\b[^']*)'",
+        re.I,
+    ),
+    # curl-as-probe patterns (curl ... | head, curl -s ... metrics, curl -sf ... healthz)
+    re.compile(r"\bcurl\b[^|]*\|\s*head\b", re.I),
+    re.compile(r"\bcurl\s+-s[fF]?[^|;`]*(?:metrics|healthz|/health|/ready|/status)\b", re.I),
+)
+
+# Remediation verbs — if any of these appear, the action is treated as a real
+# fix even if it embeds an inspection command (e.g. `kubectl scale --replicas=$(($(kubectl get ...)+1))`
+# legitimately reads to compute the new count, but the outer command still
+# changes state).
+_REMEDIATION_VERB_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"\bkubectl\s+(?:rollout\s+(?:restart|undo)|scale|set\s+(?:resources|env|image)|patch|delete\s+pod|delete\s+(?:replicaset|rs)|drain|cordon|uncordon|edit|apply|create|replace)\b", re.I),
+    re.compile(r"\bhelm\s+(?:rollback|upgrade|uninstall|install)\b", re.I),
+    re.compile(r"\bdocker\s+(?:restart|kill|rm|stop|start|run)\b", re.I),
+    re.compile(r"\bdocker\s+compose\s+(?:restart|down|up|kill|stop|start|rm)\b", re.I),
+    re.compile(r"\bsystemctl\s+(?:restart|reload|stop|start|kill|reset-failed)\b", re.I),
+    re.compile(r"\bterraform\s+(?:apply|destroy|taint)\b", re.I),
+    re.compile(r"\b(?:k|p)ill\b\s+-?[0-9A-Z]+", re.I),  # kill/pkill with target
+    re.compile(r"\bgit\s+revert\b", re.I),
+    re.compile(r"\bansible-playbook\b", re.I),
+    re.compile(r"\bnpm\s+(?:install|run|publish)\b", re.I),
+    re.compile(r"\bjournalctl\s+--vacuum", re.I),
+    re.compile(r"\bcrictl\s+rmi", re.I),
+    re.compile(r"\blogrotate\s+-f", re.I),
+    re.compile(r"\bdocker\s+system\s+prune", re.I),
+)
+
+
+def _has_remediation_verb(action: str) -> bool:
+    return any(p.search(action) for p in _REMEDIATION_VERB_PATTERNS)
+
+
+def _looks_like_investigation_only(action: str) -> bool:
+    """True if the action only reads state (kubectl get/describe, Query
+    Grafana, ssh ... 'top', etc.) — the triage service already did this.
+
+    An action that contains BOTH an investigation pattern AND a remediation
+    verb (like `kubectl scale --replicas=$(($(kubectl get ...)+1))`) is NOT
+    flagged — the outer command changes state, the embedded read is just
+    computing an arg.
+    """
+    if _has_remediation_verb(action):
+        return False
+    for p in _INVESTIGATION_ONLY_PATTERNS:
+        if p.search(action):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -119,9 +203,16 @@ class ValidationReport:
         """True if the violations are severe enough to warrant an LLM retry
         (as opposed to just template-fallback-and-ship)."""
         # Banned phrases in the RCA narrative are severe — the LLM ignored a
-        # direct rule. Retry one time to see if it can behave. Everything
-        # else we handle silently (prune vague, prune mismatched, log).
-        return bool(self.banned_phrase_hits)
+        # direct rule. Retry one time to see if it can behave.
+        # Investigation-only rejections also warrant a retry: the LLM has the
+        # context (the queries we already ran are in its prompt); it just
+        # picked the wrong abstraction. One feedback round usually fixes it,
+        # and template fallback is a coarser substitute.
+        if self.banned_phrase_hits:
+            return True
+        if any("investigation_only" in why for _, why in self.rejected_actions):
+            return True
+        return False
 
 
 def validate(
@@ -147,7 +238,7 @@ def validate(
             report.banned_phrase_hits.append(phrase)
             report.violations.append(f"banned phrase in rca/reason: {phrase!r}")
 
-    # --- 2. Vague-action scan on suggested_actions
+    # --- 2a. Vague-action scan on suggested_actions
     kept_actions: list[str] = []
     for a in decision.suggested_actions:
         if _VAGUE_ACTION_HEAD.match(a) and not _HAS_SPECIFIC_PAYLOAD.search(a):
@@ -155,6 +246,18 @@ def validate(
             report.violations.append(f"vague suggested_action: {a!r}")
         else:
             kept_actions.append(a)
+
+    # --- 2b. Investigation-only scan (added 2026-04-27 — see philosophy in
+    # response_validator module docstring + suggested_actions.yaml header).
+    # Reads of state belong in rca/evidence; suggested_actions must change state.
+    after_investigation_filter: list[str] = []
+    for a in kept_actions:
+        if _looks_like_investigation_only(a):
+            report.rejected_actions.append((a, "investigation_only_no_remediation"))
+            report.violations.append(f"investigation-only suggested_action: {a!r}")
+        else:
+            after_investigation_filter.append(a)
+    kept_actions = after_investigation_filter
 
     # --- 3. Architecture mismatch
     if deployment_type in _ARCH_COMMAND_SIGNALS:
@@ -210,10 +313,18 @@ def build_retry_feedback(report: ValidationReport) -> str:
         )
     if report.rejected_actions:
         details = "; ".join(f"{a!r} ({why})" for a, why in report.rejected_actions[:5])
+        investigation_count = sum(1 for _, why in report.rejected_actions if "investigation_only" in why)
+        guidance = (
+            "Replace with state-CHANGING remediations only — kubectl rollout restart / "
+            "kubectl set resources / helm rollback / docker restart / systemctl restart. "
+            "READ-ONLY commands (kubectl get/describe/logs, docker ps, Query Grafana, "
+            "ssh 'top|df|ps') are forbidden — the triage service already ran those, "
+            "their results are in your evidence field. Empty list is acceptable; vague "
+            "or investigation-only entries are not."
+        )
         parts.append(
-            f"Your previous suggested_actions had {len(report.rejected_actions)} rejection(s): {details}. "
-            "Replace with specific shell commands, PromQL/LogQL queries, or URLs. "
-            "Empty list is better than vague advice."
+            f"Your previous suggested_actions had {len(report.rejected_actions)} rejection(s) "
+            f"({investigation_count} were investigation-only): {details}. {guidance}"
         )
     return "\n\n".join(parts) if parts else ""
 

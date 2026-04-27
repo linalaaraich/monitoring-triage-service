@@ -36,17 +36,46 @@ B. If any pre-gathered pillar (metrics/logs/traces) is empty, name WHICH pillar 
 C. If the "Prior decisions for this alert" section below shows past decisions that hedged (tagged data_starved), DO NOT repeat the same hedge. Use the available signal — even if thin — to propose a specific hypothesis, and suggest concrete remediation the human can check.
 D. Prefer ESCALATE over INCONCLUSIVE when you can at least name a probable cause. INCONCLUSIVE should be rare and always accompanied by a specific remediation: what query to run, what label to add, which shipper to restart.
 
-E. suggested_actions MUST be concrete, not advice. Each entry must be ONE of:
-   - an exact shell command (with args filled in based on the alert labels), OR
-   - a specific PromQL/LogQL query the operator can paste into Grafana, OR
-   - a specific URL to open (Grafana panel, Jaeger trace, runbook).
-   BAD (reject these — too vague, don't emit): "Check logs for errors", "Monitor the situation",
-        "Investigate further", "Review CPU usage", "Look into it".
-   GOOD (emit these): "Run `kubectl top nodes` — the instance 10.0.1.194:9100 is likely CPU-bound",
-        "Query Loki: `{service_name=\"spring-boot\"} |~ \"(?i)error|exception\" | count_over_time[5m]`",
-        "Open http://grafana/d/spring-boot and check the request-rate panel at 22:36 UTC",
-        "ssh deploy@observability-rca-k3s and run `top -b -n 1 | head -20` to see the hottest process".
-   If you cannot produce a concrete action, emit fewer actions — an empty list is better than vague advice.
+E. suggested_actions MUST be REMEDIATIONS (state-changing fixes), NEVER investigations or queries.
+   The triage service has ALREADY queried Prometheus, Loki, Jaeger, and Drain3 to build the context
+   you see above. That data is in `evidence` and the RCA. Asking the operator to re-run queries
+   or to check what the triage system already checked is useless. Operators want a fix, not homework.
+
+   Every action MUST change system state. Acceptable remediation verbs include:
+     - kubectl rollout restart / kubectl scale / kubectl set resources / kubectl set env
+     - kubectl patch / kubectl delete pod / kubectl drain / kubectl cordon
+     - helm rollback / helm upgrade
+     - docker restart / docker compose restart / docker compose up -d --force-recreate
+     - systemctl restart / systemctl reload
+     - git revert + redeploy / terraform apply (rollback)
+     - kill / pkill (specific PID identified in evidence)
+     - Direct config-file edit + reload (with the exact path and command)
+   Reject these as suggested_actions (NEVER emit):
+     - "Check ...", "Verify ...", "Confirm ...", "Investigate ...", "Examine ...", "Inspect ...",
+       "See ...", "Find ...", "Identify ...", "Look at ...", "Look into ...", "Review ...",
+       "Monitor ...", "Audit ...", "Ask ..." — these are tasks, not fixes.
+     - "kubectl get|describe|top|logs|exec" — read-only, the triage service already did this.
+     - "docker logs|ps|stats|inspect|exec" — read-only, same reason.
+     - "Query Grafana|Prometheus|Loki|Jaeger: ..." — the triage service is the one that queries
+       the observability stack. If a query result was needed, request it via tool_call below;
+       do NOT pass it back to the operator.
+     - "ssh ... 'top'", "ssh ... 'df -h'", "ssh ... 'ps aux'", "ssh ... 'tail|head|cat|grep|free|du'"
+     - Any open-ended "look at X" or "watch the dashboard" guidance.
+
+   GOOD examples (emit these):
+     - "kubectl rollout restart deploy/spring-boot -n app — clears the in-process connection pool"
+     - "kubectl set resources deploy/spring-boot -n app --limits=memory=2Gi — current 1Gi causes OOMKill"
+     - "kubectl scale deploy/kong-kong -n network --replicas=3 — current 1 replica is saturated at p95"
+     - "helm rollback spring-boot $(helm history spring-boot -n app -o json | jq -r '.[-2].revision') -n app"
+     - "ssh deploy@observability-rca-monitoring 'docker compose -f /opt/monitoring/compose.yml restart loki'"
+
+   If you cannot identify a concrete remediation given the evidence, emit ONE empty list `[]` — the
+   pipeline will fall back to per-alert templates. An empty list is fine; investigation requests are not.
+
+I. (Investigation gate.) Investigation results belong in `evidence` and `rca`, not `suggested_actions`.
+   If you find yourself wanting to write "the operator should query X" or "verify Y" — instead, request
+   that query yourself using the tool_call protocol (when available), then put the result in evidence,
+   then emit a remediation in suggested_actions based on what you found.
 F. evidence items must cite a SPECIFIC metric value, log line, or trace ID — not a general category.
    BAD: "Prometheus metrics", "Log patterns"
    GOOD: "node_cpu_seconds_total{instance=\"10.0.1.194:9100\",mode=\"idle\"} = 5.6%",
@@ -76,32 +105,35 @@ You MUST return JSON matching the schema below. The Ollama runtime validates at 
 
 The three examples below show expected quality. Match this shape, not just the schema.
 
-### Example 1 — ESCALATE with clear metric signal
+### Example 1 — ESCALATE with clear remediation path (OOMKill-loop on a Java service)
 
 INPUT:
-  alertname=HighCpuUsage, service=k3s-node, deployment_type=systemd
-  observed_value=94.4 (refId=B) [A=94.4, C=1], threshold=85, unit=percent
-  metric interpretation: CPU busy = 94.4% (idle = 5.6%), 9.4 percentage points above 80% threshold, sustained for 1 min
-  loki: 0 lines (expected for node-level alert)
-  jaeger: 0 traces (expected for infrastructure metric)
-  correlated: HighMemoryUsage same host within ±5 min
+  alertname=HighMemoryUsage, service=spring-boot, deployment_type=k8s
+  observed_value=98.4 (refId=B), threshold=85, unit=percent
+  metric interpretation: container memory_usage = 98.4%, 13pp above 85% threshold, sustained 8 min
+  loki: 4 lines `[ANOMALY] java.lang.OutOfMemoryError: Java heap space` in last 60s
+  jaeger: 12 traces, slowest 11.2s — GC pauses visible at request boundaries
+  prior decisions: 3 prior fires same pod — 2 ESCALATE, 1 timeout. Restart count for pod = 45.
+  correlated: HighP95Latency same service +90s
 
 EXPECTED OUTPUT:
 {
   "decision": "ESCALATE",
-  "severity": "warning",
-  "confidence": 0.85,
-  "reason": "CPU busy 94.4% sustained on 10.0.1.194 — 9.4pp over threshold; coincident memory pressure points to load spike or runaway process.",
-  "rca": "PromQL `100 - (avg by(instance) (rate(node_cpu_seconds_total{mode=\\"idle\\"}[1m])) * 100)` returned 94.4% on instance 10.0.1.194:9100, placing the host well above the 85% threshold. Correlated HighMemoryUsage on the same host within 5 minutes suggests either a workload-level spike (pod burst) or a runaway process consuming both CPU and RAM. Node-level logs aren't in Loki for this service (expected — no app pipeline), so host-level introspection is needed.",
+  "severity": "critical",
+  "confidence": 0.92,
+  "reason": "spring-boot OOM-killing repeatedly: 1Gi container limit + unset JVM heap → ~256 MB effective, exhausted by normal load. Latency spike is downstream of GC thrashing.",
+  "rca": "PromQL `container_memory_working_set_bytes / container_spec_memory_limit_bytes * 100` returned 98.4% on spring-boot pod, sustained 8 minutes. Loki shows 4 `OutOfMemoryError: Java heap space` lines in the last 60s. The container limit is 1Gi (kubectl get deploy/spring-boot showed `limits.memory=1Gi`) and JAVA_TOOL_OPTIONS is unset, so the JVM defaults to ~25% of the cgroup → ~256 MB effective heap, which normal traffic exhausts. Pod restart count is 45, confirming a steady-state OOMKill loop. The correlated HighP95Latency alert is downstream — Java GC pauses block request threads and inflate p95.",
   "anomaly_summary": "",
   "suggested_actions": [
-    "ssh deploy@observability-rca-k3s 'top -b -n 1 | head -20' — identify the hottest process",
-    "kubectl top pods -A --sort-by=cpu | head -10 — see which workload is consuming CPU",
-    "Query Grafana: rate(node_cpu_seconds_total{instance=\\"10.0.1.194:9100\\"}[5m]) by (mode) — confirm mode (user vs system vs iowait)"
+    "kubectl set resources deploy/spring-boot -n app --limits=memory=2Gi --requests=memory=1Gi — raise headroom out of OOMKill range",
+    "kubectl set env deploy/spring-boot -n app JAVA_TOOL_OPTIONS='-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError' — pin heap to 75% of container limit instead of JVM default",
+    "kubectl rollout restart deploy/spring-boot -n app — apply env+limit changes and clear in-process state"
   ],
   "evidence": [
-    "node_cpu_seconds_total{instance=\\"10.0.1.194:9100\\",mode=\\"idle\\"} rate = 5.6% (observed value 94.4% busy)",
-    "Correlated HighMemoryUsage alert on same instance fired 2 minutes prior"
+    "container_memory_working_set_bytes / container_spec_memory_limit_bytes = 0.984 (98.4%)",
+    "Loki: `[ANOMALY] java.lang.OutOfMemoryError: Java heap space` x4 in last 60s",
+    "Pod restart count = 45 — steady-state OOMKill loop",
+    "Correlated HighP95Latency same service +90s — GC-pause downstream effect"
   ]
 }
 
@@ -125,8 +157,8 @@ EXPECTED OUTPUT:
   "rca": "PromQL `histogram_quantile(0.95, ...)` reported 1020 ms at fire time, briefly crossing the 1000 ms threshold by 2%. The next scrape interval dropped p95 back to 340 ms, and the slowest Jaeger trace in window was 340 ms — no individual request exceeded the threshold. 50 Loki lines show no errors or exceptions. This matches the pattern seen 14 times in the last 24h on this rule, all of which have been dismissed.",
   "anomaly_summary": "0 of 50 lines anomalous",
   "suggested_actions": [
-    "Consider raising the HighP95Latency threshold from 1000ms to 1200ms — current firing rate is mostly noise",
-    "Query Grafana: histogram_quantile(0.99, ...) to see if p99 captures real spikes while p95 stays quiet"
+    "Edit monitoring-project/roles/grafana/templates/alertrules.yml.j2: raise HighP95Latency threshold from 1000 to 1200, then run `ansible-playbook -i inventory/tailnet.yml playbooks/grafana.yml` — current threshold fires on 14 false positives in 24h",
+    "Add `for: 2m` to the rule (same file, same alert) — requires sustained breach, drops single-sample spikes"
   ],
   "evidence": [
     "Prometheus histogram_quantile(0.95) = 1020 ms at fire, 340 ms at next scrape (+10s)",
@@ -155,9 +187,9 @@ EXPECTED OUTPUT:
   "rca": "PromQL `up == 0` returned 0 for instance 10.0.1.68:9100 — the node-exporter on the monitoring VM. Metrics from this target are unavailable by definition (that's what's being alerted), and Loki has no service=monitoring logs because Grafana/node-exporter on the monitoring VM are deployed via docker-compose, not k8s, and ship logs directly via docker rather than through the app log pipeline. The most likely causes, in order, are: (1) node-exporter container stopped or crashed on monitoring-vm, (2) network path between Prometheus and monitoring-vm is broken, (3) Prometheus scrape config drift.",
   "anomaly_summary": "",
   "suggested_actions": [
-    "ssh deploy@observability-rca-monitoring 'docker ps --filter name=node-exporter' — verify the container is running",
-    "ssh deploy@observability-rca-monitoring 'curl -sf http://localhost:9100/metrics | head -5' — verify the scrape endpoint is alive",
-    "Query Grafana: up{instance=\\"10.0.1.68:9100\\"}[30m] — see when the target went down"
+    "ssh deploy@observability-rca-monitoring 'docker compose -f /opt/monitoring/compose.yml up -d --force-recreate node-exporter' — redeploy the container; first action covers both \"stopped\" and \"unhealthy\" cases",
+    "If the redeploy fails: ssh deploy@observability-rca-monitoring 'sudo systemctl restart docker' — recover docker daemon if it's stuck",
+    "If still down 5 min after that: re-run terraform apply -target=module.monitoring_vm to redeploy the VM from a known-good state"
   ],
   "evidence": [
     "up{instance=\\"10.0.1.68:9100\\"} = 0 (target unreachable for 2+ min)",
@@ -228,7 +260,10 @@ def _build_fallback_decision() -> LLMDecision:
         confidence=0.0,
         reason="LLM unavailable \u2014 automatic escalation for human review",
         rca="AI triage could not complete analysis. Raw alert forwarded for manual review.",
-        suggested_actions=["Review the raw alert manually", "Check Ollama service health"],
+        suggested_actions=[
+            "ssh deploy@adolin-wsl 'docker compose -f ~/cires-ai/docker-compose.yml restart ai-ollama' — recover the local LLM",
+            "If ollama keeps crashing: docker compose pull ai-ollama && docker compose up -d ai-ollama --force-recreate",
+        ],
         evidence=[],
     )
 
@@ -427,6 +462,42 @@ class LLMClient:
             )
             deployment_type = metric_facts.deployment_type
 
+        # Drain3-specific playbook (added 2026-04-27 after Lina's audit).
+        # Drain3 alerts have different operational semantics from metric alerts:
+        # they signal log-template novelty, which is meaningful as a SIGNAL
+        # but rarely actionable in isolation. The right play is investigate
+        # → correlate → verdict, with two structured outcomes:
+        #   - if correlations point to a known failure → ESCALATE + remediation
+        #   - if no correlation → DISMISS as "shelved pending recurrence"
+        # Recurrence is the second-chance escalation: same template firing
+        # ≥3 times in 7 days is itself a real signal even without per-fire
+        # correlation, and earns ESCALATE.
+        drain3_playbook_block = ""
+        if alert.alertname == "Drain3AnomalyDetected":
+            drain3_playbook_block = (
+                "\n## Drain3 alert playbook (this alert is a log-template novelty, NOT a metric breach)\n"
+                "Drain3 fires when a never-before-seen log template appears or a known-rare template "
+                "spikes in frequency. The anomaly_summary above lists the new templates. Your job:\n"
+                "  1. INSPECT the anomaly: read the templates in anomaly_summary. What kind of failure "
+                "do they describe? (OOM? JDBC pool exhaust? deserialization error? request timeout?)\n"
+                "  2. CORRELATE with the other pillars in the ±10 min window: do Prometheus metrics "
+                "show a CPU/memory/latency spike on the same service? Do Jaeger traces show error spans? "
+                "Are there correlated alerts in the section above?\n"
+                "  3. VERDICT — choose ONE:\n"
+                "     (a) Concrete cause identified (correlation supports a specific failure mode) → "
+                "ESCALATE + remediation suggested_actions. Confidence ≥0.6.\n"
+                "     (b) No concrete correlation, but recurrence is high (this alert fired ≥3 times "
+                "in the last 7 days — see 'Prior decisions' below): ESCALATE anyway. The pattern is "
+                "real even without per-fire evidence. reason: 'recurring drain3 anomaly: <template> "
+                "fired Nx in 7d — pattern is real, no transient cause'. confidence ≥0.55.\n"
+                "     (c) No concrete correlation AND not recurring (<3 fires in 7d): DISMISS with "
+                "reason='shelved pending recurrence — anomaly #N in 7d window, no correlation found'. "
+                "Confidence 0.5-0.65. suggested_actions=[] (the pipeline will fill the shelve template).\n"
+                "DO NOT emit a generic 'kubectl rollout restart' as your only suggestion when you have "
+                "no concrete cause — that's not a fix, that's a guess. Either justify the action with a "
+                "correlation, or shelve it.\n"
+            )
+
         # P1.4 — Correlated alerts as first-class prompt section. Moved out of
         # history_context so the prompt rule H about explaining the
         # relationship has a clear place to bind to.
@@ -463,6 +534,7 @@ class LLMClient:
 - **PromQL:** `{rule_expr}`
 - **Observed value at fire time:** {value_line}
 {interpreter_block}
+{drain3_playbook_block}
 {correlated_block}
 The observed value above is ground-truth signal from Prometheus at the moment the rule's threshold was crossed. Cite this value explicitly in your RCA — do not say "insufficient data" if the alert itself carries a value.
 

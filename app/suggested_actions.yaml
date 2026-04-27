@@ -1,137 +1,201 @@
-# Action templates for the triage service.
+# Action templates for the triage service — REMEDIATION-FIRST.
 #
-# When the LLM returns suggested_actions=[] (or an all-vague list rejected
-# by the response validator), the pipeline falls back to these templates
-# keyed by alertname pattern. Templates are deployment-type aware — the
-# wrong command family for a service is worse than no suggestion at all
-# (audit 2026-04-24: LLM was emitting `kubectl` for service=monitoring
-# which is Grafana on a docker-compose VM).
+# When the LLM's `suggested_actions` is empty (or all entries are rejected by
+# response_validator for being investigations rather than fixes), the pipeline
+# falls back to these templates keyed by alertname pattern.
 #
-# Placeholder substitution happens at fill time (see app/action_templates.py):
+# PHILOSOPHY (changed 2026-04-27 after Lina's audit feedback): every template
+# action MUST be a state-changing remediation. The triage service has full
+# read access to Prometheus / Loki / Jaeger / Drain3 via its MCP servers — it
+# already gathers that data and presents it in `evidence` and `rca`. Asking
+# the operator to re-run the same queries the system already ran is useless.
+# Operators want a fix, not a homework assignment.
+#
+# Acceptable verbs: kubectl rollout restart / kubectl scale / kubectl set
+# resources / kubectl set env / kubectl patch / kubectl delete pod / helm
+# rollback / docker restart / docker compose restart / docker compose up
+# -d --force-recreate / systemctl restart / systemctl reload / kill / git
+# revert / terraform apply.
+#
+# UNACCEPTABLE: kubectl get / kubectl describe / kubectl top / kubectl logs /
+# docker logs / docker ps / docker stats / df / du / ps / top / "Query
+# Grafana" / "Check ..." / "Verify ..." / "Investigate ..."
+#
+# Templates are deployment-type aware — kubectl actions are wrong for a
+# Grafana-on-docker-compose service, so each alert is keyed by the deployment
+# type returned by app.config.service_deployment_type.
+#
+# Placeholder substitution (see app/action_templates.py):
 #   {instance}        — raw "ip:port" from alert.labels["instance"]
 #   {instance_host}   — friendly hostname from settings.instance_hosts
 #   {service}         — alert.labels["service"]
 #   {grafana}         — settings.grafana_url
-#   {job}             — alert.labels["job"] if present, else falls through
+#   {job}             — alert.labels["job"] if present
 #
-# First matching rule wins. Match order is top-to-bottom, so put more
-# specific patterns above catch-all defaults.
+# First matching rule wins. Keep specific patterns above catch-all defaults.
 
 rules:
 
   # ---- CPU alerts ------------------------------------------------------
+  # CPU pressure remedies are: scale horizontally, scale vertically (raise
+  # cpu limit), restart leaking pod, or drain hot node and let scheduler
+  # rebalance. We don't OOM-kill specific processes in templates because we
+  # don't have a PID — the LLM can do that when it has a process name in
+  # evidence.
   - match: "^(High|Medium|Critical)CpuUsage$"
     by_deployment_type:
       k8s:
-        - "kubectl top nodes --sort-by=cpu"
-        - "kubectl top pods -A --sort-by=cpu | head -15"
-        - "ssh deploy@{instance_host} 'top -b -n 1 | head -20' — identify the hottest process on node {instance_host}"
+        - "kubectl scale deploy/{service} -n app --replicas=$(($(kubectl get deploy/{service} -n app -o=jsonpath='{.spec.replicas}')+1)) — add a replica to relieve load"
+        - "kubectl rollout restart deploy/{service} -n app — clear in-process leaks"
+        - "kubectl set resources deploy/{service} -n app --limits=cpu=1500m --requests=cpu=500m — bump CPU ceiling if pods are throttled"
       systemd:
-        - "ssh deploy@{instance_host} 'top -b -n 1 | head -20' — identify the hottest process"
-        - "ssh deploy@{instance_host} 'ps aux --sort=-pcpu | head -10' — top CPU consumers by process"
-        - "Query Grafana: rate(node_cpu_seconds_total{{instance=\"{instance}\"}}[5m]) by (mode) — confirm CPU mode breakdown (user/system/iowait)"
+        - "ssh deploy@{instance_host} 'sudo systemctl restart node-exporter prometheus' — recover any wedged daemons"
+        - "If a single process dominates: ssh deploy@{instance_host} 'sudo kill <PID>' (PID identified in evidence)"
+        - "If sustained: terraform apply -target=module.<host> with a larger instance_type — current size is saturated"
       docker-vm:
-        - "ssh deploy@{instance_host} 'top -b -n 1 | head -20'"
-        - "ssh deploy@{instance_host} 'docker stats --no-stream' — containers by CPU"
-      unknown:
-        - "Query Grafana: 100 - (avg by(instance) (rate(node_cpu_seconds_total{{mode=\"idle\"}}[5m])) * 100) — confirm CPU usage over time"
+        - "ssh deploy@{instance_host} 'docker compose -f /opt/monitoring/compose.yml restart' — recycle compose stack"
+        - "If a single container is the source: ssh deploy@{instance_host} 'docker restart <name>' (name in evidence)"
+      unknown: []
 
   # ---- Memory alerts ---------------------------------------------------
+  # Memory pressure usually means: limit too low, leak in-process, or both.
+  # The right fix is raise limit + restart to reset state. JVM-specific
+  # alerts get an extra heap-tuning entry.
   - match: "^(High|Medium|Critical)MemoryUsage$"
     by_deployment_type:
       k8s:
-        - "kubectl top pods -A --sort-by=memory | head -15"
-        - "ssh deploy@{instance_host} 'free -h && cat /proc/meminfo | head -5'"
-        - "Query Grafana: (1 - node_memory_MemAvailable_bytes{{instance=\"{instance}\"}} / node_memory_MemTotal_bytes{{instance=\"{instance}\"}}) * 100"
+        - "kubectl set resources deploy/{service} -n app --limits=memory=2Gi --requests=memory=1Gi — raise the ceiling out of OOMKill range"
+        - "kubectl rollout restart deploy/{service} -n app — clear accumulated state after the limit change"
+        - "If Java service: kubectl set env deploy/{service} -n app JAVA_TOOL_OPTIONS='-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError' — pin heap to 75% of cgroup, force exit on OOM"
       systemd:
-        - "ssh deploy@{instance_host} 'free -h'"
-        - "ssh deploy@{instance_host} 'ps aux --sort=-rss | head -10' — top RAM consumers"
+        - "ssh deploy@{instance_host} 'sudo systemctl restart <service>' (service name in evidence)"
+        - "If a leaking process: ssh deploy@{instance_host} 'sudo kill <PID>' (PID in evidence)"
       docker-vm:
-        - "ssh deploy@{instance_host} 'docker stats --no-stream' — containers by memory"
-        - "ssh deploy@{instance_host} 'free -h'"
+        - "ssh deploy@{instance_host} 'docker restart <container>' (container name in evidence)"
+        - "Edit /opt/monitoring/compose.yml: raise the container's `mem_limit`, then `docker compose up -d --force-recreate <container>`"
+      unknown: []
 
   # ---- Disk alerts -----------------------------------------------------
+  # Disk pressure: prune images/logs first (cheap and reversible), expand
+  # volume only if pruning isn't enough.
   - match: "^(High|Critical|DiskFilling).*(DiskUsage|Up).*$"
     by_deployment_type:
       k8s:
-        - "ssh deploy@{instance_host} 'df -h /'"
-        - "ssh deploy@{instance_host} 'du -sh /var/lib/rancher/k3s/storage/* 2>/dev/null | sort -h | tail -10' — k3s local-path volumes"
+        - "ssh deploy@{instance_host} 'sudo journalctl --vacuum-size=200M' — trim systemd journal (often the largest log dir)"
+        - "ssh deploy@{instance_host} 'sudo crictl rmi --prune' — remove unused container images"
+        - "If still > 80% after prune: terraform apply -var k3s_root_volume_gb=<larger> -target=module.k3s — expand EBS volume"
       systemd:
-        - "ssh deploy@{instance_host} 'df -h /'"
-        - "ssh deploy@{instance_host} 'du -sh /var/log/* 2>/dev/null | sort -h | tail -10' — log dir usage"
+        - "ssh deploy@{instance_host} 'sudo journalctl --vacuum-size=200M' — trim journal"
+        - "ssh deploy@{instance_host} 'sudo logrotate -f /etc/logrotate.conf' — force log rotation"
       docker-vm:
-        - "ssh deploy@{instance_host} 'df -h /'"
-        - "ssh deploy@{instance_host} 'docker system df' — docker disk usage breakdown"
+        - "ssh deploy@{instance_host} 'docker system prune -af --volumes' — remove unused images/volumes"
+        - "If still > 80% after prune: terraform apply -var monitoring_root_volume_gb=<larger> — expand EBS"
+      unknown: []
 
   # ---- TargetDown / service down --------------------------------------
+  # The service is unreachable. The only universal remedy is "restart the
+  # thing." The LLM should put which thing in the rca so the operator can
+  # paste in the right name.
   - match: "^TargetDown$"
     by_deployment_type:
       k8s:
-        - "kubectl get pods -A -o wide | grep -v Running"
-        - "kubectl describe pod <pod> -n <ns> — examine failing pods"
-        - "Query Grafana: up{{instance=\"{instance}\"}}[30m] — see exactly when the target went down"
+        - "kubectl rollout restart deploy/{service} -n app — restart the deployment to bring the pod back to a clean state"
+        - "If pod stays NotReady: kubectl delete pod -l app.kubernetes.io/name={service} -n app — force pod recreation"
+        - "If readiness probe is the cause (in evidence): kubectl patch deploy/{service} -n app --patch='{{\"spec\":{{\"template\":{{\"spec\":{{\"containers\":[{{\"name\":\"{service}\",\"readinessProbe\":{{\"timeoutSeconds\":15}}}}]}}}}}}}}' — relax probe"
       systemd:
-        - "ssh deploy@{instance_host} 'systemctl status node-exporter.service'"
-        - "ssh deploy@{instance_host} 'curl -sSf http://localhost:9100/metrics | head -5' — verify endpoint"
+        - "ssh deploy@{instance_host} 'sudo systemctl restart {service}' — restart the daemon"
+        - "If the unit is failed: ssh deploy@{instance_host} 'sudo systemctl reset-failed {service} && sudo systemctl start {service}'"
       docker-vm:
-        - "ssh deploy@{instance_host} 'docker ps --format \"{{.Names}} {{.Status}}\"' — which containers are down"
-        - "ssh deploy@{instance_host} 'docker logs --tail 50 <container>' — last-50-lines on the failing container"
+        - "ssh deploy@{instance_host} 'docker restart <container>' — restart the container (name visible in evidence; usually matches the service label)"
+        - "If the container is gone: ssh deploy@{instance_host} 'cd /opt/monitoring && docker compose up -d <container>' — recreate from compose"
       unknown:
-        - "Check Prometheus targets page: {grafana}/targets"
+        - "Identify the service's deployment type from the alert labels, then restart at that layer (kubectl rollout restart / systemctl restart / docker restart)"
 
   - match: "^OTelCollectorDown$"
     by_deployment_type:
       k8s:
-        - "kubectl get pods -n observability -l app.kubernetes.io/component=otel-collector"
-        - "kubectl logs -n observability -l app.kubernetes.io/component=otel-collector --tail=100"
+        - "kubectl rollout restart daemonset/otel-collector -n observability — recycle the collector across all nodes"
+        - "If pods stay unhealthy: kubectl delete pod -l app.kubernetes.io/component=otel-collector -n observability — force-recreate"
       docker-vm:
-        - "ssh deploy@{instance_host} 'docker logs --tail 100 otel-collector'"
+        - "ssh deploy@{instance_host} 'docker restart otel-collector'"
 
   # ---- Latency alerts --------------------------------------------------
+  # Latency rarely fixes itself. Standard plays: restart for connection-pool
+  # / GC-arena leaks, scale out for capacity, raise resource limits if
+  # GC/CPU-bound.
   - match: "^HighP95Latency$"
     by_deployment_type:
       k8s:
-        - "Query Jaeger: service={service}, minDuration=1s, last 30min — find slow traces"
-        - "kubectl logs -n app -l app.kubernetes.io/name=spring-boot --tail=200 | grep -iE 'slow|timeout|error'"
-        - "Query Grafana: rate(http_server_requests_seconds_count{{container=\"spring-boot\"}}[5m]) by (uri) — high-traffic endpoints"
+        - "kubectl rollout restart deploy/{service} -n app — clears connection-pool leaks (most common p95 cause for Java services)"
+        - "kubectl scale deploy/{service} -n app --replicas=$(($(kubectl get deploy/{service} -n app -o=jsonpath='{.spec.replicas}')+1)) — add a replica to spread request load"
+        - "If Java GC pauses are visible in traces: kubectl set resources deploy/{service} -n app --limits=memory=2Gi (raise heap headroom) and `kubectl set env deploy/{service} -n app JAVA_TOOL_OPTIONS='-XX:MaxRAMPercentage=75 -XX:+UseG1GC -XX:MaxGCPauseMillis=200'`"
 
   - match: "^HighKongP95Latency$"
     by_deployment_type:
       k8s:
-        - "Query Jaeger: service=kong, minDuration=1s — slow gateway-layer traces"
-        - "kubectl logs -n network -l app.kubernetes.io/instance=kong --tail=200 | grep -iE 'upstream|timeout'"
-        - "Query Grafana: rate(kong_request_latency_ms_sum[5m]) / rate(kong_request_latency_ms_count[5m]) — avg latency trend"
+        - "kubectl rollout restart deploy/kong-kong -n network — recycle Kong workers (sheds in-process state)"
+        - "kubectl scale deploy/kong-kong -n network --replicas=2 — current 1 replica is the bottleneck for gateway throughput"
+        - "If upstream timeouts are visible in evidence: kubectl set env deploy/kong-kong -n network KONG_PROXY_READ_TIMEOUT=30000 KONG_PROXY_SEND_TIMEOUT=30000 — raise upstream timeouts"
 
   # ---- OTel span drop rate --------------------------------------------
   - match: "^OTelCollectorHighSpanDropRate$"
     by_deployment_type:
       k8s:
-        - "kubectl describe pod -n observability -l app.kubernetes.io/component=otel-collector — look for memory limits / OOM events"
-        - "kubectl logs -n observability -l app.kubernetes.io/component=otel-collector --tail=200 | grep -iE 'drop|full|queue'"
-        - "Query Grafana: rate(otelcol_processor_dropped_spans_total[5m]) by (processor) — which processor drops"
+        - "kubectl rollout restart daemonset/otel-collector -n observability — clear stuck pipelines"
+        - "If memory limit is the cause (visible in evidence): kubectl set resources daemonset/otel-collector -n observability --limits=memory=512Mi"
+        - "If exporter backpressure: edit otel-collector ConfigMap to raise `processors.batch.send_batch_size` (currently default 8192) — flush smaller batches faster"
 
   # ---- Loki ingestion / storage ---------------------------------------
   - match: "^Loki(High|Critical)DiskUsage$"
     by_deployment_type:
       docker-vm:
-        - "ssh deploy@{instance_host} 'df -h /' — confirm the monitoring VM is out of space"
-        - "ssh deploy@{instance_host} 'du -sh /var/lib/docker/volumes/monitoring-vm_loki_data/_data 2>/dev/null' — Loki storage usage"
-      unknown:
-        - "Check Grafana storage panel: {grafana}"
+        - "ssh deploy@{instance_host} 'docker exec loki rm -rf /loki/chunks/index/$(ls /loki/chunks/index | head -3)' — drop oldest 3 days of indexes (irreversible — only when compliant with retention policy)"
+        - "Edit /opt/monitoring/loki/config.yml: lower `limits_config.retention_period` to 96h, then `docker restart loki` — shorten retention going forward"
+        - "If still full: terraform apply -var monitoring_root_volume_gb=<larger> — expand EBS"
 
   - match: "^LokiIngestionRateLow$"
     by_deployment_type:
       docker-vm:
-        - "ssh deploy@{instance_host} 'docker logs --tail 100 loki' — Loki server errors"
-        - "ssh deploy@{instance_host} 'docker logs --tail 100 otel-collector | grep -iE \"loki|exporter\"' — pipeline send errors"
+        - "ssh deploy@{instance_host} 'docker restart loki otel-collector' — recover the ingest pipeline"
+        - "If Loki keeps refusing writes: edit /opt/monitoring/loki/config.yml `limits_config.ingestion_rate_mb` higher, restart Loki"
 
-  # ---- Catch-all default (empty = LLM gets no help, but nothing wrong either) -
+  # ---- Drain3 anomaly --------------------------------------------------
+  # Drain3 fires on novel log templates. These are not metric breaches —
+  # they're SIGNALS that something new is happening in the logs. The
+  # operational play is investigate → correlate → verdict (see the Drain3
+  # playbook block in app/llm_client.py SYSTEM_PROMPT). When the LLM
+  # produces a concrete RCA, it should also produce a remediation action
+  # tied to the identified failure mode (those actions don't fall back to
+  # this template).
+  #
+  # The fallback below applies when the LLM produces NO concrete actions —
+  # which for Drain3 means it didn't find a correlation. In that case the
+  # right output is a SHELVE marker, not a generic restart. A shelved
+  # anomaly will be revisited the next time the same template fires;
+  # if it recurs ≥3 times in 7 days the LLM is told to escalate it
+  # regardless. Restart-as-default is a guess, and Lina's audit found
+  # those guesses confused operators more than they helped.
+  - match: "^Drain3AnomalyDetected$"
+    by_deployment_type:
+      k8s:
+        - "Shelved — no correlation between this log-template novelty and metric/trace anomalies in the same window. No action this round; if the same template fires again the recurrence counter will surface it for re-investigation. If it crosses ≥3 fires in 7 days the system will escalate automatically."
+      docker-vm:
+        - "Shelved — no correlation between this log-template novelty and metric/trace anomalies in the same window. No action this round; if the same template recurs ≥3 times in 7 days the system will escalate automatically."
+      systemd:
+        - "Shelved — no correlation between this log-template novelty and metric/trace anomalies in the same window. No action this round; if the same template recurs ≥3 times in 7 days the system will escalate automatically."
+      unknown:
+        - "Shelved — no correlation found, no remediation issued. Awaiting recurrence."
+
+  # ---- Default catch-all ----------------------------------------------
+  # When the alertname doesn't match any specific rule, the safest universal
+  # remedy is "restart the offending workload" — but only at the right layer.
+  # Empty for unknown deployment types (no vague advice).
   - match: "^.*$"
     by_deployment_type:
       k8s:
-        - "kubectl describe pod -A | grep -A 5 {service} — start from pod state"
+        - "kubectl rollout restart deploy/{service} -n app — universal first-line remedy for k8s services"
       docker-vm:
-        - "ssh deploy@{instance_host} 'docker ps' — container state on the deployment host"
+        - "ssh deploy@{instance_host} 'docker restart <container>' — universal first-line remedy for docker-vm services (container name in evidence)"
       systemd:
-        - "ssh deploy@{instance_host} 'systemctl status' — host daemon state"
-      unknown: []   # No vague advice. Empty is preferable.
+        - "ssh deploy@{instance_host} 'sudo systemctl restart {service}' — universal first-line remedy for systemd services"
+      unknown: []
