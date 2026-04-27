@@ -1,5 +1,6 @@
 import html as _html
 import logging
+import re as _re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -280,6 +281,15 @@ _DASHBOARD_CSS = """
   }
   .toolbar input[type=checkbox] { accent-color: var(--sage); }
   .refresh-state { font-size: 11px; color: var(--warn); font-style: italic; margin-left: 6px; }
+  .toolbar .explainer-link {
+    font-size: 12px; color: var(--sage-strong); text-decoration: none;
+    border-bottom: 1px dotted var(--sage); padding-bottom: 1px;
+  }
+  .toolbar .explainer-link:hover { color: var(--ink); border-bottom-color: var(--ink); }
+  .raw-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10.5px; color: var(--muted); margin-left: 4px;
+  }
 
   .table-card {
     background: var(--card); border: 1px solid var(--rule); border-radius: 12px;
@@ -667,14 +677,91 @@ def _fmt_duration_ms(ms: int | None) -> str:
 def _quality_pill(quality: str | None) -> str:
     """Render the rca_quality post-hoc tag as a small pill next to the verdict.
 
-    Absent (older rows before the migration) renders as empty string so
-    the summary row stays clean.
+    Engineer-readable labels: actionable→"fits", data_starved→"thin",
+    needs_review→"review". Hover tooltip carries the full meaning so the
+    operator can disambiguate without leaving the dashboard.
     """
     if not quality:
         return ""
-    cls = 'quality-actionable' if quality == 'actionable' else 'quality-data_starved'
-    label = _html.escape(quality.replace('_', ' '))
-    return f'<span class="quality {cls}">{label}</span>'
+    label_map = {
+        "actionable":   ("fits",    "Concrete RCA + ≥1 valid suggested_action — operator has a clear next step"),
+        "data_starved": ("thin",    "RCA hedged or evidence empty — model didn't have enough signal to commit"),
+        "needs_review": ("review",  "Confidence below the floor (0.30) OR validator flagged the row — surface to a human"),
+    }
+    short, tip = label_map.get(quality, (quality.replace("_", " "), quality))
+    cls = "quality-actionable" if quality == "actionable" else "quality-data_starved"
+    return f'<span class="quality {cls}" title="{_html.escape(tip)}">{_html.escape(short)}</span>'
+
+
+def _humanize_action(action: str | None) -> tuple[str, str]:
+    """Map the internal action_taken enum to a (label, tooltip) pair.
+
+    The codes (emailed / emailed_raw / suppressed / drop_alert) are
+    pipeline-internal; engineers reading the dashboard for the first
+    time shouldn't have to grep the source to understand them.
+    """
+    a = (action or "").lower()
+    if a == "emailed":
+        return "Notified", "Triage emailed the on-call (LLM produced a verdict)"
+    if a == "emailed_raw":
+        return "Notified (no LLM)", "LLM unavailable or timed out — raw alert forwarded for human review"
+    if a == "suppressed":
+        return "Suppressed", "Pre-LLM suppression — duplicate fingerprint inside the dedup window, or recent dismissed history"
+    if a == "drop_alert":
+        return "Dropped", "Below severity threshold or matched a quiet-hours rule"
+    if not action or action == "—":
+        return "—", "No action recorded"
+    return action, action
+
+
+def _humanize_triage_path(triage_decision: str | None) -> tuple[str, str]:
+    """Translate triage_decision enum values to human labels."""
+    t = (triage_decision or "").lower()
+    if t == "investigate":
+        return "Investigated", "Pipeline ran the full LLM investigation"
+    if t == "triage_suppressed":
+        return "Deduped", "Same alert fingerprint already seen inside the dedup window — short-path"
+    if t == "dismiss":
+        return "Dismissed", "Verdict was DISMISS — alert judged not actionable"
+    if t == "dismiss_shelved":
+        return "Shelved", "Drain3 anomaly with no correlation found — awaiting recurrence (≥3 fires in 7d → escalate)"
+    if t == "escalate":
+        return "Escalated", "Verdict was ESCALATE — alert raised to operator"
+    if t == "timeout_passthrough":
+        return "Timed out", "Pipeline exceeded its budget — raw alert was forwarded with no LLM verdict"
+    if not triage_decision or triage_decision == "—":
+        return "—", "No triage path recorded"
+    return triage_decision, triage_decision
+
+
+# Match 10-digit Unix timestamps the LLM sometimes embeds in prose.
+# (10-digit covers 2001–2286 in seconds; we render as Casablanca local time.)
+_UNIX_TS_PATTERN = _re.compile(r"\b(1[5-9][0-9]{8}|2[0-9]{9})\b")
+
+
+def _humanize_unix_timestamps(text: str) -> str:
+    """Replace any 10-digit Unix timestamp in the text with `<unix> (<local>)`.
+
+    The LLM occasionally writes "...observed at 1776985940" instead of a
+    human time. We post-process the rendered text so engineers don't have
+    to mentally convert. Casablanca local zone matches the rest of the UI.
+    """
+    if not text:
+        return text
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        return text
+    tz = ZoneInfo("Africa/Casablanca")
+    def _sub(m):
+        try:
+            ts = int(m.group(1))
+            from datetime import datetime
+            local = datetime.fromtimestamp(ts, tz=tz)
+            return f"{m.group(1)} ({local.strftime('%Y-%m-%d %H:%M')})"
+        except (ValueError, OverflowError):
+            return m.group(0)
+    return _UNIX_TS_PATTERN.sub(_sub, text)
 
 
 def _deep_chips(service: str | None, alert_name: str | None) -> str:
@@ -780,9 +867,17 @@ def _render_detail_panel(r: dict) -> str:
     did = _html.escape(r.get('id') or '')
     ts_full = _html.escape(_to_local_time(r.get('timestamp'), with_zone_label=True))
     fingerprint = _html.escape(r.get('alert_fingerprint') or '—')
-    triage = _html.escape(r.get('triage_decision') or '—')
+    triage_path_label, triage_path_tip = _humanize_triage_path(r.get('triage_decision'))
+    triage = (
+        f'<span title="{_html.escape(triage_path_tip)}">{_html.escape(triage_path_label)}'
+        f'<span class="raw-code"> · {_html.escape(r.get("triage_decision") or "—")}</span></span>'
+    )
     confidence = _html.escape(str(r.get('llm_confidence') or '—'))
-    action = _html.escape(r.get('action_taken') or '—')
+    action_label, action_tip = _humanize_action(r.get('action_taken'))
+    action = (
+        f'<span title="{_html.escape(action_tip)}">{_html.escape(action_label)}'
+        f'<span class="raw-code"> · {_html.escape(r.get("action_taken") or "—")}</span></span>'
+    )
     duration = int(r.get('investigation_duration_ms') or 0)
     service = r.get('affected_service') or ''
     quality = r.get('rca_quality') or '—'
@@ -815,9 +910,11 @@ def _render_detail_panel(r: dict) -> str:
     else:
         obs_html = ''
 
-    # RCA + reasoning
-    rca = _html.escape(r.get('rca_report') or '')
-    reasoning = _html.escape(r.get('llm_reasoning') or '')
+    # RCA + reasoning. Post-process to humanize 10-digit Unix timestamps the
+    # LLM occasionally embeds in prose ("observed at 1776985940") so engineers
+    # don't have to mentally convert.
+    rca = _humanize_unix_timestamps(_html.escape(r.get('rca_report') or ''))
+    reasoning = _humanize_unix_timestamps(_html.escape(r.get('llm_reasoning') or ''))
     rca_text = rca or '<em>(no RCA report captured — decision took the suppress or timeout path)</em>'
     reasoning_text = reasoning or '<em>(no reasoning captured)</em>'
 
@@ -974,7 +1071,7 @@ async def dashboard():
             f'  <td>{_html.escape(service)}{_deep_chips(service, alert_name)}</td>'
             f'  <td><span class="sev sev-{_html.escape(severity)}">{_html.escape(severity or "—")}</span></td>'
             f'  <td>{_verdict_pill(verdict, action)}{_quality_pill(r.get("rca_quality"))}</td>'
-            f'  <td class="action action-{_html.escape(action)}">{_html.escape(action)}</td>'
+            f'  <td class="action action-{_html.escape(action)}" title="{_html.escape(_humanize_action(action)[1])}">{_html.escape(_humanize_action(action)[0])}</td>'
             f'  <td class="mono">{_fmt_duration_ms(duration)}</td>'
             f'</tr>'
             f'<tr class="detail" id="detail-{did}"><td colspan="9">{_render_detail_panel(r)}</td></tr>'
@@ -997,23 +1094,31 @@ async def dashboard():
         f'  </div>'
         f'  <div class="stats">'
         f'    <div class="stat t-total"><div class="num">{total}</div><div class="lbl">Total decisions</div></div>'
-        f'    <div class="stat t-esc"><div class="num">{escalated}</div><div class="lbl">Escalated</div></div>'
-        f'    <div class="stat t-dismiss"><div class="num">{dismissed}</div><div class="lbl">Dismissed</div></div>'
-        f'    <div class="stat t-suppress"><div class="num">{suppressed_pre}</div><div class="lbl">Pre-LLM suppressed</div></div>'
-        f'    <div class="stat t-timeout"><div class="num">{timed_out}</div><div class="lbl">Timed out</div></div>'
+        f'    <div class="stat t-esc" title="Verdict was ESCALATE and an email was sent"><div class="num">{escalated}</div><div class="lbl">Notified</div></div>'
+        f'    <div class="stat t-dismiss" title="Verdict was DISMISS — alert judged not actionable"><div class="num">{dismissed}</div><div class="lbl">Dismissed</div></div>'
+        f'    <div class="stat t-suppress" title="Pre-LLM dedup — same fingerprint already seen in window"><div class="num">{suppressed_pre}</div><div class="lbl">Deduped</div></div>'
+        f'    <div class="stat t-timeout" title="Pipeline exceeded its budget — raw alert forwarded with no LLM verdict"><div class="num">{timed_out}</div><div class="lbl">Timed out</div></div>'
         f'  </div>'
         f'  {_render_drain3_panel(drain_stats)}'
         f'  <div class="toolbar">'
         f'    <input id="filter" type="text" placeholder="Filter by alert name, service, verdict, or RCA text" autocomplete="off" />'
         f'    <span class="hint" id="match-count"></span>'
         f'    <span class="spacer"></span>'
+        f'    <a class="explainer-link" href="https://linalaaraich.github.io/monitoring-docs/dashboard-guide.html" target="_blank" rel="noopener" title="Read the dashboard guide — every column, code, and abbreviation explained">What do these mean?</a>'
         f'    <label class="refresh"><input id="refresh" type="checkbox" checked onchange="toggleRefresh()" /> Auto-refresh every 30 seconds <span id="refresh-state" class="refresh-state"></span></label>'
         f'  </div>'
         f'  <div class="table-card">'
         f'    <table>'
         f'      <thead><tr>'
-        f'        <th></th><th>Time (local)</th><th>Alert</th><th>Source</th><th>Service</th>'
-        f'        <th>Severity</th><th>Verdict</th><th>Action</th><th>Duration</th>'
+        f'        <th></th>'
+        f'        <th title="Wall-clock time the decision was persisted, in Casablanca local zone (GMT+1)">Time</th>'
+        f'        <th title="Alert rule name as configured in Grafana">Alert</th>'
+        f'        <th title="Where the alert came from: grafana=metric rule, drain3=log-template anomaly">Source</th>'
+        f'        <th title="The service the alert is about">Service</th>'
+        f'        <th title="Alert severity: critical / warning / info">Severity</th>'
+        f'        <th title="LLM verdict (escalate / dismiss / inconclusive) + RCA quality pill (fits / thin / review)">Verdict</th>'
+        f'        <th title="What the pipeline did downstream of the verdict (Notified / Suppressed / Dropped / Notified-no-LLM)">Action</th>'
+        f'        <th title="End-to-end pipeline duration including MCP context-gathering + LLM inference">Duration</th>'
         f'      </tr></thead>'
         f'      <tbody>{body_rows}</tbody>'
         f'    </table>'

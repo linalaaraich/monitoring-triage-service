@@ -1,4 +1,5 @@
 import logging
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
@@ -10,6 +11,32 @@ from zoneinfo import ZoneInfo
 # Duplicated instead of imported to avoid circular deps (notifier is
 # imported from pipeline which is imported before main).
 _LOCAL_TZ = ZoneInfo("Africa/Casablanca")
+
+
+# Match 10-digit Unix timestamps the LLM sometimes embeds in prose
+# (1500000000–2099999999 covers 2017–2036 in seconds). Same helper logic
+# as main._humanize_unix_timestamps; duplicated here to avoid a circular
+# import (main imports notifier, not the other way around).
+_UNIX_TS_PATTERN = re.compile(r"\b(1[5-9][0-9]{8}|2[0-9]{9})\b")
+
+
+def _humanize_unix_timestamps(text: str) -> str:
+    """Replace any 10-digit Unix timestamp with `<unix> (<local>)`."""
+    if not text:
+        return text
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Africa/Casablanca")
+    except ImportError:
+        return text
+    def _sub(m):
+        try:
+            from datetime import datetime
+            local = datetime.fromtimestamp(int(m.group(1)), tz=tz)
+            return f"{m.group(1)} ({local.strftime('%Y-%m-%d %H:%M')})"
+        except (ValueError, OverflowError):
+            return m.group(0)
+    return _UNIX_TS_PATTERN.sub(_sub, text)
 
 
 def _to_local_time(iso_utc_str: str | None, with_zone_label: bool = False) -> str:
@@ -360,10 +387,23 @@ class EmailNotifier:
 
         actions_html = "".join(
             f"<li>{a}</li>" for a in decision.suggested_actions
-        ) or "<li>Review the alert manually</li>"
+        ) or "<li><em>(no concrete remediation proposed — see RCA above; treat as a heads-up)</em></li>"
         evidence_html = "".join(
             f"<li>{e}</li>" for e in decision.evidence
-        ) or "<li>See Grafana dashboards</li>"
+        ) or "<li><em>(no specific evidence cited — RCA reasoned from the observed value alone)</em></li>"
+
+        # Map internal rca_quality to engineer-friendly labels (matches dashboard).
+        _quality_label_map = {
+            "actionable":   "fits — concrete RCA + valid suggested action",
+            "data_starved": "thin — model hedged or evidence empty",
+            "needs_review": "review — confidence below floor or validator flagged",
+        }
+        quality_human = _quality_label_map.get(record.rca_quality or "", record.rca_quality or "unknown")
+
+        # Render fired_at in Casablanca local zone for the body — matches the
+        # rest of the UI and the dashboard column. Raw ISO is shown alongside
+        # so SRE folks can copy-paste into Grafana time-range pickers.
+        fired_local = _to_local_time(alert.startsAt, with_zone_label=True)
 
         anomaly_summary = decision.anomaly_summary or (
             ctx.anomaly_summary if ctx else ""
@@ -427,7 +467,7 @@ class EmailNotifier:
         <tr><td class="k">Severity</td><td class="v">{severity_upper}</td></tr>
         <tr><td class="k">Instance</td><td class="v">{_instance_display(alert.instance)}</td></tr>
         <tr><td class="k">Environment</td><td class="v">{env}</td></tr>
-        <tr><td class="k">Fired at</td><td class="v">{alert.startsAt}</td></tr>
+        <tr><td class="k">Fired at</td><td class="v">{fired_local} <span class="mute">· raw: {alert.startsAt}</span></td></tr>
         <tr><td class="k">Status</td><td class="v">{alert.status}</td></tr>
       </table>
       <div class="mono">{alert.annotations.get('description') or alert.annotations.get('summary') or '(no description)'}</div>
@@ -437,13 +477,13 @@ class EmailNotifier:
       <h2>RCA verdict</h2>
       <div class="badge {badge_class}">
         <div>Decision: {decision.decision.value}
-          <small>Confidence: {confidence_pct} · Quality: {record.rca_quality or "unknown"}</small>
+          <small>Confidence: {confidence_pct} · Quality: {quality_human}</small>
         </div>
       </div>
-      <div class="mono">Reason: {decision.reason}
+      <div class="mono">Reason: {_humanize_unix_timestamps(decision.reason or '')}
 
 Root cause:
-{decision.rca}</div>
+{_humanize_unix_timestamps(decision.rca or '')}</div>
       <h3>Suggested actions</h3>
       <ul>{actions_html}</ul>
       <h3>Evidence</h3>
