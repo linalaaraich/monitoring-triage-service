@@ -148,6 +148,30 @@ app = FastAPI(
 )
 
 
+# --- Validation error logging (added 2026-04-27 to debug Grafana 422s) ---
+# Logs the offending raw body + the Pydantic field errors for any webhook
+# request that fails schema validation. Without this, FastAPI returns the
+# 422 silently and the operator can't tell what shape Grafana actually sent.
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_logger(request, exc: RequestValidationError):
+    try:
+        body = await request.body()
+        body_preview = body.decode("utf-8", errors="replace")[:2000]
+    except Exception:
+        body_preview = "<unavailable>"
+    logger.warning(
+        "RequestValidationError on %s %s — errors=%s body=%s",
+        request.method, request.url.path,
+        exc.errors()[:5],
+        body_preview,
+    )
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+
 # --- Webhook endpoints ---
 
 
