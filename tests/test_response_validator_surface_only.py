@@ -224,3 +224,20 @@ def test_based_on_prior_decisions_is_caught():
     report = validate(_decision(rca), deployment_type="k8s")
     hits = [v for v in report.violations if "surface-only RCA lede" in v]
     assert hits
+
+
+def test_the_alert_indicates_lede_is_caught():
+    """Real production regression at 2026-04-28T13:21:56 — RCA opened
+    'The alert indicates that there are no valid latency samples...'
+    The original 'The metric/query/value' regex didn't include 'alert'."""
+    rca = "The alert indicates that there are no valid latency samples for Kong's request processing."
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only RCA lede" in v]
+    assert hits
+
+
+def test_the_alert_for_service_lede_is_caught():
+    rca = "The alert HighP95Latency for service=kong fired."
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only RCA lede" in v]
+    assert hits

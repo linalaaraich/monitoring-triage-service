@@ -143,8 +143,12 @@ _SURFACE_ONLY_LEDE_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"^\s*(?:The\s+)?PromQL\s+(?:expression\s+)?[`'\"]", re.I),
     # "PromQL <name>(...) reported..."
     re.compile(r"^\s*(?:The\s+)?PromQL\s+\w+\s*\(", re.I),
-    # "The metric / The query <X> reports / shows / returned <value>..."
-    re.compile(r"^\s*The\s+(?:metric|query|expression|value|observation)\s+\S+\s+(?:reports|reported|shows|showed|returned|indicates|indicated)\b", re.I),
+    # "The metric / The query / The alert <X> reports / shows / returned <value>..."
+    # Widened 2026-04-28 PM-late after live-verify saw "The alert indicates that
+    # there are no valid latency samples..." slip through.
+    re.compile(r"^\s*The\s+(?:metric|query|expression|value|observation|alert|rule|webhook|fire|firing)\s+(?:\S+\s+)?(?:reports|reported|shows|showed|returned|indicates|indicated|signals|signaled)\b", re.I),
+    # "The alert <X>" without a verb: "The alert HighP95Latency for service=kong..."
+    re.compile(r"^\s*The\s+alert\s+\S+\s+for\b", re.I),
     # "<metric_name> = <value>" as the entire opening — raw evaluation pasted as prose
     re.compile(r"^\s*\w+(?:\{[^}]*\})?\s*[=<>]\s*[0-9]", re.I),
     # "Based on (the) observed/repeated/reported/metric/PromQL/log entries..."
