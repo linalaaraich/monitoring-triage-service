@@ -149,6 +149,15 @@ _SURFACE_ONLY_LEDE_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"^\s*The\s+(?:metric|query|expression|value|observation|alert|rule|webhook|fire|firing)\s+(?:\S+\s+)?(?:reports|reported|shows|showed|returned|indicates|indicated|signals|signaled)\b", re.I),
     # "The alert <X>" without a verb: "The alert HighP95Latency for service=kong..."
     re.compile(r"^\s*The\s+alert\s+\S+\s+for\b", re.I),
+    # Alertname-first form (added 2026-04-28 PM-late after live-verify saw
+    # "The Drain3AnomalyDetected alert for service=drain3 indicates..." slip
+    # through P3/P4). Same surface-only shape, different word order.
+    re.compile(r"^\s*The\s+\S+\s+alert\s+for\b", re.I),
+    # "The observed/measured/reported/elevated/recorded value of X" — the LLM
+    # leads with the metric reading dressed up as a sentence. Added 2026-04-28
+    # PM-late; live-verify saw "The observed value of 3100 ms for p95 latency
+    # indicates..." escape both P3 (no verb in the trigger window) and P5.
+    re.compile(r"^\s*The\s+(?:observed|measured|reported|recorded|elevated|current|latest)\s+(?:value|reading|sample|datapoint|metric|rate|count)\b", re.I),
     # "<metric_name> = <value>" as the entire opening — raw evaluation pasted as prose
     re.compile(r"^\s*\w+(?:\{[^}]*\})?\s*[=<>]\s*[0-9]", re.I),
     # "Based on (the) observed/repeated/reported/metric/PromQL/log entries..."

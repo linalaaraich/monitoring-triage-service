@@ -243,7 +243,32 @@ class RCAStore:
                 (limit,),
             )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        # Decode the two JSON-as-TEXT columns at the API boundary so
+        # consumers get real lists, not double-encoded strings. The
+        # dashboard parses inline at render time but the public /decisions
+        # JSON API was leaking the storage shape — audit-live.sh mechanical
+        # checks counted string length instead of list length, and external
+        # graders couldn't iterate. Defensive: tolerate missing columns,
+        # malformed JSON, and pre-fix rows that were never decoded.
+        decoded: list[dict] = []
+        for row in rows:
+            d = dict(row)
+            for col in ("suggested_actions", "evidence"):
+                v = d.get(col)
+                if isinstance(v, str) and v:
+                    try:
+                        parsed = json.loads(v)
+                        if isinstance(parsed, list):
+                            d[col] = parsed
+                    except (ValueError, TypeError):
+                        # Leave the raw string in place rather than failing the
+                        # whole request — old rows persisted before the
+                        # serialization fix may carry non-JSON text.
+                        pass
+                elif v is None:
+                    d[col] = []
+            decoded.append(d)
+        return decoded
 
     async def get_recent_decision_for_alert(
         self, alert_name: str, affected_service: str, lookback_minutes: int

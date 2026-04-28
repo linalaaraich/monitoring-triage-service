@@ -241,3 +241,50 @@ def test_the_alert_for_service_lede_is_caught():
     report = validate(_decision(rca), deployment_type="k8s")
     hits = [v for v in report.violations if "surface-only RCA lede" in v]
     assert hits
+
+
+def test_alertname_first_alert_for_lede_is_caught():
+    """Live regression 2026-04-28T10:20:56 — the Drain3 self-fire opened
+    'The Drain3AnomalyDetected alert for service=drain3 indicates that an
+    anomaly was detected with a novel log template'. The original
+    P4 pattern `^The alert <X> for` matched 'alert <ALERTNAME> for' but
+    NOT '<ALERTNAME> alert for' (alertname-first variant). Added a
+    sibling pattern `^The <X> alert for` to close that hole."""
+    rca = "The Drain3AnomalyDetected alert for service=drain3 indicates that an anomaly was detected."
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only RCA lede" in v]
+    assert hits
+
+
+def test_observed_value_lede_is_caught():
+    """Live regression 2026-04-28T13:18:45 — RCA opened 'The observed
+    value of 3100 ms for p95 latency indicates that almost all of the
+    reported delay is due to the upstream service'. The lede is a metric
+    reading dressed up as prose; cause is buried after 'indicates'.
+    Original regex didn't include 'observed' as an adjective for value."""
+    rca = "The observed value of 3100 ms for p95 latency indicates that almost all of the reported delay is due to the upstream service."
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only RCA lede" in v]
+    assert hits
+
+
+def test_measured_reading_lede_is_caught():
+    """Variant: 'The measured reading shows...' — same shape, same fix."""
+    rca = "The measured reading of 5300 ms reports an exceeded p99 SLA threshold."
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only RCA lede" in v]
+    assert hits
+
+
+def test_cause_first_lede_with_observed_passes():
+    """Sanity check: a cause-first lede that happens to mention
+    'observed' as supporting evidence should NOT be falsely flagged.
+    The widening only catches 'The observed value/reading/...' as the
+    SUBJECT of the opening sentence."""
+    rca = (
+        "JDBC connection pool is exhausted because spring-boot is leaking "
+        "connections under load (observed value: pool_active=200/200)."
+    )
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only RCA lede" in v]
+    assert not hits

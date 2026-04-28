@@ -532,13 +532,33 @@ class TriagePipeline:
                 retry_decision.rca, retry_decision.reason,
                 retry_decision.suggested_actions, retry_decision.evidence,
             )
-            if retry_quality == "actionable":
+            # Re-run the validator on retry output (added 2026-04-28 PM-late
+            # after live-verify saw surface-only ledes in /decisions despite
+            # the first-pass validator catching them — the retry was bypassing
+            # validation entirely). This also prunes vague / investigation-only
+            # / arch-mismatched actions in retry's suggested_actions in-place.
+            retry_validation = validate_decision(
+                retry_decision,
+                deployment_type=metric_facts.deployment_type,
+                confidence_floor=0.3,
+                alertname=alert.alertname,
+            )
+            retry_has_surface_only = any(
+                p.startswith("surface-only") or p.startswith("hallucination[")
+                for p in retry_validation.banned_phrase_hits
+            )
+            if retry_quality == "actionable" and not retry_has_surface_only:
                 logger.info(
-                    "Retry produced actionable RCA — replacing first-pass verdict (used_agency=%s)",
+                    "Retry produced actionable RCA, validator clean — replacing first-pass (used_agency=%s)",
                     used_agency,
                 )
                 decision = retry_decision
                 quality = "actionable"
+            elif retry_quality == "actionable" and retry_has_surface_only:
+                logger.info(
+                    "Retry actionable BUT validator caught surface-only/hallucination — keeping first-pass (used_agency=%s, retry_violations=%d)",
+                    used_agency, len(retry_validation.violations),
+                )
             else:
                 logger.info(
                     "Retry still data_starved — keeping first-pass verdict (used_agency=%s)",
