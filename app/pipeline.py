@@ -318,6 +318,7 @@ class TriagePipeline:
             decision,
             deployment_type=metric_facts.deployment_type,
             confidence_floor=0.3,
+            alertname=alert.alertname,
         )
         if validation.violations:
             logger.info(

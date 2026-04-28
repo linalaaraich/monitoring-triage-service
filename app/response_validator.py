@@ -35,13 +35,80 @@ violation reasons. The caller decides what to do with violations
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Literal
+
+import yaml
 
 from app.models import LLMDecision
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Per-alert hallucination blocklist (F-3)
+# ---------------------------------------------------------------------------
+# Loaded lazily once at first use. The YAML file lives next to this module so
+# operators can add new entries without touching Python. See the file's own
+# header for the schema and the rationale.
+
+_BLOCKLIST_PATH = os.path.join(os.path.dirname(__file__), "hallucination_blocklist.yaml")
+
+
+@dataclass(frozen=True)
+class _HallucinationRule:
+    pattern: re.Pattern
+    reason: str
+    hint: str
+
+
+@lru_cache(maxsize=1)
+def _load_blocklist() -> dict[str, list[_HallucinationRule]]:
+    """Parse hallucination_blocklist.yaml once, compile the regexes, return
+    a dict of alertname → list[_HallucinationRule]. Returns {} on any error
+    so the validator never crashes the pipeline because the blocklist
+    couldn't be read.
+    """
+    try:
+        with open(_BLOCKLIST_PATH, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError) as e:
+        logger.warning("Could not load hallucination_blocklist.yaml: %s", e)
+        return {}
+
+    out: dict[str, list[_HallucinationRule]] = {}
+    for alertname, rules in raw.items():
+        if not isinstance(rules, list):
+            continue
+        compiled = []
+        for r in rules:
+            try:
+                compiled.append(_HallucinationRule(
+                    pattern=re.compile(r["pattern"], re.I),
+                    reason=str(r.get("reason", "")).strip(),
+                    hint=str(r.get("hint", "")).strip(),
+                ))
+            except (KeyError, re.error) as e:
+                logger.warning("Skipping malformed blocklist entry under %s: %s", alertname, e)
+                continue
+        if compiled:
+            out[alertname] = compiled
+    logger.info(
+        "Loaded hallucination blocklist: %d alertname(s), %d total rules",
+        len(out), sum(len(v) for v in out.values()),
+    )
+    return out
+
+
+def find_hallucination_hits(rca: str, alertname: str) -> list[_HallucinationRule]:
+    """Return the rules that matched the rca prose for this alertname."""
+    if not rca or not alertname:
+        return []
+    rules = _load_blocklist().get(alertname, [])
+    return [r for r in rules if r.pattern.search(rca)]
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +344,8 @@ class ValidationReport:
         """True if the violations are severe enough to warrant an LLM retry
         (as opposed to just template-fallback-and-ship)."""
         # Banned phrases in the RCA narrative are severe — the LLM ignored a
-        # direct rule. Retry one time to see if it can behave.
+        # direct rule. Retry one time to see if it can behave. This includes
+        # hallucination hits (F-3) — same shape: model cited wrong evidence.
         # Investigation-only rejections also warrant a retry: the LLM has the
         # context (the queries we already ran are in its prompt); it just
         # picked the wrong abstraction. One feedback round usually fixes it,
@@ -288,18 +356,28 @@ class ValidationReport:
             return True
         return False
 
+    @property
+    def has_hallucination(self) -> bool:
+        """True if the F-3 per-alert blocklist matched anything."""
+        return any(p.startswith("hallucination[") for p in self.banned_phrase_hits)
+
 
 def validate(
     decision: LLMDecision,
     deployment_type: str = "unknown",
     confidence_floor: float = 0.3,
+    alertname: str = "",
 ) -> ValidationReport:
-    """Run the three checks + confidence gate. Returns a ValidationReport
+    """Run the four checks + confidence gate. Returns a ValidationReport
     with (maybe) modified decision and collected violations.
 
     Pure function — no side effects on the caller, but decision.suggested_actions
     IS mutated in place (we prune rejected entries). That's intentional: the
     caller wants a clean decision to persist.
+
+    `alertname` enables the per-alert hallucination blocklist (F-3) — pass
+    the live alert.alertname so per-alert checks can fire. Defaults empty
+    for backwards compat with callers that don't have the alertname handy.
     """
     report = ValidationReport(decision=decision)
 
@@ -311,6 +389,21 @@ def validate(
             phrase = m.group(0)
             report.banned_phrase_hits.append(phrase)
             report.violations.append(f"banned phrase in rca/reason: {phrase!r}")
+
+    # --- 1c. Per-alert hallucination blocklist scan (F-3, added 2026-04-28).
+    # The LLM grasps at scrape-internal log frequency (e.g. /actuator/*) as
+    # a "cause" for HighP95Latency despite no causal link. The blocklist
+    # rejects RCAs that cite known wrong-evidence patterns.
+    if alertname and decision.rca:
+        hallucination_hits = find_hallucination_hits(decision.rca, alertname)
+        for rule in hallucination_hits:
+            report.banned_phrase_hits.append(f"hallucination[{alertname}]: {rule.pattern.pattern!r}")
+            # Use only the first line of the reason for the violation message;
+            # the full reason + hint go into the retry feedback below.
+            short_reason = rule.reason.splitlines()[0] if rule.reason else "hallucinated cause"
+            report.violations.append(
+                f"hallucinated cause for {alertname}: matched {rule.pattern.pattern!r} — {short_reason}"
+            )
 
     # --- 1b. Surface-only RCA scan (added 2026-04-28 — rule A philosophy update).
     # Catches "PromQL <expr> reported X" ledes and "indicates that there are X
@@ -406,11 +499,41 @@ def build_retry_feedback(report: ValidationReport) -> str:
     Used when report.should_retry is True.
     """
     parts = []
-    if report.banned_phrase_hits:
-        phrases = ", ".join(f"{p!r}" for p in report.banned_phrase_hits)
+
+    # Hallucination feedback: each rule contributes its specific hint.
+    # These are alert-specific so the model gets pointed at what IS the
+    # right kind of evidence, not just told it was wrong.
+    hallucination_hits = [p for p in report.banned_phrase_hits if p.startswith("hallucination[")]
+    if hallucination_hits:
+        # Pull the hint text from the loaded blocklist for each match.
+        hint_text = []
+        for p in hallucination_hits:
+            # Format: "hallucination[<alertname>]: <pattern>"
+            try:
+                alertname_part = p.split("hallucination[", 1)[1].split("]:", 1)[0]
+                pattern_part = p.split("]: ", 1)[1].strip("'\"")
+                rules = _load_blocklist().get(alertname_part, [])
+                for r in rules:
+                    if r.pattern.pattern == pattern_part:
+                        hint_text.append(f"- {r.reason.splitlines()[0] if r.reason else ''}")
+                        if r.hint:
+                            hint_text.append(f"  → {r.hint.splitlines()[0]}")
+                        break
+            except Exception:
+                pass
+        parts.append(
+            "Your previous RCA cited evidence that does NOT support a cause:\n"
+            + "\n".join(hint_text or ["- (see blocklist)"]) +
+            "\nRewrite naming a specific failing component/process/dependency and "
+            "cite evidence that actually supports it."
+        )
+
+    if report.banned_phrase_hits and not (len(hallucination_hits) == len(report.banned_phrase_hits)):
+        non_halluc = [p for p in report.banned_phrase_hits if not p.startswith("hallucination[")]
+        phrases = ", ".join(f"{p!r}" for p in non_halluc)
         # Distinguish surface-only feedback from data-thin (rule B) feedback —
         # the LLM needs different guidance for each.
-        is_surface_only = any("surface-only" in p for p in report.banned_phrase_hits)
+        is_surface_only = any("surface-only" in p for p in non_halluc)
         if is_surface_only:
             parts.append(
                 f"Your previous response had a surface-only RCA lede: {phrases}. "

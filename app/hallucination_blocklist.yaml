@@ -1,0 +1,60 @@
+# Per-alert hallucination blocklist
+#
+# Catches a specific class of RCA failure (F-3 in the 2026-04-28 RCA-quality
+# audit): the LLM grasps at the most-frequent log line as a "cause" even
+# when the line has no causal relationship to the alert. The classic
+# example: HighP95Latency RCAs blaming /actuator/health log frequency
+# when those endpoints are scraped by Prometheus/Grafana, not by users.
+#
+# Each entry maps an alert name to a list of regex patterns. When the RCA
+# prose matches any pattern, the validator emits a "hallucinated_cause"
+# violation and triggers a retry with explicit feedback telling the model
+# WHY the cited evidence doesn't support a cause.
+#
+# Add new entries as production regressions surface. The cost of a too-
+# eager blocklist is a false-positive rejection; the cost of an absent
+# blocklist is bad RCAs going to the operator. False positives are
+# operator-friction-inducing but recoverable; bad RCAs erode trust.
+#
+# Schema:
+#   <alertname>:
+#     - pattern: <regex>
+#       reason: <human-readable explanation>
+#       hint: <short note for the retry feedback prompt>
+
+HighP95Latency:
+  - pattern: '/actuator/(health|prometheus|info|env|metrics)'
+    reason: |
+      The actuator endpoints are scraped by Prometheus and Grafana for
+      health/metrics — they have NO causal link to user-visible p95
+      latency. Citing their log frequency as a cause is a wrong-evidence
+      hallucination.
+    hint: |
+      /actuator/* is internal monitoring traffic, not user requests. Look
+      at trace span breakdowns (Jaeger), JDBC pool metrics
+      (hikari_active_connections), GC pauses (jvm_gc_pause_seconds), or
+      thread pool saturation (tomcat_threads_busy_threads) — those are
+      real causes of p95 latency in spring-boot.
+
+  - pattern: '\b(?:repeated|frequent|periodic)\s+(?:log\s+entries|requests|calls)\s+(?:to|for)\s+(?:health|metrics|status)\b'
+    reason: |
+      "Repeated requests to health/metrics endpoints" describes scraper
+      behavior, not a fault. This is a hallucinated correlation.
+    hint: |
+      Scrape traffic is by design. Find what's actually slow — examine the
+      slowest Jaeger trace, the longest span, or the dominant log error.
+
+HighKongP95Latency:
+  - pattern: '/actuator/(health|prometheus|info|env|metrics)'
+    reason: |
+      Same as HighP95Latency: actuator endpoints are not user traffic.
+    hint: |
+      For Kong-fronted alerts, the trace breakdown shows where the time
+      went — kong span vs upstream span. p95 attribution belongs to the
+      service whose span dominated.
+
+# When new failure modes surface in chaos runs or operator review, add
+# them here. Examples to watch for:
+#   - HighMemoryUsage citing GC log lines as a "cause" (GC is consequence)
+#   - TargetDown citing scrape interval as a cause (scrape is sampling)
+#   - Drain3AnomalyDetected citing routine startup banners
