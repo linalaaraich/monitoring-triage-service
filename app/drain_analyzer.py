@@ -203,11 +203,17 @@ class DrainAnalyzer:
                             # other HTTP handlers. Route through analyze() so
                             # anomaly counters actually reflect all observed
                             # traffic, not just alert-time annotate_lines calls.
-                            anomalous = await asyncio.to_thread(self._ingest_batch_sync, lines)
+                            anomalous, new_templates = await asyncio.to_thread(
+                                self._ingest_batch_sync, lines
+                            )
                             # P1.7 — if this batch spiked, self-webhook the
                             # triage pipeline so drain3 becomes a visible
                             # alert source on the dashboard.
-                            await self.maybe_fire_alert(batch_total=len(lines), anomalous=anomalous)
+                            await self.maybe_fire_alert(
+                                batch_total=len(lines),
+                                anomalous=anomalous,
+                                new_templates=new_templates,
+                            )
                     else:
                         logger.debug("Drain3 Loki poll returned %d", resp.status_code)
             except asyncio.CancelledError:
@@ -215,7 +221,7 @@ class DrainAnalyzer:
             except Exception as e:
                 logger.debug("Drain3 background ingestion error: %s", e)
 
-    def _ingest_batch_sync(self, lines: list[str]) -> list[str]:
+    def _ingest_batch_sync(self, lines: list[str]) -> tuple[list[str], list[str]]:
         """Process a batch of log lines through analyze() on the calling thread.
 
         Called from the background ingest loop via asyncio.to_thread. Runs
@@ -224,27 +230,49 @@ class DrainAnalyzer:
         not just alert-time annotation. This gives the dashboard's Drain3
         panel an accurate anomaly-rate over time instead of stuck at 0.
 
-        Returns the list of anomalous lines seen in THIS batch — the
-        caller uses this to decide whether to trigger a self-webhook
-        alert (P1.7).
+        Returns (anomalous_lines, new_template_strings):
+          - anomalous_lines: lines flagged as anomalous in THIS batch
+            (either novel-template or rare-cluster).
+          - new_template_strings: deduped template strings for clusters
+            that were brand-new during THIS batch (is_new_pattern=True).
+            These are the most important diagnostic signal for a Drain3
+            self-fire — the operator (and the LLM) should see WHAT the
+            new template is, not just that one was detected. Used by
+            maybe_fire_alert to populate Drain3Webhook.new_templates.
         """
         anomalous_lines: list[str] = []
+        new_templates_seen: dict[int, str] = {}  # cluster_id → template
         for line in lines:
             try:
                 result = self.analyze(line)
                 if result.is_new_pattern or result.match_count < settings.drain3_anomaly_threshold:
                     anomalous_lines.append(line)
+                if result.is_new_pattern and result.cluster_id is not None:
+                    # Capture once per cluster — the same novel template can
+                    # appear many times in one batch.
+                    new_templates_seen.setdefault(result.cluster_id, result.template)
             except Exception as e:
                 logger.debug("Drain3 analyze failed for one line (non-fatal): %s", e)
-        return anomalous_lines
+        return anomalous_lines, list(new_templates_seen.values())
 
-    async def maybe_fire_alert(self, batch_total: int, anomalous: list[str]) -> None:
+    async def maybe_fire_alert(
+        self,
+        batch_total: int,
+        anomalous: list[str],
+        new_templates: list[str] | None = None,
+    ) -> None:
         """P1.7: if this batch crossed the alert-rate threshold and we're
         past cooldown, POST a Drain3Webhook to our own /webhook/drain3.
 
         This is how drain3 shows up as a first-class alert source on the
         dashboard — the endpoint always existed, but nothing was firing
         to it. Called from the ingest loop after each batch.
+
+        new_templates carries the actual template strings for brand-new
+        clusters seen this batch — the LLM needs these (not just a count)
+        to do useful RCA. Fixed 2026-04-28 after every Drain3 RCA in
+        production was reading 'an anomaly was detected' with no clue
+        what the anomaly was.
         """
         if not settings.drain3_alert_enabled:
             return
@@ -270,7 +298,9 @@ class DrainAnalyzer:
         payload = {
             "anomalous_lines": anomalous[:50],   # cap for wire size
             "anomaly_rate": round(rate, 4),
-            "new_templates": [],  # Drain3Webhook schema wants this; can be empty
+            # Carry actual template strings, not a count — the LLM needs
+            # the textual content to attribute the anomaly to a cause.
+            "new_templates": (new_templates or [])[:20],
             "service": "drain3",  # routes to the drain3 branch of the triage pipeline
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }

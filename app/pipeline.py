@@ -54,17 +54,41 @@ class TriagePipeline:
                 logger.error("Unhandled error processing alert %s: %s", alert.alertname, e, exc_info=True)
 
     async def process_drain3_webhook(self, webhook: Drain3Webhook):
-        # Create a synthetic alert from Drain3 anomaly data
+        # Create a synthetic alert from Drain3 anomaly data.
+        #
+        # 2026-04-28 fix: previously the description was just count-of-lines +
+        # rate, with the actual log content thrown away — every Drain3 RCA
+        # in production read "an anomaly was detected" with no clue what the
+        # anomaly was. We now surface (a) the actual new template strings
+        # and (b) a sample of verbatim anomalous lines into the description,
+        # which flows directly into the LLM prompt's "Description" field.
+        # Capped to fit the prompt budget but rich enough to ground the RCA.
+        templates = (webhook.new_templates or [])[:10]
+        sample_lines = (webhook.anomalous_lines or [])[:8]
+        evidence_parts = [f"Anomaly rate: {webhook.anomaly_rate:.2%} ({len(webhook.anomalous_lines)} lines flagged in batch)."]
+        if templates:
+            evidence_parts.append("New log templates seen for the first time:")
+            for t in templates:
+                evidence_parts.append(f"  • {t[:240]}")
+        else:
+            evidence_parts.append("No brand-new templates this batch — the anomalies are from rare/under-threshold clusters.")
+        if sample_lines:
+            evidence_parts.append(f"Sample anomalous lines (verbatim, top {len(sample_lines)} of {len(webhook.anomalous_lines)}):")
+            for line in sample_lines:
+                evidence_parts.append(f"  • {line[:240]}")
+        rich_description = "\n".join(evidence_parts)
+
         alert = GrafanaAlert(
             status="firing",
             labels={
                 "alertname": "Drain3AnomalyDetected",
                 "service": webhook.service,
                 "severity": "warning",
+                "signal": "log",
             },
             annotations={
-                "summary": f"Drain3 detected {len(webhook.anomalous_lines)} anomalous log lines",
-                "description": f"Anomaly rate: {webhook.anomaly_rate:.2%}. New templates: {len(webhook.new_templates)}",
+                "summary": f"Drain3 detected {len(webhook.anomalous_lines)} anomalous log lines (rate {webhook.anomaly_rate:.2%})",
+                "description": rich_description,
             },
             startsAt=webhook.timestamp or datetime.utcnow().isoformat(),
             fingerprint=f"drain3-{webhook.service}",
