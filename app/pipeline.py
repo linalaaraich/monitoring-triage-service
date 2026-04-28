@@ -441,8 +441,18 @@ class TriagePipeline:
         quality = _classify_rca_quality(decision.rca, decision.reason, decision.suggested_actions, decision.evidence)
         total_so_far = int((time.monotonic() - pipeline_start) * 1000)
         retry_budget_ms = settings.pipeline_timeout * 1000 - total_so_far - 5000  # 5s safety margin
+        # Retry triggers (added 2026-04-28 PM after live-verify):
+        #   - data_starved (original): rca_quality classifier returned thin
+        #   - surface_only_hit: validator caught a surface-only lede / hedge
+        #   - hallucination_hit: per-alert blocklist (F-3) caught a wrong-evidence
+        # All three signal "this output is not trustworthy"; retry gives the
+        # LLM one shot at fixing itself before we persist the row.
+        validator_caught_quality_issue = bool(validation.banned_phrase_hits)
+        should_retry_for_quality = (
+            quality == "data_starved" or validator_caught_quality_issue
+        )
         if (
-            quality == "data_starved"
+            should_retry_for_quality
             and settings.triage_data_starved_retry_enabled
             and retry_budget_ms > 10_000
         ):
