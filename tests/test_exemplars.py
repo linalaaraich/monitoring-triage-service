@@ -150,7 +150,7 @@ def test_format_for_prompt_handles_dismiss_with_empty_actions():
 
 def test_list_all_returns_all_exemplars():
     items = ex.list_all()
-    assert len(items) == 11
+    assert len(items) == 12
     ids = {item["id"] for item in items}
     assert "oom-loop" in ids
     assert "upstream-latency-attribution" in ids

@@ -53,7 +53,7 @@ async def test_execute_list_exemplars_returns_catalogue():
     assert "result" in result
     items = result["result"]
     assert isinstance(items, list)
-    assert len(items) == 11
+    assert len(items) == 12
     # Each item should have the catalogue shape (id + archetype + gist)
     sample = items[0]
     assert "id" in sample

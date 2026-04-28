@@ -80,14 +80,53 @@ _SURFACE_ONLY_LEDE_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"^\s*The\s+(?:metric|query|expression|value|observation)\s+\S+\s+(?:reports|reported|shows|showed|returned|indicates|indicated)\b", re.I),
     # "<metric_name> = <value>" as the entire opening — raw evaluation pasted as prose
     re.compile(r"^\s*\w+(?:\{[^}]*\})?\s*[=<>]\s*[0-9]", re.I),
+    # "Based on (the) observed/repeated/reported/metric/PromQL/log entries..."
+    # Widened 2026-04-28 after live HighP95Latency rows (10:12 + 10:13) led
+    # with "Based on the repeated log entries..." / "Based on the observed
+    # metric values and PromQL queries..." — both were surface restatements
+    # of the alert dressed up as analysis.
+    re.compile(r"^\s*Based\s+on\s+(?:the\s+)?(?:observed|repeated|reported|metric|PromQL|query|queries|log\s+entries|logs|trace|values?|frequency|rate|elevated|high|increased|recurring)\b", re.I),
+    # "Looking at the metrics / data / observations..." — same shape, different framing.
+    re.compile(r"^\s*Looking\s+at\s+(?:the\s+)?(?:metrics?|data|observations?|logs?|traces?)\b", re.I),
 )
 
 # Hedge tails that signal the RCA never went past the symptom — "indicates that
 # there are requests experiencing high latency" is the alert in different words.
+#
+# Widened 2026-04-28 (Lina's HighP95Latency investigation): the model's actual
+# regression shape was less specific than the original example
+# ("indicates that there are X experiencing Y"). Real outputs read more like
+# "appears that there is a recurring issue", "suggesting potential performance
+# degradation", "could be indicative of either X or Y", "requires further
+# investigation". The patterns below cover that broader class without
+# false-positiving on legitimate causal prose like "indicates that the JDBC
+# pool is exhausted" (which is a NAMED cause).
 _SURFACE_ONLY_HEDGE_PATTERNS: tuple[re.Pattern, ...] = (
+    # Original — narrow but high-confidence: "indicates that there are requests experiencing X"
     re.compile(r"\bindicates?\s+that\s+there\s+(?:are|is|may\s+be)\s+\S+\s+(?:experiencing|reporting|seeing|having)\b", re.I),
-    re.compile(r"\bsuggests?\s+(?:that\s+)?(?:high|elevated|increased|abnormal|unusual)\s+\w+\b", re.I),
+    # "indicates a (persistent|recurring|potential|ongoing) issue"
+    re.compile(r"\bindicates?\s+(?:a|an)\s+(?:persistent|recurring|potential|ongoing|possible|likely)\s+(?:issue|problem|concern)\b", re.I),
+    # "appears (that|to be) ... issue/problem/concern" — allow 1-4 words between
+    # "appears that there is" and the noun ("a recurring issue", "an ongoing problem")
+    re.compile(r"\bappears?\s+(?:that\s+there\s+is|to\s+be|that\s+the)\b.{0,50}?\b(?:issue|problem|concern|condition)\b", re.I),
+    # "appears to be experiencing|seeing|having (high|elevated|abnormal) X"
     re.compile(r"\b(?:appears|seems)\s+to\s+be\s+(?:experiencing|seeing|having)\s+(?:high|elevated|abnormal)\b", re.I),
+    # "suggests/suggesting potential X" — pure hedge
+    re.compile(r"\bsuggest(?:s|ing)?\s+(?:that\s+)?(?:a\s+)?(?:potential|possible|some\s+kind\s+of)\b", re.I),
+    # "suggests/suggesting (high|elevated|increased|abnormal|unusual) X"
+    re.compile(r"\bsuggest(?:s|ing)?\s+(?:that\s+)?(?:high|elevated|increased|abnormal|unusual)\s+\w+\b", re.I),
+    # "could be indicative of either/some/various"
+    re.compile(r"\bcould\s+be\s+indicative\s+of\b", re.I),
+    # "could be (related|due|caused) by/to" without naming what
+    re.compile(r"\bcould\s+be\s+(?:related\s+to|due\s+to|caused\s+by)\s+(?:either|some|various|a\s+number\s+of)\b", re.I),
+    # "might be (a|an) X (issue|problem|concern)" — pure hedge
+    re.compile(r"\bmight\s+be\s+(?:a|an)\s+\S+\s+(?:issue|problem|concern|cause)\b", re.I),
+    # "requires further investigation" / "warrants further investigation" — the LLM is asking for help
+    re.compile(r"\b(?:requires?|warrants?|needs?)\s+further\s+(?:investigation|review|analysis|examination)\b", re.I),
+    # "performance degradation" / "resource contention" — generic SRE filler that says nothing
+    re.compile(r"\b(?:potential|possible|likely)\s+(?:performance\s+degradation|resource\s+contention|degraded\s+performance)\b", re.I),
+    # "either ... or ..." pattern when both alternatives are vague
+    re.compile(r"\beither\s+(?:the|an?)\s+\S+\s+(?:itself\s+is|is\s+performing|might\s+be)\b.{0,80}\bor\s+there\s+might\s+be\b", re.I),
 )
 
 

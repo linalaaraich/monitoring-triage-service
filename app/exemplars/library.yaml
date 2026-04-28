@@ -102,6 +102,51 @@ exemplars:
     lesson: "Without traces, the LLM might blame the alert subject (Kong). Trace breakdown made the upstream attribution unambiguous."
     doc_anchor: "scenario-2--kong-p95-latency-spike-correctly-attributed-upstream-not-to-kong"
 
+  - id: service-self-p95-saturation
+    # Added 2026-04-28 (HighP95Latency investigation): when the alert subject IS
+    # the slow service (not a gateway pointing upstream), the right framing is
+    # "this service is saturated by [pool/GC/dependency]" — not the
+    # upstream-latency-attribution shape. Without this exemplar, p95 alerts on
+    # spring-boot scored only 0.60 against upstream-latency-attribution
+    # (services=[kong]) and the LLM regressed to surface-level output.
+    archetype: "Service p95 spike — the alerted service IS the bottleneck"
+    match:
+      alertname: "^(High|Critical)P95Latency$"
+      services: ["spring-boot", "spring-boot-app", "springboot-app", "frontend"]
+      deployment_types: ["k8s"]
+      signal: "metric"
+    decision: "ESCALATE"
+    confidence_band: "0.78-0.92"
+    one_line: "Service is saturated at one of: connection pool exhausted, GC pauses blocking threads, slow downstream call, or DB query plan regression — name which from the trace breakdown."
+    rca: |
+      The alerted service itself is the bottleneck — there is no upstream layer
+      to redirect attribution to (unlike the Kong-says-upstream pattern). The
+      diagnosis is "what inside this service is slow," and the trace breakdown
+      will name it: a connection-pool-acquisition wait points at JDBC pool size;
+      a long single-span on a downstream call points at a saturated dependency
+      or query-plan regression; long gaps between spans point at JVM GC pauses;
+      a uniform slowdown across spans points at thread-pool saturation. Logs
+      will corroborate the first three (slow-query lines, "pool exhausted" /
+      "thread pool full" templates, GC-pause lines); the trace alone is
+      sufficient to choose between them. Do NOT explain p95 by quoting the
+      observed value back as a description of "users experiencing slowness" —
+      the alert already said that.
+    evidence_shape:
+      - "p95 = X ms (translate to plain language: '95% of requests took longer than X/1000 s')"
+      - "Top N traces: longest single span = Y ms in <span name>; total = Z ms"
+      - "If JDBC: hikari_active_connections / hikari_pending_threads ratio"
+      - "If GC: jvm_gc_pause_seconds_sum trend over alert window"
+      - "If thread pool: tomcat_threads_busy_threads / tomcat_threads_max"
+      - "Loki: query template + frequency for slow-query / pool-exhausted / GC-pause lines"
+    actions_shape:
+      - "JDBC pool: kubectl set env deploy/{service} -n app SPRING_DATASOURCE_HIKARI_MAXIMUMPOOLSIZE=40 — if traces show pool-acquisition waits"
+      - "GC pauses: kubectl set env deploy/{service} -n app JAVA_TOOL_OPTIONS='-XX:+UseG1GC -XX:MaxGCPauseMillis=200' + kubectl rollout restart"
+      - "Thread pool: kubectl set env deploy/{service} -n app SERVER_TOMCAT_THREADS_MAX=400 + kubectl rollout restart"
+      - "Slow query: kubectl exec -n app deploy/mysql -- mysql -e 'EXPLAIN <slow query>' — capture plan; durable fix is index/query rewrite"
+      - "If unclear from traces: kubectl rollout restart deploy/{service} -n app — cheapest reversible action to clear in-process state while diagnosis continues"
+    lesson: "When the alert subject is the slow service, the trace breakdown is the diagnostic — not 'observed value above threshold'. The four common causes (pool, GC, downstream, query) each have a distinct trace signature."
+    doc_anchor: "scenario-2--kong-p95-latency-spike-correctly-attributed-upstream-not-to-kong"
+
   - id: synthetic-blip-dismiss
     archetype: "Brief target-down / probe-miss with no corroborating signal"
     match:

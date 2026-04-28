@@ -89,3 +89,100 @@ def test_normal_diagnostic_prose_does_not_trigger_hedge_check():
     report = validate(_decision(rca), deployment_type="k8s")
     surface_only_hits = [v for v in report.violations if "surface-only" in v]
     assert surface_only_hits == [], f"Specific cause-first prose flagged: {surface_only_hits}"
+
+
+# -----------------------------------------------------------------------------
+# Patterns added 2026-04-28 after live HighP95Latency rows surfaced regressions
+# the original (narrow) regexes missed. The two real cases are reproduced below
+# verbatim from the production triage at 10:12 and 10:13 — both must be flagged.
+# -----------------------------------------------------------------------------
+
+def test_real_regression_1_based_on_repeated_log_entries():
+    """Live HighP95Latency RCA at 2026-04-28T10:12:28."""
+    rca = (
+        "Based on the repeated log entries for actuator health and prometheus "
+        "queries, it appears that there is a recurring issue with the system's "
+        "health checks or metrics collection. The logs indicate that these "
+        "requests are being made frequently without any errors, suggesting "
+        "potential performance degradation or resource contention issues."
+    )
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only" in v]
+    assert hits, f"Expected surface-only violation, got none: {report.violations}"
+    assert report.should_retry is True
+
+
+def test_real_regression_2_based_on_observed_metric_values():
+    """Live HighP95Latency RCA at 2026-04-28T10:13:59."""
+    rca = (
+        "Based on the observed metric values and PromQL queries, it appears that "
+        "the Spring Boot application is frequently querying actuator endpoints "
+        "such as /actuator/health and /actuator/prometheus. This behavior "
+        "suggests that either the application itself is performing these "
+        "checks for monitoring purposes, or there might be an external system "
+        "(e.g., a monitoring tool) making these requests. The repeated nature "
+        "of this activity over multiple days indicates a persistent issue that "
+        "requires further investigation."
+    )
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only" in v]
+    assert hits, f"Expected surface-only violation, got none: {report.violations}"
+    assert report.should_retry is True
+
+
+def test_appears_that_there_is_recurring_issue_is_flagged():
+    rca = (
+        "It appears that there is a recurring issue with health-check timing. "
+        "The system shows repeated query patterns."
+    )
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only" in v]
+    assert hits, f"Expected hedge match, got: {report.violations}"
+
+
+def test_suggesting_potential_performance_degradation_is_flagged():
+    rca = (
+        "The frontend pod restarted twice in the last 5 minutes. This pattern "
+        "is suggesting potential performance degradation in the upstream link."
+    )
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only" in v]
+    assert hits, f"Expected hedge match, got: {report.violations}"
+
+
+def test_could_be_indicative_of_is_flagged():
+    rca = (
+        "Spring-boot p95 spiked at 14:32. This could be indicative of either "
+        "GC pressure or a slow downstream call."
+    )
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only" in v]
+    assert hits, f"Expected hedge match, got: {report.violations}"
+
+
+def test_requires_further_investigation_is_flagged():
+    rca = (
+        "p95 latency rose to 8487 ms over the last 5 minutes on spring-boot. "
+        "The repeated nature of this activity requires further investigation "
+        "of the upstream service."
+    )
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only" in v]
+    assert hits, f"Expected hedge match, got: {report.violations}"
+
+
+def test_named_cause_with_indicates_does_not_match_recurring_issue_pattern():
+    """`indicates that the JDBC pool is exhausted` is a NAMED cause and must pass.
+
+    The "indicates a persistent issue" regex must not false-positive on legitimate
+    diagnostic prose that uses 'indicates' to introduce a specific mechanism.
+    """
+    rca = (
+        "spring-boot's JDBC connection pool is exhausted. Jaeger trace 7f3a2c "
+        "shows the slowest request waited 7800 ms in kong's upstream-lookup "
+        "before the spring-boot handler ran in 200 ms; this indicates that the "
+        "pool's max=20 setting is the bottleneck under current load."
+    )
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only" in v]
+    assert hits == [], f"Cause-first prose with 'indicates' was wrongly flagged: {hits}"
