@@ -985,6 +985,35 @@ _DASHBOARD_JS = """
 """
 
 
+def _as_list_field(value) -> list:
+    """Normalize an RCA-row JSON-list field to a Python list.
+
+    Handles three shapes the column can be in across the rollover:
+    - already a list (post-2026-04-28 PM-late get_decisions boundary
+      decoder ran)
+    - a JSON-encoded string (legacy storage shape leak / direct DB-row
+      callers / pre-fix containers)
+    - None / empty (short-path persisted records, dedup duplicates)
+
+    Never raises — malformed input returns []. Use this everywhere the
+    dashboard or email renderer pulls suggested_actions / evidence /
+    correlated_alerts off a row dict.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        if not value:
+            return []
+        try:
+            parsed = _json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except (ValueError, TypeError):
+            return []
+    return []
+
+
 def _fmt_duration_ms(ms: int | None) -> str:
     """Render an ms duration as 'Xm Ys' / 'Xs' / 'Xms' depending on scale.
 
@@ -1337,10 +1366,9 @@ def _render_detail_panel(r: dict) -> str:
     # Suggested actions — always render the section so the user sees what's
     # there (or not). An empty list means the LLM emitted nothing, which is
     # itself useful signal ("model didn't have anything concrete to propose").
-    try:
-        actions = _json.loads(r['suggested_actions']) if r.get('suggested_actions') else []
-    except (ValueError, TypeError):
-        actions = []
+    # Tolerate both shapes: post-fix get_decisions returns a list directly;
+    # pre-fix (and direct DB-row callers) return a JSON-encoded string.
+    actions = _as_list_field(r.get('suggested_actions'))
     if actions:
         items = ''.join(f'<li>{_html.escape(str(a))}</li>' for a in actions)
         actions_inner = f'<ul class="panel-list">{items}</ul>'
@@ -1353,10 +1381,7 @@ def _render_detail_panel(r: dict) -> str:
     actions_html = f'<div class="section"><h3>Suggested actions</h3>{actions_inner}</div>'
 
     # Evidence — same always-render pattern.
-    try:
-        evidence = _json.loads(r['evidence']) if r.get('evidence') else []
-    except (ValueError, TypeError):
-        evidence = []
+    evidence = _as_list_field(r.get('evidence'))
     if evidence:
         items = ''.join(f'<li>{_html.escape(str(e))}</li>' for e in evidence)
         evidence_inner = f'<ul class="panel-list">{items}</ul>'
@@ -1398,10 +1423,7 @@ def _render_detail_panel(r: dict) -> str:
 
     # Correlated alerts (within ±5 min of this one).
     correlated_html = ''
-    try:
-        correlated = _json.loads(r['correlated_alerts']) if r.get('correlated_alerts') else []
-    except (ValueError, TypeError):
-        correlated = []
+    correlated = _as_list_field(r.get('correlated_alerts'))
     if correlated:
         rows = ''.join(
             f'<tr><td class="mono">{_html.escape(_to_local_time(c.get("timestamp")))}</td>'
