@@ -26,16 +26,21 @@ from app.models import Drain3Webhook, GrafanaAlert
 
 
 def test_ingest_batch_sync_returns_lines_and_new_templates():
-    """A fresh analyzer sees novel templates on the first batch — both lines
-    and templates must come back to the caller."""
+    """Test that brand-new templates come back as separate from anomalous
+    lines. Uses a UUID-stamped sentinel so Drain3's persistent state
+    (drain3_state.bin survives across pytest runs) doesn't see these as
+    already-known clusters and skip the is_new_pattern flag.
+    """
+    import uuid
+    sentinel = uuid.uuid4().hex[:8]
     da = DrainAnalyzer()
     lines = [
-        "ERROR java.lang.OutOfMemoryError: Java heap space at OrderService.findRecent",
-        "ERROR JDBC connection pool exhausted: timeout acquiring connection",
-        "ERROR java.lang.OutOfMemoryError: Java heap space at OrderService.findRecent",  # repeat
+        f"ERROR-{sentinel}-A novel test failure mode at TestService.method-{sentinel}A line one",
+        f"ERROR-{sentinel}-B different novel template at OtherService.foo-{sentinel}B line one",
+        f"ERROR-{sentinel}-A novel test failure mode at TestService.method-{sentinel}A line two",
     ]
     anomalous, templates = da._ingest_batch_sync(lines)
-    # All three are anomalous (fresh analyzer → match_count tiny)
+    # All three are anomalous (UUID-uniqued → never seen)
     assert len(anomalous) == 3
     # At least one new template captured (Drain3 collapses tokens; we don't
     # care about exact count, only that the captured list is non-empty and

@@ -508,13 +508,39 @@ class TriagePipeline:
                 decision.reason = override_note + " | LLM said: " + (decision.reason or "")
                 decision.rca = override_note + "\n\n" + (decision.rca or "")
 
+        # Step 6d (F-4): confidence calibration tie-in. The LLM's
+        # self-reported confidence has no relationship to validator-
+        # pass-rate or rca_quality. Live evidence from 2026-04-28: the
+        # model emitted conf=0.95 on a textbook surface-only RCA. Clamp
+        # confidence ≤ 0.4 when any of these signal that the output is
+        # untrustworthy:
+        #   - validator caught a surface-only / hedge pattern
+        #   - rca_quality classifier returned data_starved
+        #   - first-action template fallback fired (LLM emitted no
+        #     state-changing action of its own)
+        # The operator sees "low confidence + actionable" and knows to
+        # scrutinise. Doesn't change the verdict, only the trust signal.
+        confidence_clamped = False
+        if decision.confidence is not None and decision.confidence > 0.4:
+            surface_only_hit = any(
+                "surface-only" in h for h in (validation.banned_phrase_hits or [])
+            )
+            if surface_only_hit or quality == "data_starved" or suggested_actions_source == "template":
+                logger.info(
+                    "Confidence calibration (F-4): clamping %.2f → 0.4 (surface=%s, q=%s, actions=%s)",
+                    decision.confidence, surface_only_hit, quality, suggested_actions_source,
+                )
+                decision.confidence = 0.4
+                confidence_clamped = True
+
         logger.info(
-            "LLM verdict for %s: %s (quality=%s, %dms total%s)",
+            "LLM verdict for %s: %s (quality=%s, %dms total%s%s)",
             alert.alertname,
             decision.decision.value,
             quality,
             elapsed_ms,
             ", forced_by_override=true" if forced_by_override else "",
+            ", confidence_clamped=true" if confidence_clamped else "",
         )
 
         # Step 7: Build RCA record. Persist the rich fields (observed value,
