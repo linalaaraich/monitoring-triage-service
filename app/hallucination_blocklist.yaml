@@ -53,6 +53,43 @@ HighKongP95Latency:
       went — kong span vs upstream span. p95 attribution belongs to the
       service whose span dominated.
 
+Drain3AnomalyDetected:
+  # Added 2026-04-28 PM after live-verify caught the model hallucinating
+  # a PromQL-based detection mechanism for what's actually a log-template
+  # anomaly. Drain3 reads Loki logs, mines templates, fires on novelty.
+  # It does NOT use Prometheus, does NOT use PromQL, and does NOT have
+  # an alertname like "Drain3Alert" or "Drain3Threshold".
+  - pattern: '\bPromQL\b'
+    reason: |
+      Drain3AnomalyDetected is a log-template anomaly. Drain3 doesn't
+      use Prometheus or PromQL. Citing PromQL as the detection mechanism
+      is a hallucinated correlation.
+    hint: |
+      Read the new template strings + sample lines in the alert's
+      Description field above. Drain3's signal IS the template
+      novelty itself — explain WHAT the templates describe (OOM? JDBC
+      pool? deserialization? auth failure?) and whether the pattern
+      correlates with anything else in the ±10 min window.
+
+  - pattern: '\bPrometheus\s+(?:query|metric|alert)\b'
+    reason: |
+      Same as above — Drain3 is not metric-based. Don't frame it as a
+      Prometheus query.
+    hint: |
+      The detection IS log-template novelty. Don't invent a
+      Prometheus query to explain it.
+
+  - pattern: '\b(?:Drain3Alert|Drain3Threshold|Drain3Anomaly)\s*[\}=]'
+    reason: |
+      The actual alertname is "Drain3AnomalyDetected" — the LLM
+      sometimes hallucinates a fake alertname like Drain3Alert or
+      Drain3Threshold when constructing a PromQL expression. That
+      label doesn't exist anywhere in the system.
+    hint: |
+      Don't make up alertnames. The only Drain3 alertname is
+      Drain3AnomalyDetected. The detection is template novelty,
+      not an alertname-based query.
+
 # When new failure modes surface in chaos runs or operator review, add
 # them here. Examples to watch for:
 #   - HighMemoryUsage citing GC log lines as a "cause" (GC is consequence)

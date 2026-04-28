@@ -186,3 +186,41 @@ def test_named_cause_with_indicates_does_not_match_recurring_issue_pattern():
     report = validate(_decision(rca), deployment_type="k8s")
     hits = [v for v in report.violations if "surface-only" in v]
     assert hits == [], f"Cause-first prose with 'indicates' was wrongly flagged: {hits}"
+
+
+# -----------------------------------------------------------------------------
+# Live-verify regressions caught 2026-04-28 PM:
+# Drain3 RCAs at 12:19:11 + 13:11:49 used "Based on the context provided, ..."
+# which my widened regex set didn't catch. These lock in the wider noun list.
+# -----------------------------------------------------------------------------
+
+def test_based_on_context_provided_is_now_caught():
+    """Real production regression 2026-04-28T13:11:49."""
+    rca = (
+        "Based on the context provided, there are no anomalous log entries or "
+        "trace data indicating an issue specific to the spring-boot service."
+    )
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only RCA lede" in v]
+    assert hits, f"Expected lede match for 'Based on the context provided'; got: {report.violations}"
+
+
+def test_based_on_information_provided_is_caught():
+    rca = "Based on the information provided, this is unusual."
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only RCA lede" in v]
+    assert hits
+
+
+def test_based_on_history_is_caught():
+    rca = "Based on history, there is a pattern of similar fires."
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only RCA lede" in v]
+    assert hits
+
+
+def test_based_on_prior_decisions_is_caught():
+    rca = "Based on prior decisions, the alert appears benign."
+    report = validate(_decision(rca), deployment_type="k8s")
+    hits = [v for v in report.violations if "surface-only RCA lede" in v]
+    assert hits

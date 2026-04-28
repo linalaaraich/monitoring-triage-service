@@ -152,7 +152,7 @@ _SURFACE_ONLY_LEDE_PATTERNS: tuple[re.Pattern, ...] = (
     # with "Based on the repeated log entries..." / "Based on the observed
     # metric values and PromQL queries..." — both were surface restatements
     # of the alert dressed up as analysis.
-    re.compile(r"^\s*Based\s+on\s+(?:the\s+)?(?:observed|repeated|reported|metric|PromQL|query|queries|log\s+entries|logs|trace|values?|frequency|rate|elevated|high|increased|recurring)\b", re.I),
+    re.compile(r"^\s*Based\s+on\s+(?:the\s+)?(?:observed|repeated|reported|metric|PromQL|query|queries|log\s+entries|logs|trace|values?|frequency|rate|elevated|high|increased|recurring|context|information|data|input|history|provided|prompt|alert|prior|available)\b", re.I),
     # "Looking at the metrics / data / observations..." — same shape, different framing.
     re.compile(r"^\s*Looking\s+at\s+(?:the\s+)?(?:metrics?|data|observations?|logs?|traces?)\b", re.I),
 )

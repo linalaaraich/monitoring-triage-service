@@ -281,6 +281,24 @@ class TriagePipeline:
             drain3_anomalies.inc(sum(1 for l in annotated_logs if l.startswith("[ANOMALY]")))
             drain3_clusters.set(self.drain.get_stats()["total_clusters"])
 
+        # F-1.5 (live-verify follow-up 2026-04-28 PM): for Drain3 self-fires,
+        # the alert.annotations["description"] already carries the rich
+        # webhook content (templates + sample lines), but the LLM's prompt
+        # uses `drain_summary` (which is `ctx.anomaly_summary`) for the
+        # primary anomaly evidence. Loki re-query for service=drain3 returns
+        # nothing (the lines are emitted from spring-boot stdout), so
+        # drain_summary stays empty unless we pull the description in.
+        # Override anomaly_summary for this one path.
+        if alert.alertname == "Drain3AnomalyDetected" and source == "drain3":
+            rich_desc = (alert.annotations or {}).get("description")
+            if rich_desc and len(rich_desc) > 30:
+                anomaly_summary = rich_desc
+                ctx.anomaly_summary = rich_desc
+                logger.info(
+                    "Drain3 self-fire: overrode anomaly_summary with webhook's rich evidence (%d chars)",
+                    len(rich_desc),
+                )
+
         # Step 5: Check RCA history for prior occurrences, plus any past
         # decisions that were tagged data_starved. The latter get quoted
         # verbatim back to the LLM so it sees its own past hedges and

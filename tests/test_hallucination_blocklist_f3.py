@@ -87,3 +87,37 @@ def test_repeated_log_entries_to_health_pattern_rejected():
     )
     hits = find_hallucination_hits(rca, "HighP95Latency")
     assert hits, "Expected 'frequent ... requests for metrics' hedge match"
+
+
+# -----------------------------------------------------------------------------
+# Drain3-specific blocklist (added 2026-04-28 PM after live-verify caught the
+# model hallucinating Prometheus/PromQL mechanisms for what's actually a
+# log-template anomaly)
+# -----------------------------------------------------------------------------
+
+def test_drain3_promql_hallucination_rejected():
+    """Real production regression at 2026-04-28T13:11:49 — RCA cited
+    'Prometheus query: {alertname="Drain3Alert"} == 8 times in the last 7
+    days'. Drain3 doesn't use PromQL."""
+    rca = (
+        "Based on history, the Prometheus query indicates this Drain3 alert "
+        "fired 8 times. PromQL data shows no anomalies."
+    )
+    hits = find_hallucination_hits(rca, "Drain3AnomalyDetected")
+    assert hits
+
+
+def test_drain3_fake_alertname_rejected():
+    rca = "The Prometheus query {alertname=\"Drain3Alert\"} == 8 was used."
+    hits = find_hallucination_hits(rca, "Drain3AnomalyDetected")
+    assert hits
+
+
+def test_drain3_clean_rca_passes():
+    rca = (
+        "The drain3 ingest detected 5 brand-new log templates first appearing "
+        "today: JDBC pool exhausted at OrderService.findByDate, Tomcat thread "
+        "pool reached maxThreads=200 — these are spring-boot regressions."
+    )
+    hits = find_hallucination_hits(rca, "Drain3AnomalyDetected")
+    assert hits == [], f"Cause-first Drain3 prose was flagged: {hits}"
