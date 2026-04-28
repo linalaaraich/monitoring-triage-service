@@ -7,6 +7,7 @@ import httpx
 
 from app.circuit_breaker import CircuitBreaker
 from app.config import settings
+from app import exemplars as exemplars_lib
 from app.metrics import (
     ollama_request_duration_seconds,
     ollama_requests_total,
@@ -196,6 +197,35 @@ EXPECTED OUTPUT:
     "Loki empty: expected for service=monitoring (deployment_type=docker-vm, no app log pipeline)"
   ]
 }
+
+---
+
+## Reference exemplar library (canonical good RCAs)
+
+A curated library of best-practice RCA scenarios is maintained at
+`docs/happy-path-scenarios.md` in the triage-service repo (with structured
+versions in `app/exemplars/library.yaml`). Eleven archetypes are covered:
+OOM-loop, upstream-latency attribution, synthetic-blip dismiss, cascade
+incidents, Drain3 novelty post-deploy, bounded-agency retry, adaptive-threshold
+no-op, closed-loop feedback, CrashLoopBackOff from bad config, network/firewall
+attribution, and pre-failure TLS expiry.
+
+For every alert, the prompt builder pre-selects the exemplar that best matches
+on alertname + service + deployment_type + signal, and injects it into the
+user message below as `## Reference exemplar`. **Read it first.** Use it as a
+structural target — the level of specificity in the RCA, the shape of evidence
+to cite, the kind of state-changing remediation to suggest. Do NOT copy its
+facts. THIS alert's facts come from the pre-gathered context (metrics, logs,
+traces, Drain3, observed value).
+
+If the injected exemplar's archetype clearly does not fit (your evidence
+points elsewhere), say so explicitly in the RCA and reason from the actual
+evidence. The exemplar is a calibration aid, not a verdict.
+
+Additional archetypes can be requested at retry time via the
+`rca_history.list_exemplars` and `rca_history.get_exemplar` MCP tools — but
+the pre-injected one is usually the right reference; only reach for another
+if you have a specific reason to.
 
 ---
 
@@ -498,6 +528,23 @@ class LLMClient:
                 "correlation, or shelve it.\n"
             )
 
+        # Exemplar injection — pick the best-matching canonical RCA from
+        # app/exemplars/library.yaml and render it as a structural reference.
+        # See app/exemplars/__init__.py for matching logic and decisions-log.html#D17
+        # for why this lives in its own library (not in rca_history.db).
+        exemplar = exemplars_lib.find_for_alert(
+            alertname=alert.alertname,
+            service=alert.service,
+            deployment_type=deployment_type,
+            signal=signal,
+            severity=alert.severity,
+        )
+        exemplar_block = ""
+        if exemplar:
+            rendered = exemplars_lib.format_for_prompt(exemplar)
+            if rendered:
+                exemplar_block = "\n" + rendered + "\n"
+
         # P1.4 — Correlated alerts as first-class prompt section. Moved out of
         # history_context so the prompt rule H about explaining the
         # relationship has a clear place to bind to.
@@ -537,7 +584,7 @@ class LLMClient:
 {drain3_playbook_block}
 {correlated_block}
 The observed value above is ground-truth signal from Prometheus at the moment the rule's threshold was crossed. Cite this value explicitly in your RCA — do not say "insufficient data" if the alert itself carries a value.
-
+{exemplar_block}
 ## Pre-Gathered Context
 
 ### Metrics (Prometheus, last {settings.prometheus_range_minutes}min)

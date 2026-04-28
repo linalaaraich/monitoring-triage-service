@@ -60,14 +60,26 @@ class RCAHistorySimilarArgs(BaseModel):
     days: int = Field(7, ge=1, le=30)
     limit: int = Field(3, ge=1, le=10)
 
+class RCAHistoryListExemplarsArgs(BaseModel):
+    """List all curated RCA exemplars (canonical good-RCA shapes).
+    No args — returns the full archetype catalogue."""
+    pass
+
+class RCAHistoryGetExemplarArgs(BaseModel):
+    """Fetch one exemplar by id. Use when the pre-injected exemplar is the
+    wrong archetype and you want a different one."""
+    exemplar_id: str = Field(..., description="Exemplar id, e.g. 'oom-loop'")
+
 
 # Mapping from tool name → arg schema class. The model picks a tool by
 # name; we parse args into the matching schema (which rejects extras).
 _TOOL_SCHEMAS: dict[str, type[BaseModel]] = {
-    "prometheus.query":        PrometheusQueryArgs,
-    "loki.query_range":        LokiQueryRangeArgs,
-    "jaeger.get_traces":       JaegerGetTracesArgs,
-    "rca_history.similar":     RCAHistorySimilarArgs,
+    "prometheus.query":            PrometheusQueryArgs,
+    "loki.query_range":            LokiQueryRangeArgs,
+    "jaeger.get_traces":           JaegerGetTracesArgs,
+    "rca_history.similar":         RCAHistorySimilarArgs,
+    "rca_history.list_exemplars":  RCAHistoryListExemplarsArgs,
+    "rca_history.get_exemplar":    RCAHistoryGetExemplarArgs,
 }
 
 
@@ -103,6 +115,20 @@ Tool catalog:
     args: { "alert_name": "<name>", "affected_service": "<opt>", "days": <1-30>, "limit": <1-10> }
     use when: this alert has fired before and you want to see what
     prior RCAs concluded / what actions were tried.
+
+- rca_history.list_exemplars
+    args: {}
+    use when: the pre-injected reference exemplar at the top of this prompt
+    doesn't fit the archetype you're seeing, and you want to scan the full
+    catalogue of canonical good-RCA shapes (11 archetypes — OOM-loop,
+    upstream-latency, cascade incidents, network-firewall, TLS expiry, etc.).
+    Returns id + archetype + one-line gist for each.
+
+- rca_history.get_exemplar
+    args: { "exemplar_id": "<id from list_exemplars>" }
+    use when: you found a better-fitting archetype via list_exemplars and
+    want its full RCA shape, evidence shape, and actions shape. Returns the
+    full structured exemplar (the same content as the pre-injected reference).
 
 If none of these will help, return the normal decision JSON with
 best-effort reasoning and a needs_review-worthy confidence.
@@ -203,6 +229,17 @@ async def execute_tool(
                 else:
                     rows = await store.get_decisions(limit=args.get("limit", 3), alert_name=args["alert_name"])
                 return {"tool": name, "args": args, "result": rows}
+            elif name == "rca_history.list_exemplars":
+                # Local in-process call into the exemplars module — no
+                # HTTP / MCP roundtrip needed; same pattern as similar.
+                from app import exemplars as _ex
+                return {"tool": name, "args": args, "result": _ex.list_all()}
+            elif name == "rca_history.get_exemplar":
+                from app import exemplars as _ex
+                ex = _ex.get_by_id(args["exemplar_id"])
+                if ex is None:
+                    return {"tool": name, "args": args, "error": f"exemplar_not_found:{args['exemplar_id']}"}
+                return {"tool": name, "args": args, "result": ex}
             else:
                 return {"tool": name, "args": args, "error": f"unknown_tool:{name}"}
     except httpx.HTTPError as e:
