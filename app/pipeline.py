@@ -9,6 +9,7 @@ from app.dedup import DedupManager
 from app.drain_analyzer import DrainAnalyzer
 from app.llm_client import LLMClient
 from app.metrics import (
+    override_forced_escalations,
     alerts_deduplicated,
     alerts_processed,
     alerts_suppressed,
@@ -428,12 +429,68 @@ class TriagePipeline:
         elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
         pipeline_duration.observe(elapsed_ms / 1000)
 
+        # Step 6c (US-5.3): closed-loop feedback override gate. If an
+        # operator recently flagged a similar alert as a real incident
+        # (alertname + service + ±2h time-of-day match, active window not
+        # expired), and this LLM verdict is DISMISS, flip to ESCALATE so
+        # the human gets to look at it. The original verdict + reason are
+        # preserved in the RCA record for transparency; the prose gets a
+        # prepended note about the override so the email reader knows why
+        # they got paged on what the LLM thought was noise.
+        forced_by_override = False
+        if decision.decision == Decision.DISMISS:
+            try:
+                from datetime import datetime as _dt
+                active_overrides = await self.store.get_active_overrides_for_alert(
+                    alert_name=alert.alertname,
+                    affected_service=alert.service,
+                    current_time=_dt.utcnow(),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Override lookup failed (non-fatal — continuing with DISMISS): %s", exc
+                )
+                active_overrides = []
+            if active_overrides:
+                ov = active_overrides[0]  # most recent override wins
+                logger.info(
+                    "Override gate: DISMISS for %s/%s flipped to ESCALATE "
+                    "(operator note from %s: %r, active until %s)",
+                    alert.alertname, alert.service,
+                    ov.get("created_at", "?")[:19],
+                    (ov.get("operator_note") or "")[:80],
+                    ov.get("active_until", "?")[:19],
+                )
+                override_forced_escalations.inc()
+                forced_by_override = True
+                # Flip the verdict + record the override context in the prose
+                # so the email + dashboard render the reason for the page.
+                decision.decision = Decision.ESCALATE
+                override_note = (
+                    f"⚠ FORCED ESCALATE BY OPERATOR OVERRIDE — the LLM verdict was "
+                    f"DISMISS, but on-call recently flagged a similar alert "
+                    f"(alertname + service + ±2h time-of-day) as a real incident "
+                    f"on {ov.get('created_at','?')[:19]}"
+                )
+                if ov.get("operator_note"):
+                    override_note += f' (note: "{ov["operator_note"]}")'
+                override_note += (
+                    f". Override active until {ov.get('active_until','?')[:19]}. "
+                    f"If this firing is genuinely routine, POST /feedback/confirm "
+                    f"on this decision_id to down-weight the override."
+                )
+                # Prepend to the existing reason+rca so the LLM's diagnosis
+                # is preserved for the operator to evaluate.
+                decision.reason = override_note + " | LLM said: " + (decision.reason or "")
+                decision.rca = override_note + "\n\n" + (decision.rca or "")
+
         logger.info(
-            "LLM verdict for %s: %s (quality=%s, %dms total)",
+            "LLM verdict for %s: %s (quality=%s, %dms total%s)",
             alert.alertname,
             decision.decision.value,
             quality,
             elapsed_ms,
+            ", forced_by_override=true" if forced_by_override else "",
         )
 
         # Step 7: Build RCA record. Persist the rich fields (observed value,
@@ -459,7 +516,7 @@ class TriagePipeline:
             alert_fingerprint=alert.fingerprint,
             affected_service=alert.service,
             severity=decision.severity,
-            triage_decision="investigate",
+            triage_decision="override_forced_escalate" if forced_by_override else "investigate",
             llm_verdict=decision.decision.value.lower(),
             llm_confidence=f"{decision.confidence:.2f}" if decision.confidence is not None else None,
             rca_report=decision.rca,

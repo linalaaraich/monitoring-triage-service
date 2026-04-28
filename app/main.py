@@ -40,7 +40,7 @@ def _to_local_time(iso_utc_str: str | None, with_zone_label: bool = False) -> st
     base = local.strftime("%Y-%m-%d %H:%M:%S")
     return f"{base} Casablanca" if with_zone_label else base
 
-from fastapi import BackgroundTasks, FastAPI, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, Response
 
 from app.config import settings
@@ -49,7 +49,13 @@ from app.dedup import DedupManager
 from app.drain_analyzer import DrainAnalyzer
 from app.llm_client import LLMClient
 from app.metrics import get_metrics, webhooks_received
-from app.models import Drain3Webhook, GrafanaWebhook, HealthResponse
+from app.models import (
+    Drain3Webhook,
+    FeedbackRequest,
+    FeedbackResponse,
+    GrafanaWebhook,
+    HealthResponse,
+)
 from app.notifier import EmailNotifier
 from app.pipeline import TriagePipeline
 from app.rca_store import RCAStore
@@ -223,6 +229,57 @@ async def drain3_stats():
     # in-flight ingest batches (which also hold the same lock).
     import asyncio as _asyncio
     return await _asyncio.to_thread(_drain.get_stats)
+
+
+# --- Closed-loop feedback (US-5.3) ---
+#
+# /feedback/override flips a DISMISS the operator disagrees with — similar
+# future alerts (alertname + service + ±2h time-of-day match) will force-
+# escalate within the active window (default 14 days).
+#
+# /feedback/confirm ratifies an ESCALATE the operator agrees with —
+# feeds the precision metric and acts as a brake on any standing override
+# for the same decision.
+#
+# Both endpoints are idempotent on (decision_id, feedback_type): re-posting
+# updates the row in place rather than creating a duplicate. This is so
+# the operator can change their mind via the same call without polluting
+# the metrics.
+
+@app.post("/feedback/override", status_code=201)
+async def feedback_override(req: FeedbackRequest) -> FeedbackResponse:
+    return await _record_feedback(req, feedback_type="override")
+
+
+@app.post("/feedback/confirm", status_code=201)
+async def feedback_confirm(req: FeedbackRequest) -> FeedbackResponse:
+    return await _record_feedback(req, feedback_type="confirm")
+
+
+async def _record_feedback(req: FeedbackRequest, feedback_type: str) -> FeedbackResponse:
+    # Validate the decision exists — catches typos before they pollute the
+    # feedback table with orphan rows.
+    decisions = await _store.get_decisions(limit=1, alert_name=None)  # warmup
+    cursor = await _store._db.execute(
+        "SELECT id FROM rca_history WHERE id = ?", (req.decision_id,)
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"decision_id {req.decision_id!r} not found in rca_history",
+        )
+
+    import uuid
+    feedback_id = f"fb-{uuid.uuid4().hex[:12]}"
+    saved = await _store.record_feedback(
+        feedback_id=feedback_id,
+        decision_id=req.decision_id,
+        feedback_type=feedback_type,
+        operator_note=req.operator_note,
+        active_for_days=req.active_for_days,
+    )
+    return FeedbackResponse(**saved)
 
 
 _DASHBOARD_CSS = """
@@ -2117,4 +2174,52 @@ async def dashboard_guide():
 
 @app.get("/metrics")
 async def metrics():
+    # US-5.3: refresh precision/recall gauges lazily before serving. Lazy
+    # compute keeps the /metrics endpoint as the only DB-touching path for
+    # these gauges — no background task, no cache-staleness, no extra
+    # surface to fail. Cost: 4 lightweight COUNT queries per Prometheus
+    # scrape (which is once every 15s by default).
+    await _refresh_feedback_metrics()
     return Response(content=get_metrics(), media_type="text/plain; charset=utf-8")
+
+
+async def _refresh_feedback_metrics():
+    """Compute triage_precision + triage_recall from the rca_history +
+    feedback tables and set the Prometheus Gauges in place.
+
+    Definitions over the configurable window (default 7 days):
+      escalates_total  = COUNT(rca_history WHERE llm_verdict='escalate' AND timestamp > since)
+      dismisses_total  = COUNT(rca_history WHERE llm_verdict='dismiss' AND timestamp > since)
+      confirms         = COUNT(feedback WHERE feedback_type='confirm' AND created_at > since)
+      overrides        = COUNT(feedback WHERE feedback_type='override' AND created_at > since)
+
+    Precision = TP / (TP+FP)
+      TP = confirms (operator-confirmed escalations)
+      FP = escalates_total - confirms (escalations the operator hasn't ratified)
+        Note: this is conservative; in steady state the operator rarely confirms
+        every TP, so precision is biased low. The metric becomes meaningful as
+        operator habits stabilise.
+
+    Recall = TP / (TP+FN)
+      FN = overrides (DISMISSes the operator flipped to real incidents)
+
+    Both gauges are set to 0 when the denominator is 0 (so the rate looks
+    sane from a fresh deploy rather than NaN).
+    """
+    from app.metrics import triage_precision, triage_recall
+    window = getattr(settings, "feedback_metrics_window_days", 7)
+    try:
+        escalates = await _store.count_decisions_by_verdict("escalate", window_days=window)
+        confirms = await _store.count_feedback_in_window("confirm", window_days=window)
+        overrides = await _store.count_feedback_in_window("override", window_days=window)
+    except Exception as exc:
+        logger.warning("Feedback metric refresh failed (non-fatal): %s", exc)
+        return
+
+    tp = confirms
+    fp = max(escalates - confirms, 0)
+    fn = overrides
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    triage_precision.set(precision)
+    triage_recall.set(recall)

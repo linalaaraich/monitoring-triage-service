@@ -103,6 +103,12 @@ class Settings(BaseSettings):
     startup_backfill_threshold_minutes: int = 15
     startup_backfill_max_gap_hours: int = 24  # cap to avoid replaying a week
 
+    # US-5.3 closed-loop feedback metrics window (precision + recall).
+    # Default 7d matches the alert-frequency lookback so operator habits
+    # over one week are the unit of measurement. Used by /metrics handler
+    # in app/main.py to compute triage_precision + triage_recall.
+    feedback_metrics_window_days: int = 7
+
     # Service name → deployment type map. Used by:
     #   - metric_interpreter.py to attach deployment_type to MetricFacts
     #   - suggested_actions.yaml template selector

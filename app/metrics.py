@@ -23,6 +23,29 @@ alerts_processed = Counter(
     ["decision"],
 )
 
+# US-5.3 closed-loop feedback. Counter increments every time the pre-LLM
+# similarity gate flips a DISMISS to an ESCALATE because of an active
+# operator override. The Gauges (precision/recall) are computed lazily
+# at scrape time — see app/main.py /metrics handler.
+override_forced_escalations = Counter(
+    "triage_override_forced_escalations_total",
+    "DISMISS verdicts flipped to ESCALATE by an active operator override",
+)
+
+triage_precision = Gauge(
+    "triage_precision",
+    "TP / (TP+FP) over the last feedback_metrics_window_days. "
+    "TP = ESCALATE confirmed by /feedback/confirm; FP = ESCALATE without "
+    "confirm AND without override (i.e., escalations the operator hasn't "
+    "labeled). Computed lazily at scrape time.",
+)
+
+triage_recall = Gauge(
+    "triage_recall",
+    "TP / (TP+FN) over the last feedback_metrics_window_days. "
+    "FN = DISMISS overridden via /feedback/override. Computed lazily at scrape time.",
+)
+
 pipeline_duration = Histogram(
     "triage_pipeline_duration_seconds",
     "Full pipeline duration from webhook to decision",

@@ -197,3 +197,30 @@ class HealthResponse(BaseModel):
     status: str = "healthy"
     uptime_seconds: float = 0
     version: str = "0.1.0"
+
+
+# ----------------------------------------------------------------------------
+# US-5.3 closed-loop feedback request/response schemas
+# ----------------------------------------------------------------------------
+
+class FeedbackRequest(BaseModel):
+    """Body of POST /feedback/override and POST /feedback/confirm.
+
+    decision_id is required and must reference an existing rca_history row.
+    operator_note is encouraged but optional (free-form short text). For
+    /feedback/override, active_for_days controls how long similar future
+    fires force-escalate; defaults to 14 days. For /feedback/confirm the
+    field is ignored (confirms are timeless).
+    """
+    decision_id: str
+    operator_note: str | None = None
+    active_for_days: int | None = None
+
+
+class FeedbackResponse(BaseModel):
+    id: str
+    decision_id: str
+    feedback_type: str   # 'override' | 'confirm'
+    operator_note: str | None = None
+    created_at: str
+    active_until: str | None = None

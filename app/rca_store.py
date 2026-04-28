@@ -29,6 +29,36 @@ CREATE TABLE IF NOT EXISTS rca_history (
 )
 """
 
+# US-5.3 closed-loop feedback. One row per (decision_id, feedback_type) —
+# operators can ratify a decision with /feedback/confirm or override it
+# with /feedback/override. Overrides have an active window during which
+# similar future alerts force-escalate (the pre-LLM similarity gate);
+# confirms are timeless ratifications used for precision/recall metrics.
+#
+# active_until is nullable: confirms don't expire, overrides do (default 14
+# days from create). The pre-LLM gate filters on `feedback_type='override'
+# AND active_until > now`.
+CREATE_FEEDBACK_TABLE = """
+CREATE TABLE IF NOT EXISTS feedback (
+    id TEXT PRIMARY KEY,
+    decision_id TEXT NOT NULL,
+    feedback_type TEXT NOT NULL,
+    operator_note TEXT,
+    created_at TEXT NOT NULL,
+    active_until TEXT,
+    FOREIGN KEY(decision_id) REFERENCES rca_history(id),
+    UNIQUE(decision_id, feedback_type)
+)
+"""
+
+CREATE_FEEDBACK_INDEX_DECISION = """
+CREATE INDEX IF NOT EXISTS idx_feedback_decision ON feedback(decision_id)
+"""
+
+CREATE_FEEDBACK_INDEX_ACTIVE = """
+CREATE INDEX IF NOT EXISTS idx_feedback_active ON feedback(feedback_type, active_until)
+"""
+
 
 def _is_empty_json_list(s) -> bool:
     """True if the value is missing, or represents an empty list.
@@ -129,6 +159,12 @@ class RCAStore:
                 await self._db.execute(
                     f"ALTER TABLE rca_history ADD COLUMN {name} {sql_type}"
                 )
+
+        # US-5.3: feedback table for closed-loop operator decisions.
+        await self._db.execute(CREATE_FEEDBACK_TABLE)
+        await self._db.execute(CREATE_FEEDBACK_INDEX_DECISION)
+        await self._db.execute(CREATE_FEEDBACK_INDEX_ACTIVE)
+
         await self._db.commit()
         logger.info("RCA history database initialized at %s", self.db_path)
 
@@ -311,6 +347,174 @@ class RCAStore:
                ORDER BY timestamp DESC
                LIMIT ?""",
             (alert_name, affected_service, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # US-5.3 closed-loop feedback
+    # ------------------------------------------------------------------
+
+    async def record_feedback(
+        self,
+        feedback_id: str,
+        decision_id: str,
+        feedback_type: str,
+        operator_note: str | None,
+        active_for_days: int | None = 14,
+    ) -> dict:
+        """UPSERT a feedback row for the given decision + feedback_type.
+
+        Idempotent on (decision_id, feedback_type) — re-posting from the
+        operator updates the row in place rather than creating a duplicate.
+        Returns the resulting row as a dict so the API can echo it back.
+
+        feedback_type must be 'override' or 'confirm'. For 'confirm' the
+        active_for_days argument is ignored — confirms are timeless. For
+        'override' the active_until is set to created_at + active_for_days.
+        """
+        if feedback_type not in ("override", "confirm"):
+            raise ValueError(f"feedback_type must be 'override' or 'confirm', got {feedback_type!r}")
+
+        now = datetime.utcnow()
+        active_until = None
+        if feedback_type == "override":
+            window = active_for_days if active_for_days is not None else 14
+            active_until = (now + timedelta(days=window)).isoformat()
+
+        # SQLite UPSERT on the unique (decision_id, feedback_type) constraint.
+        # On conflict, refresh operator_note + active_until + created_at so
+        # the operator's most-recent intent wins.
+        await self._db.execute(
+            """INSERT INTO feedback (id, decision_id, feedback_type, operator_note, created_at, active_until)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(decision_id, feedback_type) DO UPDATE SET
+                   operator_note = excluded.operator_note,
+                   created_at = excluded.created_at,
+                   active_until = excluded.active_until""",
+            (feedback_id, decision_id, feedback_type, operator_note, now.isoformat(), active_until),
+        )
+        await self._db.commit()
+
+        # Read back the (possibly-existing) row so the API returns the canonical id
+        cursor = await self._db.execute(
+            """SELECT id, decision_id, feedback_type, operator_note, created_at, active_until
+               FROM feedback WHERE decision_id = ? AND feedback_type = ?""",
+            (decision_id, feedback_type),
+        )
+        row = await cursor.fetchone()
+        logger.info(
+            "Recorded feedback: decision_id=%s type=%s active_until=%s",
+            decision_id, feedback_type, active_until,
+        )
+        return dict(row)
+
+    async def get_active_overrides_for_alert(
+        self,
+        alert_name: str,
+        affected_service: str,
+        current_time: datetime,
+        time_of_day_window_hours: float = 2.0,
+    ) -> list[dict]:
+        """Return active operator overrides matching this alert's shape.
+
+        Match criteria:
+          - feedback_type = 'override'
+          - active_until > current_time (still in the active window)
+          - The original decision (joined via decision_id) has the same
+            alert_name AND the same affected_service
+          - The override's created_at falls within ±time_of_day_window_hours
+            of the current time-of-day (regardless of date)
+
+        Used by the pre-LLM similarity gate: if any rows return, the
+        pipeline forces ESCALATE on a DISMISS verdict for this alert.
+
+        Returns rows with fields: feedback_id, decision_id, feedback_type,
+        operator_note, created_at, active_until, alert_name,
+        affected_service, llm_verdict (the prior verdict that got
+        overridden), rca_report (the prior RCA the operator disagreed with).
+        """
+        now_iso = current_time.isoformat()
+        cursor = await self._db.execute(
+            """SELECT f.id AS feedback_id, f.decision_id, f.feedback_type,
+                      f.operator_note, f.created_at, f.active_until,
+                      r.alert_name, r.affected_service, r.llm_verdict,
+                      r.rca_report
+               FROM feedback f
+               JOIN rca_history r ON r.id = f.decision_id
+               WHERE f.feedback_type = 'override'
+                 AND f.active_until > ?
+                 AND r.alert_name = ?
+                 AND r.affected_service = ?
+               ORDER BY f.created_at DESC""",
+            (now_iso, alert_name, affected_service),
+        )
+        rows = await cursor.fetchall()
+
+        # Time-of-day filter — done in Python because SQLite has no native
+        # "extract hour-of-day modulo 24h" with wrap-around. Runs over a small
+        # candidate set (active overrides for one alert+service combo, usually
+        # 0–3 rows in practice).
+        current_minutes = current_time.hour * 60 + current_time.minute
+        window_minutes = time_of_day_window_hours * 60
+        matched = []
+        for row in rows:
+            try:
+                created = datetime.fromisoformat(row["created_at"])
+            except (TypeError, ValueError):
+                continue
+            created_minutes = created.hour * 60 + created.minute
+            # Wrap-around aware: distance is min over the circular 24h
+            # diff, so 23:30 vs 00:30 has distance 60min, not 1380min.
+            raw_diff = abs(current_minutes - created_minutes)
+            tod_diff = min(raw_diff, 24 * 60 - raw_diff)
+            if tod_diff <= window_minutes:
+                matched.append(dict(row))
+        return matched
+
+    async def count_feedback_in_window(
+        self, feedback_type: str, window_days: int = 7
+    ) -> int:
+        """Count feedback rows of the given type created within the window.
+
+        Used by the precision/recall metrics: TP+FP comes from confirm
+        count + non-overridden ESCALATEs; FN comes from override count.
+        """
+        if feedback_type not in ("override", "confirm"):
+            raise ValueError(f"feedback_type must be 'override' or 'confirm'")
+        since = (datetime.utcnow() - timedelta(days=window_days)).isoformat()
+        cursor = await self._db.execute(
+            "SELECT COUNT(*) AS n FROM feedback WHERE feedback_type = ? AND created_at > ?",
+            (feedback_type, since),
+        )
+        row = await cursor.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def count_decisions_by_verdict(
+        self, verdict: str, window_days: int = 7
+    ) -> int:
+        """Count rca_history rows with the given llm_verdict in the window.
+
+        Used as the denominator in precision (escalations) and recall
+        calculations.
+        """
+        since = (datetime.utcnow() - timedelta(days=window_days)).isoformat()
+        cursor = await self._db.execute(
+            "SELECT COUNT(*) AS n FROM rca_history WHERE llm_verdict = ? AND timestamp > ?",
+            (verdict, since),
+        )
+        row = await cursor.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def get_feedback_for_decision(
+        self, decision_id: str
+    ) -> list[dict]:
+        """Return all feedback rows for a given decision (0–2 rows: at most
+        one of each type)."""
+        cursor = await self._db.execute(
+            """SELECT id, decision_id, feedback_type, operator_note, created_at, active_until
+               FROM feedback WHERE decision_id = ?""",
+            (decision_id,),
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
