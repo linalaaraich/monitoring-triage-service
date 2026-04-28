@@ -124,18 +124,26 @@ class Settings(BaseSettings):
         "spring-boot-app": "k8s",
         "springboot-app": "k8s",
         "kong":          "k8s",
+        # otel-collector runs in BOTH k3s (DaemonSet, namespace=observability) AND
+        # as a docker container on monitoring-vm. The map can only carry one type
+        # per name; "k8s" wins because that's where the alert routing fires from
+        # today. Disambiguate via the instance label if a docker-vm-specific
+        # otel-collector alert appears.
         "otel-collector": "k8s",
-        "mysql":         "k8s",
         "frontend":      "k8s",
         # monitoring-vm docker-compose stack
         "prometheus":    "docker-vm",
         "loki":          "docker-vm",
         "jaeger":        "docker-vm",
         "grafana":       "docker-vm",
+        "cadvisor":      "docker-vm",
+        # node-exporter runs as a docker container on monitoring-vm
+        # (prom/node-exporter image), NOT as a systemd unit. Corrected
+        # 2026-04-28 audit (I-1).
+        "node-exporter": "docker-vm",
         "monitoring":    "docker-vm",  # label used by TargetDown for anything on monitoring-vm
         # Host-level (systemd or equivalent daemons on the k3s node + VMs)
         "k3s-node":      "systemd",
-        "node-exporter": "systemd",
     }
 
     # IP-to-hostname map for turning raw alert instances like "10.0.1.194:9100"
