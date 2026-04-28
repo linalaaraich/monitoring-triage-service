@@ -44,6 +44,13 @@ class MetricFacts:
     unit: str                            # "%", "ms", "bytes/s", "boolean", or "" (unknown)
     deployment_type: DeploymentType
     one_liner: str                       # human summary — what the LLM cites
+    # US-5.1 Phase C: behavioral baseline. Set by the pipeline AFTER
+    # interpret() returns (interpret is sync; baselines need async
+    # Prometheus). None means baseline wasn't fetched (Prometheus
+    # unreachable, no service label, or thin history). When present,
+    # as_prompt_block adds a "BEHAVIORAL BASELINE" line giving the LLM
+    # σ-claim evidence to cite.
+    baseline: object | None = None  # type: app.entity_baselines.BaselineFacts
 
     def as_prompt_block(self) -> str:
         """Render the facts as a prompt-ready block the LLM should cite."""
@@ -58,6 +65,15 @@ class MetricFacts:
             parts.append(f"DELTA: {self.delta:+.3g}" + (f" ({self.delta_pct:+.1f}%)" if self.delta_pct is not None else ""))
         parts.append(f"DEPLOYMENT TYPE: {self.deployment_type}")
         parts.append(f"INTERPRETATION: {self.one_liner}")
+        # Append behavioral baseline if available — exemplar/prompt-rule J
+        # tells the LLM to cite this verbatim as σ-evidence.
+        if self.baseline is not None and self.observed_value is not None:
+            try:
+                baseline_line = self.baseline.as_prose_line(self.observed_value)
+                parts.append(f"BEHAVIORAL BASELINE: {baseline_line}")
+            except (AttributeError, TypeError):
+                # Defensive — if baseline isn't shaped as expected, ignore.
+                pass
         return "\n".join(parts)
 
 

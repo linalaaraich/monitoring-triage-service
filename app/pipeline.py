@@ -336,6 +336,37 @@ class TriagePipeline:
         from app.metric_interpreter import interpret as interpret_metric
         from app.response_validator import validate as validate_decision
         metric_facts = interpret_metric(alert)
+
+        # US-5.1 Phase C: fetch behavioral baseline if we have a service
+        # label and a recognisable metric. Best-effort — if Prometheus is
+        # unreachable or history is thin, get_baseline returns a non-
+        # authoritative BaselineFacts and as_prose_line falls back gracefully.
+        # Skipped for unknown services / boolean alerts where baseline isn't
+        # meaningful (e.g. up=0 has no "Xσ above baseline" interpretation).
+        if (
+            alert.service
+            and alert.service != "unknown"
+            and metric_facts.unit not in ("boolean", "")
+            and alert.annotations.get("expr")
+        ):
+            try:
+                from app.entity_baselines import get_baseline
+                # Use the rule's PromQL expression as the baseline metric.
+                # The cache key is (service, metric_expr, window) so distinct
+                # alerts on the same service produce distinct baselines.
+                metric_facts.baseline = await asyncio.wait_for(
+                    get_baseline(
+                        prometheus_url="http://" + settings.monitoring_vm_ip + ":9090"
+                            if hasattr(settings, "monitoring_vm_ip")
+                            else "http://prometheus:9090",
+                        service=alert.service,
+                        metric=alert.annotations["expr"],
+                    ),
+                    timeout=8.0,
+                )
+            except (asyncio.TimeoutError, Exception) as exc:
+                logger.debug("Baseline fetch failed (non-fatal): %s", exc)
+                # metric_facts.baseline remains None; prompt skips the line
         decision, llm_ms = await self.llm.investigate(
             alert, ctx, anomaly_summary, history_context,
             correlated=correlated,
