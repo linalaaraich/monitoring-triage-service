@@ -518,3 +518,38 @@ class RCAStore:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # US-5.8 recurrence gate support
+    # ------------------------------------------------------------------
+
+    async def count_recent_decisions_by_fingerprint(
+        self,
+        fingerprint: str,
+        llm_verdict: str | None,
+        window_seconds: int,
+    ) -> int:
+        """Count rca_history rows with the given fingerprint within the
+        recent window.
+
+        Used by the pre-LLM gate (llm_verdict=None → any verdict) and the
+        post-LLM gate (llm_verdict='dismiss' → only count dismisses).
+
+        Window is seconds-from-now. Pure SQL, indexed on timestamp +
+        fingerprint pair (existing indices cover this query path).
+        """
+        if not fingerprint:
+            return 0
+        since = (datetime.utcnow() - timedelta(seconds=window_seconds)).isoformat()
+        if llm_verdict is None:
+            cursor = await self._db.execute(
+                "SELECT COUNT(*) AS n FROM rca_history WHERE alert_fingerprint = ? AND timestamp > ?",
+                (fingerprint, since),
+            )
+        else:
+            cursor = await self._db.execute(
+                "SELECT COUNT(*) AS n FROM rca_history WHERE alert_fingerprint = ? AND llm_verdict = ? AND timestamp > ?",
+                (fingerprint, llm_verdict, since),
+            )
+        row = await cursor.fetchone()
+        return int(row["n"]) if row else 0

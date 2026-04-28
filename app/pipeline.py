@@ -10,6 +10,8 @@ from app.drain_analyzer import DrainAnalyzer
 from app.llm_client import LLMClient
 from app.metrics import (
     override_forced_escalations,
+    recurrence_force_escalated,
+    recurrence_gated_pre_llm,
     alerts_deduplicated,
     alerts_processed,
     alerts_suppressed,
@@ -160,6 +162,37 @@ class TriagePipeline:
                 triage_decision="triage_suppressed",
                 llm_verdict=None,
                 rca_report=f"Suppressed by Layer 2 triage: {suppression_reason}",
+                llm_reasoning=None,
+                action_taken="suppressed",
+                investigation_duration_ms=elapsed_ms,
+            )
+            await self.store.save_decision(record)
+            return
+
+        # Step 1c (US-5.8 recurrence gate, pre-LLM tier).
+        # For opted-in alerts (Grafana annotation `recurrence_gate=...`)
+        # whose fingerprint has fired N times within the window, persist a
+        # cheap row and skip the LLM. Critical-severity alerts bypass even
+        # if they accidentally opt in (defense-in-depth in
+        # recurrence_gate._is_critical).
+        from app.recurrence_gate import pre_llm_gate as _pre_llm_gate
+        gate_result = await _pre_llm_gate(alert, self.store)
+        if gate_result is not None:
+            elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
+            recurrence_gated_pre_llm.inc()
+            logger.info(
+                "Alert %s gated pre-LLM by recurrence gate (%dms)",
+                alert.alertname, elapsed_ms,
+            )
+            record = RCARecord(
+                alert_source=source,
+                alert_name=alert.alertname,
+                alert_fingerprint=alert.fingerprint,
+                affected_service=alert.service,
+                severity=alert.severity,
+                triage_decision=gate_result.triage_decision,
+                llm_verdict=None,
+                rca_report=gate_result.reason,
                 llm_reasoning=None,
                 action_taken="suppressed",
                 investigation_duration_ms=elapsed_ms,
@@ -508,6 +541,30 @@ class TriagePipeline:
                 # is preserved for the operator to evaluate.
                 decision.reason = override_note + " | LLM said: " + (decision.reason or "")
                 decision.rca = override_note + "\n\n" + (decision.rca or "")
+
+        # Step 6c.5 (US-5.8 post-LLM recurrence gate). Runs AFTER the
+        # US-5.3 operator override gate (step 6c) so an explicit operator
+        # override always takes precedence over the recurrence heuristic.
+        # If the LLM has dismissed this fingerprint M times in the window,
+        # force-flip to ESCALATE so a human can decide whether the rule is
+        # too noisy or whether there's a real signal the LLM is missing.
+        if not forced_by_override and decision.decision == Decision.DISMISS:
+            from app.recurrence_gate import post_llm_gate as _post_llm_gate
+            recurrence_result = await _post_llm_gate(alert, decision, self.store)
+            if recurrence_result is not None:
+                recurrence_force_escalated.inc()
+                logger.info(
+                    "Recurrence post-LLM gate flipping DISMISS to ESCALATE for %s/%s",
+                    alert.alertname, alert.service,
+                )
+                decision.decision = Decision.ESCALATE
+                gate_note = (
+                    f"⚠ FORCED ESCALATE BY RECURRENCE GATE — "
+                    f"{recurrence_result.reason}"
+                )
+                decision.reason = gate_note + " | LLM said: " + (decision.reason or "")
+                decision.rca = gate_note + "\n\n" + (decision.rca or "")
+                forced_by_override = True  # piggy-back on existing record-tagging logic
 
         # Step 6d (F-4): confidence calibration tie-in. The LLM's
         # self-reported confidence has no relationship to validator-

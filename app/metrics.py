@@ -32,6 +32,20 @@ override_forced_escalations = Counter(
     "DISMISS verdicts flipped to ESCALATE by an active operator override",
 )
 
+# US-5.8 recurrence gate.
+recurrence_gated_pre_llm = Counter(
+    "triage_recurrence_gated_pre_llm_total",
+    "Alerts skipped pre-LLM by the recurrence gate (count under threshold).",
+)
+recurrence_force_escalated = Counter(
+    "triage_recurrence_force_escalated_total",
+    "DISMISS verdicts flipped to ESCALATE by the post-LLM recurrence gate.",
+)
+recurrence_critical_bypassed = Counter(
+    "triage_recurrence_critical_bypassed_total",
+    "Critical-severity alerts that opted into the gate by misconfiguration — gate bypassed defensively.",
+)
+
 triage_precision = Gauge(
     "triage_precision",
     "TP / (TP+FP) over the last feedback_metrics_window_days. "

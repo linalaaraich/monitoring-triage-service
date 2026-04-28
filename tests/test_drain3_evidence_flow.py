@@ -25,13 +25,15 @@ from app.drain_analyzer import DrainAnalyzer
 from app.models import Drain3Webhook, GrafanaAlert
 
 
-def test_ingest_batch_sync_returns_lines_and_new_templates():
+def test_ingest_batch_sync_returns_lines_and_new_templates(tmp_path, monkeypatch):
     """Test that brand-new templates come back as separate from anomalous
-    lines. Uses a UUID-stamped sentinel so Drain3's persistent state
-    (drain3_state.bin survives across pytest runs) doesn't see these as
-    already-known clusters and skip the is_new_pattern flag.
+    lines. Uses a fresh state dir so other tests don't pollute the
+    template tree (Drain3's FilePersistence persists across instances
+    pointing at the same path).
     """
     import uuid
+    from app.config import settings
+    monkeypatch.setattr(settings, "drain3_state_dir", str(tmp_path))
     sentinel = uuid.uuid4().hex[:8]
     da = DrainAnalyzer()
     lines = [
@@ -40,11 +42,8 @@ def test_ingest_batch_sync_returns_lines_and_new_templates():
         f"ERROR-{sentinel}-A novel test failure mode at TestService.method-{sentinel}A line two",
     ]
     anomalous, templates = da._ingest_batch_sync(lines)
-    # All three are anomalous (UUID-uniqued → never seen)
+    # All three are anomalous (fresh state dir → all clusters new)
     assert len(anomalous) == 3
-    # At least one new template captured (Drain3 collapses tokens; we don't
-    # care about exact count, only that the captured list is non-empty and
-    # contains template-shape strings).
     assert len(templates) >= 1, f"expected ≥1 new template captured, got {templates}"
     assert all(isinstance(t, str) and t for t in templates)
 
