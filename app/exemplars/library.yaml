@@ -147,6 +147,90 @@ exemplars:
     lesson: "When the alert subject is the slow service, the trace breakdown is the diagnostic — not 'observed value above threshold'. The four common causes (pool, GC, downstream, query) each have a distinct trace signature."
     doc_anchor: "scenario-2--kong-p95-latency-spike-correctly-attributed-upstream-not-to-kong"
 
+  - id: critical-resource-saturation
+    # F-5 fix (audit 2026-04-28 PM): CriticalCpuUsage / CriticalMemoryUsage
+    # had no exemplar — fell to generic-sre-shape. These are the
+    # paged-immediately variants of the High* alerts. The right framing is
+    # "this resource is genuinely exhausted right now" — different from
+    # adaptive-threshold-noop (which dismisses seasonal CPU ramps).
+    archetype: "Critical CPU/memory saturation on an application service — paged tier"
+    match:
+      alertname: "^Critical(Cpu|Memory)Usage$"
+      services: ["spring-boot", "spring-boot-app", "springboot-app", "kong", "frontend", "k3s-node"]
+      deployment_types: ["k8s", "systemd"]
+      signal: "metric"
+      severity: ["critical"]
+    decision: "ESCALATE"
+    confidence_band: "0.90-0.98"
+    one_line: "A specific resource is exhausted — the cgroup limit, the JVM heap, or the host's physical memory. Name which from the metric breakdown."
+    rca: |
+      The host or pod has hit a hard resource ceiling — this is not seasonal
+      noise. CriticalCpuUsage means the CPU has been at >90% for the rule's
+      sustained window; CriticalMemoryUsage means the cgroup or host memory
+      is near the limit. Diagnose by mechanism: for memory, check whether
+      working_set is hugging the cgroup limit (OOMKill imminent — different
+      from OS memory pressure); for CPU, check whether cpu_throttled_time
+      is non-zero (pod throttling) vs across-the-host (noisy neighbour or
+      genuine demand). Trace evidence shows whether the saturation
+      originates from spring-boot's own request handling, a runaway batch
+      job, or a sidecar (otel-agent, init-container). The right action is
+      sized to the cause: raise the limit if normal load exceeded
+      provisioning; rollback the deploy if a regression introduced the
+      pressure; scale the deployment if traffic genuinely demands it.
+    evidence_shape:
+      - "container_memory_working_set_bytes / spec_memory_limit_bytes — peak %"
+      - "container_cpu_cfs_throttled_seconds_total — non-zero means cgroup throttling"
+      - "kube_pod_container_status_restarts_total — was the pod OOMKilled?"
+      - "Loki: grep -i 'OutOfMemoryError|GC overhead|killed' for confirmation"
+      - "Trace span breakdown: which operation dominates?"
+    actions_shape:
+      - "kubectl set resources deploy/{service} -n app --limits=memory=2Gi --requests=memory=1Gi — raise ceiling out of OOMKill range"
+      - "kubectl set env deploy/{service} -n app JAVA_TOOL_OPTIONS='-XX:MaxRAMPercentage=75' — pin JVM heap to 75% of cgroup"
+      - "kubectl scale deploy/{service} -n app --replicas=N — distribute load if traffic genuinely demands it"
+      - "kubectl rollout undo deploy/{service} -n app — if a recent deploy caused the regression"
+    lesson: "Critical-severity resource alerts mean the customer is in pain. Name a specific failing resource (cgroup memory cap, JVM heap default, CPU throttle), not 'the system is stressed'. Resize, rollback, or scale — match the action to the named cause."
+    doc_anchor: "scenario-1--spring-boot-oom-kill-loop-caught-in-a-single-cycle"
+
+  - id: otel-collector-degradation
+    # F-5 fix (audit 2026-04-28 PM): both OTel collector alert rules
+    # (OTelCollectorHighSpanDropRate, OTelCollectorDown) had no exemplar.
+    # Real failure modes for the collector: backpressure (queue depth
+    # growing), exporter timeouts, batch buffer overflow, OOM under load.
+    archetype: "OTel collector degradation — span drop rate or scrape down"
+    match:
+      alertname: "^OTelCollector(HighSpanDropRate|Down|HighQueueDepth|HighMemoryUsage)$"
+      services: ["otel-collector", "otelcol", "*"]
+      deployment_types: ["k8s", "docker-vm"]
+      signal: "metric"
+    decision: "ESCALATE"
+    confidence_band: "0.85-0.95"
+    one_line: "Collector is dropping spans / exporter blocked / batch buffer overflowing — name which exporter or upstream is causing backpressure."
+    rca: |
+      The OTel collector is failing to keep up with incoming telemetry. The
+      diagnostic split: dropped spans means the receiver-side queue overflowed
+      (incoming OTLP rate exceeds the collector's processing rate); a Down
+      target means the collector itself is unreachable (OOM, crash, networking
+      break). Backpressure usually traces to a slow exporter — Jaeger
+      receiving slowly, or a remote write target (Prometheus, Loki) returning
+      timeouts. Memory pressure on the collector pod ties to insufficient
+      resources for the throughput it's seeing OR an exporter retry storm. The
+      right action depends on the cause: tune the batch processor for
+      higher throughput, scale the collector horizontally if it's a
+      DaemonSet, or restart the slow exporter target.
+    evidence_shape:
+      - "otelcol_processor_dropped_spans_total — dropping rate ≥ N spans/s"
+      - "otelcol_exporter_queue_size — queue depth per-exporter"
+      - "otelcol_exporter_send_failed_spans_total — which exporter is failing"
+      - "Loki: collector pod logs for 'queue full', 'export retry', 'context deadline'"
+      - "Memory: container_memory_working_set on the collector pod"
+    actions_shape:
+      - "kubectl rollout restart daemonset/otel-collector -n observability — clears stuck queues"
+      - "kubectl set env daemonset/otel-collector -n observability OTEL_BATCH_TIMEOUT=5s OTEL_BATCH_SEND_BATCH_SIZE=1024 — tune throughput"
+      - "kubectl scale daemonset/otel-collector -n observability --replicas=N — if running as Deployment not DaemonSet"
+      - "If exporter target is the bottleneck (Jaeger / Prometheus / Loki down): restart that target via the appropriate deployment_type"
+    lesson: "The collector itself is rarely the cause — it's the canary. Find which exporter or upstream is back-pressuring before tuning collector resources."
+    doc_anchor: "cross-cutting-properties-demonstrated-by-these-scenarios"
+
   - id: synthetic-blip-dismiss
     archetype: "Brief target-down / probe-miss with no corroborating signal"
     match:
@@ -177,10 +261,12 @@ exemplars:
   - id: cascade-incident-disk-loki
     archetype: "Cascade incident: 3-4 alerts collapsed into one kill-chain RCA"
     match:
-      # I-4 (audit 2026-04-28): regex now matches the live rule name
-      # `LokiIngestionRateLow`. Prior version named `LokiIngestLag`, which
-      # is not a rule we provision — it would never fire that alternative.
-      alertname: "^(HighDiskUsage|LokiIngestionRateLow|LokiHighDiskUsage|DatasourceNoData|AlertInhibitionTriggered)$"
+      # I-4 (audit 2026-04-28): regex matches LokiIngestionRateLow.
+      # F-5 widen 2026-04-28 PM: now also covers all disk-pressure variants
+      # (Critical*, DiskFillingUp, LokiDiskFillingUp) so the 4 Loki / disk
+      # alerts that previously fell through to generic-sre-shape now score
+      # ≥0.90 against this exemplar.
+      alertname: "^(HighDiskUsage|CriticalDiskUsage|DiskFillingUp|LokiHighDiskUsage|LokiCriticalDiskUsage|LokiDiskFillingUp|LokiIngestionRateLow|DatasourceNoData|AlertInhibitionTriggered)$"
       services: ["loki", "monitoring", "grafana", "prometheus"]
       deployment_types: ["docker-vm"]
     decision: "ESCALATE"
