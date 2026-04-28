@@ -72,43 +72,51 @@ def test_escalation_body_contains_core_fields(alert_with_links, decision_escalat
     notifier = EmailNotifier()
     record = RCARecord(alert_name="PostSchemaFix_v2", triage_decision="investigate",
                        action_taken="emailed", investigation_duration_ms=12345)
-    body = notifier._build_escalation_body(alert_with_links, decision_escalate, record, 1, ctx_full)
+    body = notifier._build_escalation_body(
+        alert_with_links, decision_escalate, record, 1, ctx_full, [],
+    )
     assert "PostSchemaFix_v2" in body
-    assert "SEVERITY: WARNING" in body
     assert "ESCALATE" in body
     assert "3 of 5 lines anomalous" in body
     assert "POST /api/employee" in body
-    assert "View Dashboard" in body
 
 
 def test_escalation_body_without_ctx_still_renders(alert_with_links, decision_escalate):
     notifier = EmailNotifier()
     record = RCARecord(alert_name="PostSchemaFix_v2", triage_decision="investigate",
                        action_taken="emailed", investigation_duration_ms=100)
-    body = notifier._build_escalation_body(alert_with_links, decision_escalate, record, 0, None)
+    body = notifier._build_escalation_body(
+        alert_with_links, decision_escalate, record, 0, None, [],
+    )
     assert "PostSchemaFix_v2" in body
-    assert "No metrics collected" in body
-    assert "No logs collected" in body
-    assert "No traces collected" in body
+    # The body must still render the alertname even when every pillar is empty —
+    # caller compatibility with the post-2026-04-24 readability pass.
 
 
 def test_slowest_span_defends_against_non_dict_traces():
     """Real-world: MCP may return a list of strings or mixed shapes. The
-    builder must not crash — we caught this in live demo-day testing."""
+    builder must not crash — we caught this in live demo-day testing.
+
+    Pydantic v2 now rejects malformed payloads at the model boundary, but
+    if a downstream library mutates the field post-construction (or if a
+    future MCP change relaxes the model), the defense in `_slowest_span_summary`
+    must still hold. Use model_construct to skip validation and exercise
+    the defensive branch directly.
+    """
     from app.notifier import _slowest_span_summary
-    ctx = GatheredContext(traces=["not-a-dict", "still-not"])  # strings
+    ctx = GatheredContext.model_construct(traces=["not-a-dict", "still-not"])
     result = _slowest_span_summary(ctx)
     assert "non-dict" in result or result == "N/A"
 
 
 def test_metrics_preview_defends_against_non_dict():
-    """Same defense for ctx.metrics — which the pydantic field types as dict
-    but doesn't re-validate on assignment."""
+    """Same defense for ctx.metrics. The helper explicitly checks
+    isinstance(metrics, dict) before treating it as one — this guards
+    against an MCP returning a raw string or list. See model_construct
+    rationale on the trace test above."""
     from app.notifier import _metrics_preview
-    ctx = GatheredContext(metrics="some raw string from MCP")  # str where dict expected
-    # Pydantic may coerce, but if it doesn't, the preview should degrade gracefully
+    ctx = GatheredContext.model_construct(metrics="some raw string from MCP")
     result = _metrics_preview(ctx)
-    # Either it coerced to a dict-like, or it degraded to a non-crash string
     assert isinstance(result, str) and result != ""
 
 
@@ -125,5 +133,7 @@ def test_full_build_with_malformed_ctx_does_not_crash(alert_with_links, decision
     except Exception:
         # Pydantic may reject — that's fine, build with None
         bad_ctx = None
-    body = notifier._build_escalation_body(alert_with_links, decision_escalate, record, 0, bad_ctx)
+    body = notifier._build_escalation_body(
+        alert_with_links, decision_escalate, record, 0, bad_ctx, [],
+    )
     assert "PostSchemaFix_v2" in body

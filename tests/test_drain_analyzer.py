@@ -11,7 +11,13 @@ from app.drain_analyzer import DrainAnalyzer
 
 @pytest.fixture()
 def drain():
-    """Create a fresh DrainAnalyzer with no persisted state for each test."""
+    """Create a fresh DrainAnalyzer with no persisted state for each test.
+
+    We bypass __init__ to skip the FilePersistence setup (no disk writes
+    in unit tests). The instance attrs we wire up here mirror what real
+    __init__ sets — keep this list in sync with app/drain_analyzer.py.
+    """
+    import threading
     from drain3 import TemplateMiner
     from drain3.template_miner_config import TemplateMinerConfig
     analyzer = DrainAnalyzer.__new__(DrainAnalyzer)
@@ -20,6 +26,8 @@ def drain():
     analyzer._total_lines = 0
     analyzer._total_anomalies = 0
     analyzer._background_task = None
+    analyzer._lock = threading.Lock()
+    analyzer._last_alert_ts = 0.0
     return analyzer
 
 
