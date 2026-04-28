@@ -223,12 +223,15 @@ async def decisions(
 
 
 @app.get("/drain3/stats")
-async def drain3_stats():
+async def drain3_stats(service: str | None = Query(None)):
     # get_stats holds a threading.Lock and iterates all drain3 clusters.
     # Run it in a thread so we don't block the event loop behind any
     # in-flight ingest batches (which also hold the same lock).
+    # Per US-5.1 Phase A, supports `?service=<name>` to scope stats to
+    # one service's miner; without the query param returns the
+    # cross-service aggregate.
     import asyncio as _asyncio
-    return await _asyncio.to_thread(_drain.get_stats)
+    return await _asyncio.to_thread(_drain.get_stats, service)
 
 
 # --- Closed-loop feedback (US-5.3) ---

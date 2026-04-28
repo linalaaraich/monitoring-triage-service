@@ -272,7 +272,9 @@ class TriagePipeline:
         annotated_logs = []
         anomaly_summary = ""
         if ctx.logs:
-            annotated_logs, anomaly_summary = self.drain.annotate_lines(ctx.logs)
+            annotated_logs, anomaly_summary = self.drain.annotate_lines(
+                ctx.logs, service=alert.service or "_unknown",
+            )
             ctx.annotated_logs = annotated_logs
             ctx.anomaly_summary = anomaly_summary
 
