@@ -44,13 +44,18 @@ exemplars:
       severity: ["critical", "warning"]
     decision: "ESCALATE"
     confidence_band: "0.88-0.95"
-    one_line: "JVM heap saturating cgroup limit, OOM-kill cycle confirmed."
+    one_line: "JVM heap saturating cgroup limit because the JVM defaults aren't tuned for the container — OOM-kill cycle confirmed."
     rca: |
-      spring-boot pod is in an OOM-kill loop. container_memory_working_set_bytes
-      saw-toothed twice in the last 30 min, peaking near the cgroup limit. Multiple
-      'java.lang.OutOfMemoryError: Java heap space' lines fired ~12 min apart, matching
-      restart counter increments. GC pause time grew before each crash. The pattern
-      post-dates the most recent deploy — the leak is recent.
+      spring-boot is in a steady-state OOM-kill loop: every ~12 minutes the JVM heap
+      exhausts, the kernel kills the container, and the pod restarts. The mechanism is
+      a JVM-vs-cgroup mismatch — JAVA_TOOL_OPTIONS is unset so the JVM uses ~25% of the
+      cgroup as heap (the default), which produces ~256 MB effective heap for a 1 GiB
+      container limit. Normal traffic exhausts that. The metric proof:
+      container_memory_working_set_bytes peaked near the cgroup limit in two saw-tooth
+      cycles over 30 min; Loki shows multiple `java.lang.OutOfMemoryError: Java heap
+      space` lines about 12 minutes apart matching the restart counter; GC pause time
+      climbs in the 60-90s leading up to each crash. The cycle postdates the most recent
+      deploy — the regression is recent.
     evidence_shape:
       - "container_memory_working_set_bytes peaked at X% of limit, repeating every ~N min"
       - "kube_pod_container_status_restarts_total = N (+M in last 30m)"
@@ -76,11 +81,15 @@ exemplars:
     confidence_band: "0.88-0.95"
     one_line: "Kong is healthy; latency originates upstream — point the operator at the right service."
     rca: |
-      Kong itself is healthy: kong_proxy_latency_ms p95 is in single-digit ms. The
-      observed p95 is upstream time inside a downstream service (commonly spring-boot),
-      dominated by a single child operation (commonly a MySQL query). Trace evidence
-      consistently shows >95% of total latency in the upstream span. Probable cause:
-      query plan regression or downstream resource saturation — not a Kong tuning issue.
+      Kong is the alert subject but not the cause: its own proxy time
+      (kong_proxy_latency_ms p95) is single-digit milliseconds. Almost all of the
+      reported end-to-end p95 is time spent inside the upstream service (commonly
+      spring-boot), dominated by a single child operation — typically a MySQL query
+      that's regressed or a downstream resource that's saturated. Trace evidence shows
+      >95% of total request time in the upstream span; the kong span is a thin shim.
+      The right intervention is in the upstream service (query plan, connection pool,
+      thread pool), not in Kong's tuning. Calling this a "kong p95" issue would point
+      the operator at the wrong layer.
     evidence_shape:
       - "kong_proxy_latency_ms p95 = X ms (Kong's own time, flat)"
       - "kong_http_request_duration_ms p95 = Y ms (total, including upstream)"
@@ -101,13 +110,16 @@ exemplars:
       signal: "metric"
     decision: "DISMISS"
     confidence_band: "0.75-0.90"
-    one_line: "Two consecutive scrape misses, recovered before triage finished. No corroborating anomaly."
+    one_line: "Transient scrape collision or network jitter — target self-recovered before triage finished, no corroborating anomaly anywhere."
     rca: |
-      The target was unreachable for two consecutive scrape intervals and has been
-      healthy since — well before triage gathered context. No correlated alerts, no
-      novel log patterns, no host-level metric anomaly. This is consistent with
-      transient network jitter or scrape collision, not a service outage. No action
-      required.
+      This is transient scrape jitter, not an outage: the target missed two consecutive
+      scrape intervals, then recovered, and has been steadily up since — all of this
+      before the triage pipeline finished gathering context. No alert correlated within
+      ±5 minutes; no novel Drain3 log templates; host-level CPU/memory/network metrics
+      show no perturbation in the window. The signature matches a brief network blip
+      or a scrape-time collision (Prometheus and the target's own work overlapping in
+      a way that blocks the scrape), not an actual service event. The right verdict is
+      DISMISS without action — paging on this would be noise.
     evidence_shape:
       - "up{instance=...} time series: 1,1,...,0,0,1,1,1,... (two zeros, then recovery)"
       - "No correlated alerts in ±5m window"
@@ -120,18 +132,25 @@ exemplars:
   - id: cascade-incident-disk-loki
     archetype: "Cascade incident: 3-4 alerts collapsed into one kill-chain RCA"
     match:
-      alertname: "^(HighDiskUsage|LokiIngestLag|DatasourceNoData|AlertInhibitionTriggered)$"
+      # I-4 (audit 2026-04-28): regex now matches the live rule name
+      # `LokiIngestionRateLow`. Prior version named `LokiIngestLag`, which
+      # is not a rule we provision — it would never fire that alternative.
+      alertname: "^(HighDiskUsage|LokiIngestionRateLow|LokiHighDiskUsage|DatasourceNoData|AlertInhibitionTriggered)$"
       services: ["loki", "monitoring", "grafana", "prometheus"]
       deployment_types: ["docker-vm"]
     decision: "ESCALATE"
     confidence_band: "0.88-0.96"
-    one_line: "Single root cause produced N symptoms within ~12 min — treat as one incident."
+    one_line: "Single root cause (disk pressure / ingest backpressure) produced N symptoms within ~12 min — treat as one incident, fix at the source."
     rca: |
-      A single root cause produced multiple symptoms in a short window. The chain
-      starts at the infrastructure layer (disk pressure, network drop, etc.) and
-      propagates through dependent services until it trips a meta-alert. Each
-      sub-alert is a downstream effect. Fix at the source — remediating each symptom
-      individually wastes operator time.
+      Multiple alerts in this window are symptoms of a single infrastructure-layer
+      failure, not independent events: the chain starts at a saturated resource (the
+      Loki disk filling up, write-ahead-log compaction stalling, network path
+      degrading) and propagates through dependent services until a meta-alert fires.
+      Disk pressure on monitoring-vm causes Loki to drop ingest, which causes
+      LokiIngestionRateLow; Loki's slow responses to Grafana cause DatasourceNoData;
+      enough downstream symptoms trip AlertInhibitionTriggered. The right intervention
+      is at the saturated resource — remediating each downstream symptom individually
+      wastes operator time and doesn't stop the chain.
     evidence_shape:
       - "Sub-alert 1: HH:MM <name> — first observable effect"
       - "Sub-alert 2: HH:MM+N <name> — downstream of 1 because <mechanism>"
@@ -152,15 +171,19 @@ exemplars:
       signal: "log"
     decision: "ESCALATE"
     confidence_band: "0.82-0.92"
-    one_line: "Novel log template never seen before, first appearance correlates with a recent deploy."
+    one_line: "Recent deploy introduced a regression — Drain3 caught it via a novel error template that has never appeared in 14 days of prior logs."
     rca: |
-      A novel error template has been firing since HH:MM, which is N minutes after
-      the most recent helm/deploy event. The template never appeared in the previous
-      14 days of logs (Drain3 cluster #N is new). Trace evidence confirms affected
-      operations. The error rate is currently below the metric-alert floor, so this
-      would not have been caught without log-template novelty detection. The strong
-      temporal correlation with the deploy strongly suggests a regression in the
-      upgrade.
+      The most recent deploy of {service} introduced a regression: a novel error log
+      template appeared N minutes after the helm rollout completed and has been
+      recurring since. Drain3 is the canary here — the template is genuinely new
+      (cluster #N never observed in the prior 14 days of logs), and the metric layer
+      is silent because the error rate is still below the fire threshold for
+      HighFrontendErrorRate / HighErrorRate. Trace evidence confirms the affected
+      operation: K traces tagged with db.error / status=error, all on requests that
+      hit the changed code path. The temporal alignment (deploy at HH:MM-N min →
+      first novel template at HH:MM) is the diagnostic — without log-template novelty,
+      this regression would have crept in below alert thresholds until enough users
+      hit it to move the rate.
     evidence_shape:
       - "Novel Drain3 cluster #N, first seen HH:MM (template: '<verbatim>')"
       - "Cluster never observed in last 14 days"
@@ -175,6 +198,11 @@ exemplars:
     doc_anchor: "scenario-5--drain3-self-fires-on-a-novel-post-deploy-error-template"
 
   - id: bounded-agency-resolves-inconclusive
+    # FORWARD-LOOKING (audit 2026-04-28): regex names HighErrorRate /
+    # HighFrontendErrorRate, neither of which is a provisioned Grafana
+    # rule yet. This exemplar will activate once those rules ship via
+    # monitoring-project. Until then it is reachable only through
+    # explicit `get_by_id` from the bounded-agency tool path.
     archetype: "First pass INCONCLUSIVE; one extra MCP query resolves to ESCALATE"
     match:
       alertname: "^High(Frontend)?ErrorRate$"
@@ -182,14 +210,19 @@ exemplars:
       signal: "metric"
     decision: "ESCALATE"
     confidence_band: "0.78-0.88"
-    one_line: "First pass thin; one targeted MCP retry made the upstream attribution unambiguous."
+    one_line: "Frontend 5xx rate is the symptom; the upstream is admission-rejecting requests (saturated thread/connection pool or tripped circuit breaker)."
     rca: |
-      Initial evidence was thin — error rate up but no traces and minimal logs in
-      the alerting service. A bounded-agency retry pulled K traces from the upstream
-      service, of which most show {upstream} returning 5xx in <50 ms — too fast to
-      be timeouts. This pattern is consistent with the upstream rejecting requests
-      at admission (saturated thread pool, circuit-breaker tripped, connection-pool
-      exhausted). The user-visible 5xx in {service} is the downstream signature.
+      The frontend's 5xx rate is the user-visible symptom; the actual failure is one
+      hop upstream. Initial evidence in the alerting service was thin (error rate up,
+      but few traces and minimal logs there because the requests don't get far enough
+      to log anything). A bounded-agency MCP retry pulled K traces from the upstream
+      service and showed the diagnostic pattern: most upstream calls return 5xx in
+      <50ms — too fast to be timeouts, which means the upstream is rejecting at
+      admission rather than failing during work. That admission-time rejection
+      signature points to one of three saturation modes: tomcat thread pool exhausted,
+      circuit-breaker tripped, or HTTP connection pool drained. The frontend itself
+      is healthy by other metrics; it is faithfully forwarding the upstream's "no" to
+      users.
     evidence_shape:
       - "Initial: error rate up from baseline; alerting service traces empty"
       - "Bounded-agency tool: jaeger.get_traces(service={upstream}, status=503, limit=25)"
@@ -210,14 +243,18 @@ exemplars:
       signal: "metric"
     decision: "DISMISS"
     confidence_band: "0.80-0.95"
-    one_line: "Within +1σ of last-week-same-hour baseline — expected ramp, not an anomaly."
+    one_line: "Static-threshold blind spot to traffic seasonality — current value is a normal time-of-day ramp, not a degradation."
     rca: |
-      The current value is materially above the static threshold but only +0.4σ above
-      the same-hour baseline from one week ago (computed via stddev_over_time + offset 7d).
-      This shape matches the seasonal pattern observed across the prior 4 weeks at the
-      same time-of-day and day-of-week. No corroborating anomaly in logs or traces. The
-      alert is firing because of a static-threshold blind spot to traffic seasonality,
-      not because of a real degradation.
+      This is the static threshold misfiring on a normal traffic ramp, not a real
+      degradation: the current value is +0.4σ above the same-hour baseline from one
+      week ago (stddev_over_time + offset 7d), well within the natural seasonality of
+      the load curve. The shape matches the prior 4 weeks at this same day-of-week
+      and time-of-day — Tuesday-9am and Thursday-2pm both look like this, every week.
+      Logs and traces are quiet — no error rate change, no novel templates, no slow
+      spans. The alert is signal about the rule design (static threshold can't track
+      traffic seasonality), not about the system's actual health. Firing-but-no-action
+      patterns like this are how operators learn to ignore alerts; the right response
+      is to fix the rule.
     evidence_shape:
       - "Current: X% (above static threshold T%)"
       - "Same-hour-same-day baseline (last 7d): mean X'%, σ Y%"
@@ -242,14 +279,20 @@ exemplars:
       services: ["*"]
     decision: "ESCALATE"
     confidence_band: "0.65-0.85"
-    one_line: "LLM verdict was DISMISS, but a recent operator override on a similar alert flipped the routing to ESCALATE for human review."
+    one_line: "Operator override on a recent similar alert reverses the LLM's DISMISS — escalating for human review per the standing override policy."
     rca: |
-      The LLM's first-pass verdict was DISMISS — the alert matches a known seasonal
-      pattern (e.g. weekend batch ETL). However, an on-call engineer recently marked
-      a similar alert (alertname match + ±2h time-of-day match + same service) as a
-      real incident. To honour that override policy, this alert is being escalated for
-      human review. If this firing is genuinely routine, /feedback/confirm will
-      down-weight the override; if real, /feedback/override will reinforce it.
+      The override is the cause of the escalation, not the alert content itself. The
+      LLM's first-pass verdict was DISMISS (the alert matches a known seasonal pattern,
+      e.g. weekend batch ETL), and on a typical day this would have stopped at the
+      pre-LLM gate. However, an on-call engineer recently flagged a similar alert
+      (alertname match + ±2h time-of-day match + same service) as a real incident
+      via /feedback/override, and that override is still in its active window. The
+      pipeline is honouring that operator decision: similar future fires escalate
+      pending fresh human review. If this firing is genuinely routine, the
+      /feedback/confirm endpoint down-weights the override; if it is real, the next
+      /feedback/override reinforces it. The system is learning from operator decisions
+      — the routing reflects the most recent ground truth, not the LLM's judgement
+      alone.
     evidence_shape:
       - "LLM verdict (this pass): DISMISS, confidence ~0.79"
       - "Recent operator override: <YYYY-MM-DD>, similarity=high (alertname + time-of-day + service)"
@@ -262,6 +305,13 @@ exemplars:
     doc_anchor: "scenario-8--closed-loop-feedback-us-53-operator-override-teaches-the-system"
 
   - id: crashloop-bad-config
+    # PARTIALLY FORWARD-LOOKING (audit 2026-04-28): regex names
+    # KubePodCrashLooping which is not yet a provisioned Grafana rule
+    # (the existing platform catches CrashLoopBackOff via TargetDown
+    # because the pod's scrape target goes down too). The
+    # KubePodCrashLooping alternative will activate when a
+    # `kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff"}`
+    # rule ships.
     archetype: "App boot failure / CrashLoopBackOff from a bad config or migration"
     match:
       alertname: "^(KubePodCrashLooping|TargetDown)$"
@@ -270,15 +320,20 @@ exemplars:
       signal: "metric"
     decision: "ESCALATE"
     confidence_band: "0.92-0.98"
-    one_line: "Pod fails its boot phase repeatedly — almost always a recent config or migration change."
+    one_line: "Recent config / migration change broke the boot path — every restart aborts at the same boot step before the work loop starts."
     rca: |
-      The pod has restarted N times in the last 5 min and never reaches steady state.
-      Logs show every restart aborts at a specific boot step (Liquibase migration,
-      config-file parse, env-var validation, etc.) with a precise error referencing
-      a config value. Drain3 cluster for that exact error is brand-new since the most
-      recent rollout. Memory/CPU never climb because the pod doesn't reach the work
-      loop. Cluster is in CrashLoopBackOff with exponential backoff already at N s;
-      user-facing endpoints fronted by this service are returning upstream errors.
+      The pod can't get through its boot phase: it restarts, executes a few seconds of
+      bootstrap code, hits a precise error at a specific boot step, and the kernel
+      cycles it again. The repeating boot-step error is the cause; CrashLoopBackOff
+      and the eventually-firing TargetDown are downstream symptoms of "no working pod
+      ever exists". Logs show every restart terminating at the same line — a
+      Liquibase migration that can't apply, a config-file parse that fails, an env-var
+      validator that rejects an empty value, or a Spring bean that fails to wire. The
+      Drain3 cluster for that exact error is brand-new since the most recent rollout
+      (i.e., the bad change is in this revision). Memory and CPU never climb because
+      the pod never reaches the work loop. User-facing endpoints fronted by this
+      service are returning upstream errors because the upstream simply doesn't exist
+      right now.
     evidence_shape:
       - "kube_pod_container_status_restarts_total rate(5m)*300 = N (staircase shape)"
       - "kube_pod_status_phase{phase='Waiting',reason='CrashLoopBackOff'} = 1"
@@ -292,6 +347,10 @@ exemplars:
     doc_anchor: "scenario-9--app-boot-failure--crashloopbackoff-from-a-bad-config-map"
 
   - id: network-firewall-attribution
+    # PARTIALLY FORWARD-LOOKING (audit 2026-04-28): regex names
+    # HighKongUpstreamErrorRate / HighFrontendErrorRate which are not
+    # yet provisioned. HighKongP95Latency and TargetDown are live;
+    # the others activate when the missing rules ship.
     archetype: "Connectivity break (security group / firewall / network policy) misattributed to app failure"
     match:
       alertname: "^(HighKongUpstreamErrorRate|HighKongP95Latency|HighFrontendErrorRate|TargetDown)$"
@@ -299,17 +358,21 @@ exemplars:
       signal: "network"
     decision: "ESCALATE"
     confidence_band: "0.82-0.92"
-    one_line: "Network-layer break, not an application failure — RCA names the firewall/SG/NetworkPolicy change explicitly."
+    one_line: "A recent infrastructure change (terraform apply / SG / NetworkPolicy) is blocking previously-allowed traffic — the app layer is healthy, the path between layers is severed."
     rca: |
-      The alerting service (Kong / frontend) is the symptom; the apparent target
-      (spring-boot) is reporting healthy by its own metrics and `up=1`. Logs in the
-      target service show NO inbound requests during the alert window. Trace evidence
-      shows connect-timeout / connect-reset on the upstream connection, with no
-      child spans in the target. Node-level network metrics show a packet-rate drop
-      coincident with the most recent infrastructure change (terraform apply / network
-      policy edit / SG modification). The break is at the network layer, not the
-      application — a firewall / security-group / NetworkPolicy change blocking
-      previously-allowed traffic.
+      This is a network-layer break, not an application failure: a recent
+      infrastructure change has revoked previously-allowed traffic between two
+      services that the app layer still expects to reach. The diagnostic split is
+      what makes this readable — Kong (or the alerting service) sees connect-timeout
+      / connect-reset on its upstream connection and surfaces 5xx; meanwhile the
+      apparent target (spring-boot) is reporting healthy by its own metrics
+      (up{}=1, application thread pools idle) and Loki shows zero inbound requests
+      landing in the target during the alert window. Jaeger confirms the gap
+      explicitly: kong spans show connect-timeout, no child spans appear in the
+      target. node_network_transmit_packets_total drops K% at the same minute as the
+      most recent terraform apply / NetworkPolicy edit / SG modification. The fix is
+      at the network layer (revert the IaC change, restore the CIDR/policy), not at
+      either application.
     evidence_shape:
       - "kong_upstream_target_health{upstream='{target}'} flipped 1→0 at HH:MM"
       - "up{job='{target}'}=1 — target is healthy at the application layer"
@@ -325,6 +388,10 @@ exemplars:
     doc_anchor: "scenario-10--aws-security-group-change-silently-blocks-kong--spring-boot"
 
   - id: tls-cert-expiry-pre-failure
+    # FORWARD-LOOKING (audit 2026-04-28): regex names alerts
+    # (TLSCertExpiringSoon / CertificateExpiry / ProbeSSL*) that are
+    # not yet provisioned anywhere in the platform. Activates when a
+    # blackbox-exporter or cert-manager-based expiry rule ships.
     archetype: "Pre-failure TLS / cert expiry caught before user impact"
     match:
       alertname: "^(TLSCertExpiringSoon|CertificateExpiry|ProbeSSL.*)$"
@@ -333,16 +400,18 @@ exemplars:
       severity: ["warning"]
     decision: "ESCALATE"
     confidence_band: "0.88-0.96"
-    one_line: "Cert expires in N days; renewal has been silently failing — act now, before users see broken HTTPS."
+    one_line: "cert-manager has been silently failing renewal for K days because the ACME challenge path is broken — act now while the cert is still serving."
     rca: |
-      PromQL `(probe_ssl_earliest_cert_expiry - time()) / 86400` returned N days. The
-      endpoint is currently serving fine (probe_success=1), so this is a pre-failure
-      alert: act before users see broken HTTPS. cert-manager has been failing renewal
-      for K days: cert_manager_certificate_ready_status has been 0 since YYYY-MM-DD
-      and Drain3 cluster #N (renewal-failure template) is novel since the same date
-      with M recurrences. The renewal is failing because cert-manager's challenge can't
-      reach the expected path — typically an ingress / route change has broken the
-      ACME HTTP-01 challenge URL.
+      The renewal pipeline is the failing component, not the cert itself. cert-manager
+      has been unable to renew this certificate for K days — cert_manager_certificate_ready_status
+      has been 0 since YYYY-MM-DD, and Drain3 has a novel renewal-failure log template
+      from the same date with M recurrences. The cert is still serving fine right now
+      (probe_success=1), which is exactly why this kind of pre-failure alert is
+      valuable: there is still time to fix the renewal pipeline before the cert
+      actually expires and users see broken HTTPS. The most likely cause is an
+      ingress / route change that broke the ACME HTTP-01 challenge URL — recent
+      monitoring-project / k3s-images commits should be inspected for ingress
+      modifications. Days remaining: N (computed from probe_ssl_earliest_cert_expiry).
     evidence_shape:
       - "probe_ssl_earliest_cert_expiry → N days remaining (declining linearly)"
       - "cert_manager_certificate_ready_status{name='...'} = 0 since YYYY-MM-DD"
@@ -363,12 +432,17 @@ exemplars:
 default:
   id: generic-sre-shape
   archetype: "Generic three-pillar RCA"
-  one_line: "Match the structure: cite observed value, cross-check pillars, name a probable cause, propose a state-changing remediation."
+  one_line: "Lead with a NAMED cause; cite metrics/logs/traces in support; rank remediation cheap-and-reversible first."
   rca: |
-    State the observed value and PromQL first. Cross-check across metrics, logs, and
-    traces — name which pillars corroborate and which (if any) are silent. Identify
-    the most likely cause by mechanism (not just correlation). Suggest 2-4 concrete
-    remediation steps in irreversibility order: cheapest reversible first.
+    Name the failing component or mechanism in the first sentence — a saturated pool,
+    a stalled process, a config drift, a recent deploy regression, an exhausted disk,
+    a broken upstream link. Then explain HOW you know: which metric values, which
+    log templates, which trace span breakdowns, which pillar is silent and why. Use
+    plain language for raw expressions (translate "p95 = 8487 ms" into "95% of
+    requests took longer than 8.5 seconds"); the raw form goes in evidence. Finish
+    with 2-4 concrete state-changing remediations ordered by reversibility — cheap
+    reverts first, infrastructure-level changes last. Never let "value above
+    threshold" be the conclusion; that is the alert restating itself.
   evidence_shape:
     - "Observed value (with unit + delta from threshold)"
     - "One specific log line OR Drain3 cluster reference"

@@ -57,6 +57,41 @@ _BANNED_PHRASE_PATTERNS: list[re.Pattern] = [
 
 
 # ---------------------------------------------------------------------------
+# Surface-only RCA prose — added 2026-04-28 after operator feedback.
+#
+# Telemetry data is the means, not the end of an RCA. The LLM's prior shape
+# was to lead with the PromQL expression and the observed value, then
+# conclude "this indicates that there are <X> experiencing <Y>" — which is
+# the alert restating itself, not a diagnosis. SYSTEM_PROMPT rule A and the
+# few-shot examples now demand a NAMED cause in the first sentence; this
+# validator is the safety net that catches when the model ignores it.
+#
+# Detection strategy: scan the RCA's first sentence for known surface-only
+# lede patterns. We only fire on the OPENING sentence because rule A is
+# specifically about how the analysis starts; later mentions of PromQL in
+# service of evidence are fine and expected.
+# ---------------------------------------------------------------------------
+_SURFACE_ONLY_LEDE_PATTERNS: tuple[re.Pattern, ...] = (
+    # "PromQL `<expr>` reported|returned <value> above|below threshold..."
+    re.compile(r"^\s*(?:The\s+)?PromQL\s+(?:expression\s+)?[`'\"]", re.I),
+    # "PromQL <name>(...) reported..."
+    re.compile(r"^\s*(?:The\s+)?PromQL\s+\w+\s*\(", re.I),
+    # "The metric / The query <X> reports / shows / returned <value>..."
+    re.compile(r"^\s*The\s+(?:metric|query|expression|value|observation)\s+\S+\s+(?:reports|reported|shows|showed|returned|indicates|indicated)\b", re.I),
+    # "<metric_name> = <value>" as the entire opening — raw evaluation pasted as prose
+    re.compile(r"^\s*\w+(?:\{[^}]*\})?\s*[=<>]\s*[0-9]", re.I),
+)
+
+# Hedge tails that signal the RCA never went past the symptom — "indicates that
+# there are requests experiencing high latency" is the alert in different words.
+_SURFACE_ONLY_HEDGE_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"\bindicates?\s+that\s+there\s+(?:are|is|may\s+be)\s+\S+\s+(?:experiencing|reporting|seeing|having)\b", re.I),
+    re.compile(r"\bsuggests?\s+(?:that\s+)?(?:high|elevated|increased|abnormal|unusual)\s+\w+\b", re.I),
+    re.compile(r"\b(?:appears|seems)\s+to\s+be\s+(?:experiencing|seeing|having)\s+(?:high|elevated|abnormal)\b", re.I),
+)
+
+
+# ---------------------------------------------------------------------------
 # Vague actions — commands that don't help the operator do anything.
 # Pattern: must START with a vague verb AND have no shell/URL/query payload.
 # ---------------------------------------------------------------------------
@@ -238,6 +273,35 @@ def validate(
             report.banned_phrase_hits.append(phrase)
             report.violations.append(f"banned phrase in rca/reason: {phrase!r}")
 
+    # --- 1b. Surface-only RCA scan (added 2026-04-28 — rule A philosophy update).
+    # Catches "PromQL <expr> reported X" ledes and "indicates that there are X
+    # experiencing Y" hedge tails — both are tells of a model that restated the
+    # alert instead of naming a cause.
+    rca_text = (decision.rca or "").strip()
+    if rca_text:
+        # Take the first sentence (up to first period that's followed by a space
+        # or end-of-string). Defensive split — RCAs are short prose.
+        first_sentence = re.split(r"\.(?:\s|$)", rca_text, maxsplit=1)[0]
+        for pattern in _SURFACE_ONLY_LEDE_PATTERNS:
+            if pattern.search(first_sentence):
+                hit = first_sentence[:80]
+                report.banned_phrase_hits.append(f"surface-only lede: {hit!r}")
+                report.violations.append(
+                    "surface-only RCA lede — first sentence restates the alert "
+                    "(PromQL/metric value) instead of naming a cause. See SYSTEM_PROMPT rule A."
+                )
+                break
+    for pattern in _SURFACE_ONLY_HEDGE_PATTERNS:
+        m = pattern.search(combined)
+        if m:
+            phrase = m.group(0)
+            report.banned_phrase_hits.append(f"surface-only hedge: {phrase!r}")
+            report.violations.append(
+                f"surface-only hedge in rca/reason: {phrase!r} — this is the alert "
+                "in different words, not a diagnosis."
+            )
+            break
+
     # --- 2a. Vague-action scan on suggested_actions
     kept_actions: list[str] = []
     for a in decision.suggested_actions:
@@ -305,12 +369,25 @@ def build_retry_feedback(report: ValidationReport) -> str:
     parts = []
     if report.banned_phrase_hits:
         phrases = ", ".join(f"{p!r}" for p in report.banned_phrase_hits)
-        parts.append(
-            f"Your previous response contained forbidden phrase(s): {phrases}. "
-            "The system-prompt rule B forbids these standalone — you MUST name which "
-            "pillar returned nothing and WHY, with a concrete hypothesis. Rewrite "
-            "without any of the above phrases."
-        )
+        # Distinguish surface-only feedback from data-thin (rule B) feedback —
+        # the LLM needs different guidance for each.
+        is_surface_only = any("surface-only" in p for p in report.banned_phrase_hits)
+        if is_surface_only:
+            parts.append(
+                f"Your previous response had a surface-only RCA lede: {phrases}. "
+                "Rule A: the first sentence MUST name a cause (a component, link, "
+                "process, queue, config, or change), not restate the alert. PromQL "
+                "expressions and observed values belong in `evidence`, not as the "
+                "diagnosis. Rewrite — first sentence names what is broken and why; "
+                "metrics / logs / traces follow as supporting evidence."
+            )
+        else:
+            parts.append(
+                f"Your previous response contained forbidden phrase(s): {phrases}. "
+                "The system-prompt rule B forbids these standalone — you MUST name which "
+                "pillar returned nothing and WHY, with a concrete hypothesis. Rewrite "
+                "without any of the above phrases."
+            )
     if report.rejected_actions:
         details = "; ".join(f"{a!r} ({why})" for a, why in report.rejected_actions[:5])
         investigation_count = sum(1 for _, why in report.rejected_actions if "investigation_only" in why)

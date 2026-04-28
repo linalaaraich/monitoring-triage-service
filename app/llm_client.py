@@ -32,7 +32,35 @@ Your job:
 6. If INCONCLUSIVE: explain what additional information would be needed.
 
 CRITICAL output quality rules (must follow):
-A. The alert itself ALWAYS carries useful signal: a PromQL expression, a current observed value, and a time window. Always start your RCA by restating the rule's PromQL, the observed value, and whether the value is materially above or below the threshold. This is data — treat it as such.
+
+A. **Start the RCA with the CAUSE, not the symptom.** The alert already told the
+   operator a metric crossed a threshold — restating that is not analysis. Your job
+   is to NAME what is broken: a component, link, process, queue, connection pool,
+   deploy, config change, dependency, or saturation point. The first sentence must
+   say WHAT failed and WHY; the metric / log / trace evidence comes after, in
+   service of that conclusion.
+   BAD lede: "PromQL `histogram_quantile(...)` reported 8487 ms, which is significantly
+             above the adaptive baseline. This indicates that there are requests
+             experiencing unusually high latencies."
+   GOOD lede: "Kong upstream-connection pool to spring-boot is saturated: 95% of
+             requests are queueing >8 s waiting for a backend slot, while spring-boot
+             handlers themselves complete in <200 ms (Jaeger trace 7f3a2c). Likely
+             cause: spring-boot's JDBC pool (max=20) exhausted by long-running
+             queries — connection waits cascade up to kong's upstream layer."
+   Telemetry is the means, not the end. If the only thing you can say is "value above
+   threshold," that is INCONCLUSIVE — name it as such and propose what additional
+   evidence would resolve it; do not dress up a symptom as a diagnosis.
+
+J. **Translate raw expressions into plain language.** Don't paste a `histogram_quantile`
+   / `rate` / `sum by` PromQL block as the lede and expect the operator to mentally
+   parse it. The PromQL goes in `evidence`; the prose names the human-meaningful
+   quantity. Examples:
+     - "p95 latency 8487ms" → "95% of requests took longer than 8.5 seconds — user-visible slowness"
+     - "container_memory_working_set_bytes / spec_memory_limit_bytes = 0.984" → "the pod is sitting at 98% of its memory cap"
+     - "up{instance=...} = 0" → "Prometheus has not been able to reach this scrape target for 2+ minutes"
+   The PromQL still appears in the evidence list; what changes is that the prose
+   explains what it MEANS for a human reader.
+
 B. If any pre-gathered pillar (metrics/logs/traces) is empty, name WHICH pillar returned nothing and WHY that might be (e.g. "Loki returned 0 lines for service=X — possible causes: service not emitting logs, wrong label, shipper down"). Never write the phrase "insufficient data" as a standalone conclusion — always pair it with a named missing source and a concrete hypothesis to test next.
 C. If the "Prior decisions for this alert" section below shows past decisions that hedged (tagged data_starved), DO NOT repeat the same hedge. Use the available signal — even if thin — to propose a specific hypothesis, and suggest concrete remediation the human can check.
 D. Prefer ESCALATE over INCONCLUSIVE when you can at least name a probable cause. INCONCLUSIVE should be rare and always accompanied by a specific remediation: what query to run, what label to add, which shipper to restart.
@@ -95,8 +123,8 @@ You MUST return JSON matching the schema below. The Ollama runtime validates at 
   "decision": "ESCALATE" | "DISMISS" | "INCONCLUSIVE",
   "severity": "critical" | "warning" | "info",
   "confidence": <float 0.0-1.0>,
-  "reason": "<one-line summary>",
-  "rca": "<2-5 sentences; start by restating observed value + PromQL>",
+  "reason": "<one-line summary that NAMES a cause, not a symptom>",
+  "rca": "<2-5 sentences; first sentence names a specific cause (component / link / process / config / change). Metric/log/trace evidence follows in support>",
   "anomaly_summary": "<Drain3 findings or '' if none>",
   "suggested_actions": [<2-4 concrete commands/queries/URLs — see rule E>],
   "evidence": [<specific metric values / log lines / trace IDs — see rule F>]
@@ -122,8 +150,8 @@ EXPECTED OUTPUT:
   "decision": "ESCALATE",
   "severity": "critical",
   "confidence": 0.92,
-  "reason": "spring-boot OOM-killing repeatedly: 1Gi container limit + unset JVM heap → ~256 MB effective, exhausted by normal load. Latency spike is downstream of GC thrashing.",
-  "rca": "PromQL `container_memory_working_set_bytes / container_spec_memory_limit_bytes * 100` returned 98.4% on spring-boot pod, sustained 8 minutes. Loki shows 4 `OutOfMemoryError: Java heap space` lines in the last 60s. The container limit is 1Gi (kubectl get deploy/spring-boot showed `limits.memory=1Gi`) and JAVA_TOOL_OPTIONS is unset, so the JVM defaults to ~25% of the cgroup → ~256 MB effective heap, which normal traffic exhausts. Pod restart count is 45, confirming a steady-state OOMKill loop. The correlated HighP95Latency alert is downstream — Java GC pauses block request threads and inflate p95.",
+  "reason": "spring-boot is in an OOM-kill loop because the JVM is using its default heap fraction (~25% of the cgroup) instead of a tuned value — the 1Gi container limit produces only ~256 MB effective heap, which normal traffic exhausts.",
+  "rca": "spring-boot is in a steady-state OOM-kill loop: the JVM heap is sized as a fraction of the cgroup, but JAVA_TOOL_OPTIONS is unset so the JVM falls back to its default of ~25% of the 1 GiB container limit — about 256 MB of effective heap, which normal traffic exhausts every ~12 minutes. The pod has restarted 45 times. Loki shows the smoking gun: 4 `OutOfMemoryError: Java heap space` lines in the last minute, and the working-set memory is sitting at 98% of the container cap (sustained 8 minutes). The correlated HighP95Latency on the same service is downstream of this — Java GC pauses block request threads while the heap is being reclaimed, inflating p95 every time the cycle approaches the limit.",
   "anomaly_summary": "",
   "suggested_actions": [
     "kubectl set resources deploy/spring-boot -n app --limits=memory=2Gi --requests=memory=1Gi — raise headroom out of OOMKill range",
@@ -154,8 +182,8 @@ EXPECTED OUTPUT:
   "decision": "DISMISS",
   "severity": "info",
   "confidence": 0.75,
-  "reason": "Single-sample spike 20ms over threshold; next scrape p95 back to 340ms; no supporting log/trace anomalies.",
-  "rca": "PromQL `histogram_quantile(0.95, ...)` reported 1020 ms at fire time, briefly crossing the 1000 ms threshold by 2%. The next scrape interval dropped p95 back to 340 ms, and the slowest Jaeger trace in window was 340 ms — no individual request exceeded the threshold. 50 Loki lines show no errors or exceptions. This matches the pattern seen 14 times in the last 24h on this rule, all of which have been dismissed.",
+  "reason": "Single-sample bucket-edge artifact, not a real latency event — p95 returned to 340 ms within one scrape interval and no individual request exceeded the threshold.",
+  "rca": "This is a single-scrape statistical artifact, not a real slowdown. p95 briefly read 1020 ms (2% over the 1000 ms threshold) for one 10-second sample, then dropped back to 340 ms on the very next scrape. The slowest Jaeger trace in the alert window was 340 ms — i.e., no actual request was over threshold; the histogram bucket edge moved the p95 estimate above 1000 ms transiently. Loki returned 50 lines of clean INFO logs with no error or exception. The same single-sample blip has fired 14 times in the last 24 h on this rule and been dismissed every time, which is itself the signal that the threshold is too tight for the bucket distribution.",
   "anomaly_summary": "0 of 50 lines anomalous",
   "suggested_actions": [
     "Edit monitoring-project/roles/grafana/templates/alertrules.yml.j2: raise HighP95Latency threshold from 1000 to 1200, then run `ansible-playbook -i inventory/tailnet.yml playbooks/grafana.yml` — current threshold fires on 14 false positives in 24h",
@@ -184,8 +212,8 @@ EXPECTED OUTPUT:
   "decision": "ESCALATE",
   "severity": "critical",
   "confidence": 0.70,
-  "reason": "Scrape target 10.0.1.68:9100 (node-exporter on monitoring-vm) unreachable 2+ min; metric/log/trace pillars expected-empty because we can't probe the down target or its logs.",
-  "rca": "PromQL `up == 0` returned 0 for instance 10.0.1.68:9100 — the node-exporter on the monitoring VM. Metrics from this target are unavailable by definition (that's what's being alerted), and Loki has no service=monitoring logs because Grafana/node-exporter on the monitoring VM are deployed via docker-compose, not k8s, and ship logs directly via docker rather than through the app log pipeline. The most likely causes, in order, are: (1) node-exporter container stopped or crashed on monitoring-vm, (2) network path between Prometheus and monitoring-vm is broken, (3) Prometheus scrape config drift.",
+  "reason": "node-exporter on the monitoring VM is unreachable to Prometheus — most likely the container stopped or crashed; secondary candidates are network-path break or Prometheus scrape config drift.",
+  "rca": "node-exporter on the monitoring VM (10.0.1.68:9100) is the failing component: Prometheus has been unable to reach its scrape endpoint for 2+ minutes. The pillar pattern matches 'target itself is down' — Prometheus can't pull metrics from the dead target, and Loki has no service=monitoring lines because the monitoring stack runs via docker-compose (deployment_type=docker-vm) and ships logs through docker's own pipeline rather than through the app log shipper. Ranked causes: (1) the node-exporter container is stopped or crashed (most likely — single-target failure with no upstream symptoms); (2) network path between Prometheus and the monitoring VM is broken (would also affect grafana/loki/jaeger scrapes — verify these are still up); (3) Prometheus scrape config drift after a recent monitoring-project deploy.",
   "anomaly_summary": "",
   "suggested_actions": [
     "ssh deploy@observability-rca-monitoring 'docker compose -f /opt/monitoring/compose.yml up -d --force-recreate node-exporter' — redeploy the container; first action covers both \"stopped\" and \"unhealthy\" cases",
@@ -213,10 +241,13 @@ attribution, and pre-failure TLS expiry.
 For every alert, the prompt builder pre-selects the exemplar that best matches
 on alertname + service + deployment_type + signal, and injects it into the
 user message below as `## Reference exemplar`. **Read it first.** Use it as a
-structural target — the level of specificity in the RCA, the shape of evidence
-to cite, the kind of state-changing remediation to suggest. Do NOT copy its
-facts. THIS alert's facts come from the pre-gathered context (metrics, logs,
-traces, Drain3, observed value).
+structural target — the SHAPE of the RCA prose (cause-first, plain-language,
+mechanism-naming), the kind of evidence to cite (specific metric values, log
+templates, trace span breakdowns), and the kind of state-changing remediation
+to suggest. Do NOT copy its facts. THIS alert's facts come from the
+pre-gathered context (metrics, logs, traces, Drain3, observed value). The
+exemplar's lede is calibrated to lead with a named cause — match that, not
+"<symptom> is above threshold."
 
 If the injected exemplar's archetype clearly does not fit (your evidence
 points elsewhere), say so explicitly in the RCA and reason from the actual
@@ -229,7 +260,7 @@ if you have a specific reason to.
 
 ---
 
-Respond with valid JSON only. Start your RCA by restating the observed value and PromQL."""
+Respond with valid JSON only. Your RCA's first sentence MUST name a probable cause (a component / link / process / queue / config / change). Cite metrics, logs, and traces as supporting evidence after the diagnosis — never as the diagnosis itself."""
 
 
 def pick_primary_value(values: dict) -> tuple[str | None, float | None]:

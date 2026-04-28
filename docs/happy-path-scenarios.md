@@ -2,7 +2,19 @@
 
 These eight scenarios describe the full CIRES triage pipeline running cleanly end-to-end: Grafana fires an alert, the service deduplicates, gathers context from Prometheus / Loki / Jaeger via the MCP servers in parallel, Drain3 annotates the logs, Ollama (`qwen2.5:7b-instruct`) on the GPU host produces a structured RCA, the validator passes it, an email is sent on ESCALATE, and the row lands on the dashboard with all evidence intact. Each scenario lists the alert payload, what each pillar contributed, the LLM's verdict, and the operator-facing artifacts (email + dashboard row + RCA history).
 
-The deployment topology assumed throughout: k3s cluster (`observability-rca-k3s`, `10.0.1.194`) hosts `spring-boot`, `kong`, `mysql`, `frontend`, `otel-collector`. Monitoring VM (`observability-rca-monitoring`, `10.0.1.68`) hosts Prometheus, Loki, Jaeger, Grafana via docker-compose. Triage service runs on `cires-ai` (Lina's laptop, Tailscale MagicDNS) with Ollama on the GTX 1060.
+## RCA prose quality — telemetry is the means, not the end
+
+The RCA shape every scenario below demonstrates, formalised after operator feedback 2026-04-28:
+
+1. **First sentence names a cause.** Not the symptom, not the metric value, not the PromQL — a specific failing component, link, process, queue, config, or change. "spring-boot is in an OOM-kill loop because the JVM heap defaults to ~25% of the cgroup" is a cause. "p95 latency 8487ms above threshold" is the alert in different words.
+2. **Translate raw expressions into plain language.** "p95 latency 8487ms" → "95% of requests took longer than 8.5 seconds — user-visible slowness." The PromQL itself goes in the `evidence` list, not the prose.
+3. **Use telemetry to support the named cause, not as the conclusion.** Trace span breakdowns that prove the cause is in the upstream's connection pool. Log templates that show the regression. Metric saw-tooth shapes that prove a leak. The prose says what's broken; the evidence proves it.
+4. **Drill past the symptom.** "High latency" is never the answer. "Connection pool saturated because of long-running queries from the new dashboard endpoint" is. Use traces and logs to localize.
+5. **Rank suggested actions by reversibility.** Cheap reverts first; infrastructure changes last. State-changing only — investigation belongs in the prose and `evidence`, not in `suggested_actions`.
+
+This philosophy is enforced in three places: `SYSTEM_PROMPT` rules A and J (in `app/llm_client.py`), exemplar `rca` fields (`app/exemplars/library.yaml`) which serve as structural calibration targets, and `app/response_validator.py` which scans for surface-only ledes ("PromQL `<expr>` reported `<value>`...") and surface-only hedges ("indicates that there are X experiencing Y") and rejects them. See decisions-log entry D19.
+
+The deployment topology assumed throughout: k3s cluster (`observability-rca-k3s`, `10.0.1.194`) hosts `spring-boot`, `kong`, `frontend`, `otel-collector`. Monitoring VM (`observability-rca-monitoring`, `10.0.1.68`) hosts Prometheus, Loki, Jaeger, Grafana via docker-compose. Triage service runs on the operator's laptop (Tailscale MagicDNS hostname) with Ollama on the GTX 1060.
 
 ---
 
