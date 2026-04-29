@@ -196,6 +196,12 @@ exemplars:
     # (OTelCollectorHighSpanDropRate, OTelCollectorDown) had no exemplar.
     # Real failure modes for the collector: backpressure (queue depth
     # growing), exporter timeouts, batch buffer overflow, OOM under load.
+    # PARTIALLY FORWARD-LOOKING (audit 2026-04-29): regex names 4 alerts;
+    # OTelCollectorHighSpanDropRate + OTelCollectorDown are provisioned in
+    # alertrules.yml.j2; OTelCollectorHighQueueDepth + OTelCollectorHighMemoryUsage
+    # are not yet provisioned but are expected to land when collector
+    # observability matures (queue-depth gauge + memory-limit alarm).
+    # Keep the regex broad so the archetype matches the day they ship.
     archetype: "OTel collector degradation — span drop rate or scrape down"
     match:
       alertname: "^OTelCollector(HighSpanDropRate|Down|HighQueueDepth|HighMemoryUsage)$"
