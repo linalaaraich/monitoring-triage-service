@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.config import settings
 from app.context import ContextGatherer
@@ -93,7 +93,7 @@ class TriagePipeline:
                 "summary": f"Drain3 detected {len(webhook.anomalous_lines)} anomalous log lines (rate {webhook.anomaly_rate:.2%})",
                 "description": rich_description,
             },
-            startsAt=webhook.timestamp or datetime.utcnow().isoformat(),
+            startsAt=webhook.timestamp or datetime.now(UTC).replace(tzinfo=None).isoformat(),
             fingerprint=f"drain3-{webhook.service}",
         )
         try:

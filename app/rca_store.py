@@ -1,12 +1,24 @@
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import aiosqlite
 
 from app.models import RCARecord
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime:
+    """Naive UTC timestamp matching the wire format already in the DB.
+
+    Returns a tzinfo-stripped datetime so .isoformat() produces bare ISO
+    strings (no +00:00 suffix), matching every other timestamp already
+    persisted in rca_history.timestamp. Drop-in replacement for the
+    deprecated _utc_now() — silences DeprecationWarnings without
+    changing the wire format.
+    """
+    return datetime.now(UTC).replace(tzinfo=None)
 
 CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS rca_history (
@@ -242,7 +254,7 @@ class RCAStore:
             clauses.append("alert_name = ?")
             params.append(alert_name)
         if since_days is not None:
-            since = (datetime.utcnow() - timedelta(days=since_days)).isoformat()
+            since = (_utc_now() - timedelta(days=since_days)).isoformat()
             clauses.append("timestamp >= ?")
             params.append(since)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -290,7 +302,7 @@ class RCAStore:
             clauses.append("alert_name = ?")
             params.append(alert_name)
         if since_days is not None:
-            since = (datetime.utcnow() - timedelta(days=since_days)).isoformat()
+            since = (_utc_now() - timedelta(days=since_days)).isoformat()
             clauses.append("timestamp >= ?")
             params.append(since)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -310,7 +322,7 @@ class RCAStore:
         alert was recently processed — if we just dismissed it, dismiss again;
         if we just suppressed it, suppress again.
         """
-        since = (datetime.utcnow() - timedelta(minutes=lookback_minutes)).isoformat()
+        since = (_utc_now() - timedelta(minutes=lookback_minutes)).isoformat()
         cursor = await self._db.execute(
             """SELECT triage_decision, llm_verdict, action_taken, rca_report, timestamp
                FROM rca_history
@@ -322,7 +334,7 @@ class RCAStore:
         return dict(row) if row else None
 
     async def get_alert_frequency(self, alert_name: str, days: int = 7) -> dict:
-        since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        since = (_utc_now() - timedelta(days=days)).isoformat()
         cursor = await self._db.execute(
             "SELECT COUNT(*) as count FROM rca_history WHERE alert_name = ? AND timestamp > ?",
             (alert_name, since),
@@ -432,7 +444,7 @@ class RCAStore:
         if feedback_type not in ("override", "confirm"):
             raise ValueError(f"feedback_type must be 'override' or 'confirm', got {feedback_type!r}")
 
-        now = datetime.utcnow()
+        now = _utc_now()
         active_until = None
         if feedback_type == "override":
             window = active_for_days if active_for_days is not None else 14
@@ -538,7 +550,7 @@ class RCAStore:
         """
         if feedback_type not in ("override", "confirm"):
             raise ValueError(f"feedback_type must be 'override' or 'confirm'")
-        since = (datetime.utcnow() - timedelta(days=window_days)).isoformat()
+        since = (_utc_now() - timedelta(days=window_days)).isoformat()
         cursor = await self._db.execute(
             "SELECT COUNT(*) AS n FROM feedback WHERE feedback_type = ? AND created_at > ?",
             (feedback_type, since),
@@ -554,7 +566,7 @@ class RCAStore:
         Used as the denominator in precision (escalations) and recall
         calculations.
         """
-        since = (datetime.utcnow() - timedelta(days=window_days)).isoformat()
+        since = (_utc_now() - timedelta(days=window_days)).isoformat()
         cursor = await self._db.execute(
             "SELECT COUNT(*) AS n FROM rca_history WHERE llm_verdict = ? AND timestamp > ?",
             (verdict, since),
@@ -596,7 +608,7 @@ class RCAStore:
         """
         if not fingerprint:
             return 0
-        since = (datetime.utcnow() - timedelta(seconds=window_seconds)).isoformat()
+        since = (_utc_now() - timedelta(seconds=window_seconds)).isoformat()
         if llm_verdict is None:
             cursor = await self._db.execute(
                 "SELECT COUNT(*) AS n FROM rca_history WHERE alert_fingerprint = ? AND timestamp > ?",

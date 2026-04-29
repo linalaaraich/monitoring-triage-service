@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 
-# All DB timestamps are stored in UTC (datetime.utcnow().isoformat()). The
+# All DB timestamps are stored as bare-UTC ISO strings (see app.rca_store._utc_now). The
 # operator audience is in Casablanca — render times in GMT+1 so people
 # reading the dashboard at 14:00 local don't mentally subtract an hour
 # from every row. Label timestamps with "Casablanca" to keep it obvious

@@ -1,6 +1,6 @@
 import os
 import tempfile
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -40,7 +40,7 @@ async def _backdate(store: RCAStore, decision_id: str, days_ago: int) -> None:
     decisions that pre-date the current since_days window. Uses the
     store's open connection rather than opening a second one (sqlite
     locking)."""
-    ts = (datetime.utcnow() - timedelta(days=days_ago)).isoformat()
+    ts = (datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days_ago)).isoformat()
     await store._db.execute(
         "UPDATE rca_history SET timestamp = ? WHERE id = ?",
         (ts, decision_id),
