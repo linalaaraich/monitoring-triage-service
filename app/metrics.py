@@ -97,8 +97,26 @@ triage_email_sent_total = Counter(
 )
 
 drain3_clusters = Gauge(
-    "drain3_clusters_total",
-    "Total Drain3 log template clusters",
+    # Renamed from "drain3_clusters_total" 2026-04-29 (audit §4 finding):
+    # _total suffix is a Prometheus convention for counters. This is a
+    # gauge — a snapshot of the current cluster count, which can shrink
+    # if templates expire. Old name caused Grafana queries for
+    # `drain3_clusters` to silently return empty.
+    "drain3_clusters",
+    "Total Drain3 log template clusters (current count, not a counter)",
+)
+
+triage_bounded_agency_invocations_total = Counter(
+    # Counts data-starved retries that triggered the bounded-agency loop in
+    # pipeline.py. Outcome values: "tool_called" (LLM asked for one MCP tool
+    # and the executor ran it + re-prompted), "decided_directly" (LLM emitted
+    # a verdict in the agency pass without a tool call), "no_action" (parse
+    # failed or LLM produced nothing — falls through to anti-hedge retry).
+    # Wired 2026-04-29 (audit §4 finding: documented at triage-service.html
+    # but never registered).
+    "triage_bounded_agency_invocations_total",
+    "Bounded-agency retries by outcome",
+    ["outcome"],
 )
 
 drain3_anomalies = Counter(

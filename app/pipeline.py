@@ -22,6 +22,7 @@ from app.metrics import (
     llm_duration,
     pipeline_duration,
     pipeline_timeouts,
+    triage_bounded_agency_invocations_total,
     triage_queue_depth,
 )
 from app.models import Decision, Drain3Webhook, GrafanaAlert, GrafanaWebhook, RCARecord
@@ -496,6 +497,7 @@ class TriagePipeline:
                         llm_ms += rd_ms
                         retry_ms = agency_ms + rd_ms
                         used_agency = True
+                        triage_bounded_agency_invocations_total.labels(outcome="tool_called").inc()
                     else:
                         # Model chose to emit a decision directly without a tool — try to parse
                         try:
@@ -503,8 +505,12 @@ class TriagePipeline:
                             retry_decision = _LLMDecision(**parsed)
                             retry_ms = agency_ms
                             used_agency = True
+                            triage_bounded_agency_invocations_total.labels(outcome="decided_directly").inc()
                         except Exception as e:
                             logger.debug("Agency response couldn't be parsed as LLMDecision: %s", e)
+                            triage_bounded_agency_invocations_total.labels(outcome="no_action").inc()
+                else:
+                    triage_bounded_agency_invocations_total.labels(outcome="no_action").inc()
 
             # Plain anti-hedge retry as fallback (bounded-agency disabled
             # or produced nothing usable).
