@@ -162,6 +162,7 @@ class RCAStore:
             ("promql_expr",       "TEXT"),
             ("suggested_actions", "TEXT"),  # JSON list
             ("evidence",          "TEXT"),  # JSON list
+            ("diagnostic_steps",  "TEXT"),  # JSON list (US-3.9 / Tier 0)
             ("anomaly_summary",   "TEXT"),
             ("correlated_alerts", "TEXT"),  # JSON list
         ]
@@ -203,10 +204,10 @@ class RCAStore:
                 llm_confidence, rca_report, llm_reasoning, action_taken,
                 related_alerts, investigation_duration_ms, rca_quality,
                 alert_instance, alert_component, alert_signal, observed_value,
-                promql_expr, suggested_actions, evidence, anomaly_summary,
-                correlated_alerts)
+                promql_expr, suggested_actions, evidence, diagnostic_steps,
+                anomaly_summary, correlated_alerts)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.id,
                 record.timestamp.isoformat(),
@@ -231,6 +232,7 @@ class RCAStore:
                 record.promql_expr,
                 record.suggested_actions,
                 record.evidence,
+                record.diagnostic_steps,
                 record.anomaly_summary,
                 record.correlated_alerts,
             ),
@@ -274,7 +276,7 @@ class RCAStore:
         decoded: list[dict] = []
         for row in rows:
             d = dict(row)
-            for col in ("suggested_actions", "evidence", "correlated_alerts"):
+            for col in ("suggested_actions", "evidence", "diagnostic_steps", "correlated_alerts"):
                 v = d.get(col)
                 if isinstance(v, str) and v:
                     try:

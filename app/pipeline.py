@@ -678,6 +678,30 @@ class TriagePipeline:
                 decision.confidence = 0.4
                 confidence_clamped = True
 
+                # US-3.9 (Tier 0): the clamp signals "this output is not
+                # trustworthy." Shipping templated remediations at 0.4
+                # confidence trains operators to ignore the confidence
+                # signal entirely — exactly the failure mode that surfaced
+                # the 2026-04-29 HighKongP95Latency 0b215ef3 incident
+                # (kubectl set resources --limits=memory=2Gi shipped at
+                # conf=0.4). Strip suggested_actions and emit alert-aware
+                # read-only diagnostic verbs instead. Evidence is
+                # preserved so the operator still sees what was gathered.
+                from app.clamp_actions import diagnostic_steps_for_clamp
+                stripped_count = len(decision.suggested_actions or [])
+                logger.info(
+                    "Confidence clamp: stripping %d suggested_actions (source=%s) "
+                    "and replacing with diagnostic-only verbs",
+                    stripped_count, suggested_actions_source,
+                )
+                decision.suggested_actions = []
+                decision.diagnostic_steps = diagnostic_steps_for_clamp(
+                    alert=alert,
+                    rca=decision.rca or "",
+                    quality=quality,
+                    actions_source=suggested_actions_source,
+                )
+
         logger.info(
             "LLM verdict for %s: %s (quality=%s, %dms total%s%s)",
             alert.alertname,
@@ -726,6 +750,7 @@ class TriagePipeline:
             promql_expr=alert.annotations.get("expr") or None,
             suggested_actions=_json.dumps(decision.suggested_actions) if decision.suggested_actions else None,
             evidence=_json.dumps(decision.evidence) if decision.evidence else None,
+            diagnostic_steps=_json.dumps(decision.diagnostic_steps) if decision.diagnostic_steps else None,
             anomaly_summary=decision.anomaly_summary or (ctx.anomaly_summary if ctx else None),
             correlated_alerts=_json.dumps(correlated) if correlated else None,
         )

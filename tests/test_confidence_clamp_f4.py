@@ -4,6 +4,10 @@ Validates that decision.confidence gets clamped to 0.4 at persistence
 time when the output looks untrustworthy. The clamp lives at the end of
 _investigate_and_act in app/pipeline.py — testing it directly via a unit
 shim of that logic so we don't need to spin up the whole pipeline.
+
+Tests in this file cover the conf=0.4 invariant only. The strip+populate
+addition (US-3.9 / Tier 0) is covered in tests/test_pipeline_clamp.py
+with the full _full_clamp shim.
 """
 from __future__ import annotations
 
@@ -12,11 +16,9 @@ from app.response_validator import validate
 
 
 def _clamp(decision: LLMDecision, validation_report, quality: str, actions_source: str) -> bool:
-    """Reproduces the clamp logic from app/pipeline.py:Step 6d.
-
-    Tests the policy independently of the rest of the pipeline. If this
-    diverges from pipeline.py, update both — they encode the same rule.
-    """
+    """Reproduces the clamp logic from app/pipeline.py:Step 6d (legacy
+    confidence-only path; pre-US-3.9). Kept for the conf=0.4 invariant.
+    For strip+populate behavior, see tests/test_pipeline_clamp.py."""
     if decision.confidence is None or decision.confidence <= 0.4:
         return False
     surface_only_hit = any(

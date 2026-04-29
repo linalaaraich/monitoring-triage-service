@@ -387,7 +387,34 @@ class EmailNotifier:
 
         actions_html = "".join(
             f"<li>{a}</li>" for a in decision.suggested_actions
-        ) or "<li><em>(no concrete remediation proposed — see RCA above; treat as a heads-up)</em></li>"
+        )
+        if not actions_html:
+            # Empty suggested_actions can mean two things: the LLM emitted
+            # nothing AND no template fallback fired (rare, pre-clamp legacy),
+            # OR the F-4 clamp stripped templated/untrustworthy actions and
+            # populated diagnostic_steps instead (US-3.9 / Tier 0). The
+            # message differs because the operator action differs — heads-up
+            # vs. "go look at the diagnostic steps below."
+            if decision.diagnostic_steps:
+                actions_html = (
+                    "<li><em>Withheld — confidence clamped to 0.40. "
+                    "See <strong>diagnostic steps</strong> below for read-only "
+                    "investigation pivots, then return to remediation once a "
+                    "specific cause is named with trace or metric evidence.</em></li>"
+                )
+            else:
+                actions_html = "<li><em>(no concrete remediation proposed — see RCA above; treat as a heads-up)</em></li>"
+        # US-3.9 (Tier 0): diagnostic_steps surfaces alert-aware read-only
+        # verbs when the F-4 clamp fires (or when the LLM chose investigation
+        # over remediation). Rendered as its own card below "Suggested
+        # actions" so the visual distinction is clear.
+        diagnostic_html = "".join(
+            f"<li>{d}</li>" for d in (decision.diagnostic_steps or [])
+        )
+        diagnostic_block = (
+            f'<h3>Diagnostic steps <span class="mute">— read-only; investigate before remediating</span></h3>'
+            f'<ul>{diagnostic_html}</ul>'
+        ) if diagnostic_html else ""
         evidence_html = "".join(
             f"<li>{e}</li>" for e in decision.evidence
         ) or "<li><em>(no specific evidence cited — RCA reasoned from the observed value alone)</em></li>"
@@ -486,6 +513,7 @@ Root cause:
 {_humanize_unix_timestamps(decision.rca or '')}</div>
       <h3>Suggested actions</h3>
       <ul>{actions_html}</ul>
+      {diagnostic_block}
       <h3>Evidence</h3>
       <ul>{evidence_html}</ul>
     </div>

@@ -104,13 +104,23 @@ class LLMDecision(BaseModel):
     anomaly_summary: str = ""
     suggested_actions: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)
+    # US-3.9 (Tier 0): when the F-4 confidence clamp fires (surface-only,
+    # data_starved, or templated actions), the pipeline strips
+    # suggested_actions and populates this with alert-aware read-only
+    # diagnostic verbs (Jaeger drill, hikari/JVM/Kong PromQL pivots) plus
+    # an explicit "do NOT kubectl rollout/scale/set" warning. The
+    # operator sees a clear "investigate, don't remediate" path instead
+    # of templated remediations that don't follow from a hypothesis-only RCA.
+    # LLMs may also emit this directly when they want to ask for investigation
+    # rather than commit to remediation — both paths are supported.
+    diagnostic_steps: list[str] = Field(default_factory=list)
 
     # Small 3B-parameter models frequently return `evidence` as a list of
     # dict objects (e.g. {"metric": "...", "value": 4.7}) instead of the
     # list[str] we asked for. That's meaningful structured output; we should
     # accept it, not reject it. Coerce dict items to their JSON string form
     # so downstream rendering (email, RCA store) still works.
-    @field_validator("evidence", "suggested_actions", mode="before")
+    @field_validator("evidence", "suggested_actions", "diagnostic_steps", mode="before")
     @classmethod
     def _coerce_list_items_to_str(cls, v):
         if isinstance(v, list):
@@ -185,6 +195,10 @@ class RCARecord(BaseModel):
     # LLM-produced rich fields that previously only lived in the email.
     suggested_actions: Optional[str] = None    # JSON list of strings
     evidence: Optional[str] = None             # JSON list of strings
+    # US-3.9 (Tier 0): read-only diagnostic verbs surfaced when the F-4
+    # confidence clamp fires. Stored as JSON list of strings; rendered
+    # by the email + dashboard as a separate card from suggested_actions.
+    diagnostic_steps: Optional[str] = None     # JSON list of strings
     anomaly_summary: Optional[str] = None      # Drain3 summary the LLM saw
     # Correlated alerts found in the ±5m window. JSON list of the same
     # shape returned by RCAStore.get_correlated_alerts.
