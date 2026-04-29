@@ -230,18 +230,27 @@ class RCAStore:
         )
 
     async def get_decisions(
-        self, limit: int = 50, alert_name: str | None = None
+        self,
+        limit: int = 50,
+        alert_name: str | None = None,
+        offset: int = 0,
+        since_days: int | None = None,
     ) -> list[dict]:
+        clauses: list[str] = []
+        params: list = []
         if alert_name:
-            cursor = await self._db.execute(
-                "SELECT * FROM rca_history WHERE alert_name = ? ORDER BY timestamp DESC LIMIT ?",
-                (alert_name, limit),
-            )
-        else:
-            cursor = await self._db.execute(
-                "SELECT * FROM rca_history ORDER BY timestamp DESC LIMIT ?",
-                (limit,),
-            )
+            clauses.append("alert_name = ?")
+            params.append(alert_name)
+        if since_days is not None:
+            since = (datetime.utcnow() - timedelta(days=since_days)).isoformat()
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.extend([limit, offset])
+        cursor = await self._db.execute(
+            f"SELECT * FROM rca_history {where_sql} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            tuple(params),
+        )
         rows = await cursor.fetchall()
         # Decode the JSON-as-TEXT columns at the API boundary so consumers
         # get real lists, not double-encoded strings. The dashboard parses
@@ -269,6 +278,28 @@ class RCAStore:
                     d[col] = []
             decoded.append(d)
         return decoded
+
+    async def count_decisions(
+        self,
+        alert_name: str | None = None,
+        since_days: int | None = None,
+    ) -> int:
+        clauses: list[str] = []
+        params: list = []
+        if alert_name:
+            clauses.append("alert_name = ?")
+            params.append(alert_name)
+        if since_days is not None:
+            since = (datetime.utcnow() - timedelta(days=since_days)).isoformat()
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        cursor = await self._db.execute(
+            f"SELECT COUNT(*) AS n FROM rca_history {where_sql}",
+            tuple(params),
+        )
+        row = await cursor.fetchone()
+        return int(row["n"]) if row else 0
 
     async def get_recent_decision_for_alert(
         self, alert_name: str, affected_service: str, lookback_minutes: int

@@ -218,8 +218,12 @@ async def health() -> HealthResponse:
 async def decisions(
     limit: int = Query(50, ge=1, le=500),
     alert_name: str | None = Query(None),
+    offset: int = Query(0, ge=0),
+    since_days: int | None = Query(None, ge=1, le=365),
 ):
-    return await _store.get_decisions(limit=limit, alert_name=alert_name)
+    return await _store.get_decisions(
+        limit=limit, alert_name=alert_name, offset=offset, since_days=since_days,
+    )
 
 
 @app.get("/drain3/stats")
@@ -900,6 +904,43 @@ _DASHBOARD_CSS = """
     thead th:nth-child(4), tbody td:nth-child(4),
     thead th:nth-child(5), tbody td:nth-child(5) { display: none; }
   }
+
+  .pagination {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 16px;
+    margin-top: 18px; padding: 14px 18px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    font-size: 13px; color: var(--text-secondary);
+  }
+  .pagination-info { flex: 1; min-width: 240px; }
+  .pagination-info strong { color: var(--text-primary); font-weight: 600; }
+  .pagination-controls { display: flex; gap: 8px; }
+  .pagination-window { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .page-btn, .window-btn {
+    display: inline-block;
+    padding: 6px 12px;
+    background: var(--surface-2);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    text-decoration: none;
+    font-size: 12px;
+    font-weight: 500;
+    transition: background-color .12s, border-color .12s;
+  }
+  .page-btn:hover, .window-btn:hover {
+    background: var(--border); border-color: var(--border-strong);
+  }
+  .page-btn.disabled {
+    opacity: 0.45; cursor: not-allowed; pointer-events: none;
+  }
+  .window-btn.active {
+    background: var(--blue-soft); border-color: var(--blue); color: var(--blue);
+  }
+  @media (max-width: 700px) {
+    .pagination { flex-direction: column; align-items: stretch; gap: 10px; }
+    .pagination-controls { justify-content: space-between; }
+  }
 """
 
 _DASHBOARD_JS = """
@@ -1472,15 +1513,25 @@ def _render_detail_panel(r: dict) -> str:
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard():
-    rows = await _store.get_decisions(limit=100)
+async def dashboard(
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=10, le=200),
+    since_days: int = Query(15, ge=1, le=365),
+):
+    offset = (page - 1) * size
+    rows = await _store.get_decisions(limit=size, offset=offset, since_days=since_days)
+    total_in_window = await _store.count_decisions(since_days=since_days)
+    last_page = max(1, (total_in_window + size - 1) // size)
     drain_stats = _drain.get_stats() if _drain is not None else {}
 
-    total = len(rows)
+    # Stat-card counters reflect the current page slice; the "Total decisions"
+    # card is replaced with the window total so operators can see how many
+    # alerts exist in the window even when the current page is small.
     escalated = sum(1 for r in rows if r.get('action_taken') == 'emailed')
     dismissed = sum(1 for r in rows if r.get('action_taken') == 'suppressed')
     timed_out = sum(1 for r in rows if r.get('action_taken') == 'emailed_raw')
     suppressed_pre = sum(1 for r in rows if (r.get('triage_decision') or '').lower() == 'triage_suppressed')
+    total = total_in_window
 
     body_rows = ""
     for r in rows:
@@ -1517,6 +1568,36 @@ async def dashboard():
 
     if not body_rows:
         body_rows = '<tr class="empty"><td colspan="9">No decisions yet. Fire an alert and watch this space.</td></tr>'
+
+    def _page_link(p: int, label: str, disabled: bool = False) -> str:
+        if disabled:
+            return f'<span class="page-btn disabled">{label}</span>'
+        return f'<a class="page-btn" href="/dashboard?page={p}&amp;size={size}&amp;since_days={since_days}">{label}</a>'
+
+    def _window_link(d: int, label: str) -> str:
+        active = ' active' if d == since_days else ''
+        return f'<a class="window-btn{active}" href="/dashboard?page=1&amp;size={size}&amp;since_days={d}">{label}</a>'
+
+    pagination_html = (
+        '<div class="pagination">'
+        '  <div class="pagination-info">'
+        f'    Page <strong>{page}</strong> of <strong>{last_page}</strong>'
+        f'    &middot; {total_in_window} alert{"s" if total_in_window != 1 else ""} in last '
+        f'    {since_days} day{"s" if since_days != 1 else ""}'
+        '  </div>'
+        '  <div class="pagination-controls">'
+        f'    {_page_link(page - 1, "&larr; Prev", disabled=(page <= 1))}'
+        f'    {_page_link(page + 1, "Next &rarr;", disabled=(page >= last_page))}'
+        '  </div>'
+        '  <div class="pagination-window">'
+        '    Show last:&nbsp;'
+        f'    {_window_link(7, "7 days")}'
+        f'    {_window_link(15, "15 days")}'
+        f'    {_window_link(30, "30 days")}'
+        f'    {_window_link(365, "all")}'
+        '  </div>'
+        '</div>'
+    )
 
     return (
         f'<!DOCTYPE html><html lang="en"><head>'
@@ -1574,6 +1655,7 @@ async def dashboard():
         f'            <tbody>{body_rows}</tbody>'
         f'          </table>'
         f'        </div>'
+        f'        {pagination_html}'
         f'      </div>'
         f'    </main>'
         f'  </div>'
