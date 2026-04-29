@@ -64,6 +64,16 @@ class Settings(BaseSettings):
     # existing MCPs — no agent framework. See app/bounded_agency.py.
     triage_bounded_agency_enabled: bool = True
 
+    # S3-HF-03 (Tier 2) — hypothesis-menu validator + cause-evidence rule.
+    # When True, response_validator scans for "possibly X or Y" / "may be
+    # due to (slow query|pool saturation|GC)" / "could be one of" prose
+    # AND flags RCAs whose first-sentence cause shares no non-stopword
+    # token with the evidence list. Hits trigger the existing retry path;
+    # Tier 0 clamp (S3-HF-01) is the safety net for retries that fail.
+    # Ships aggressive — dial back via env if the new
+    # triage_validator_retries_total{reason} metric shows >5% FP rate.
+    triage_hypothesis_menu_strict: bool = True
+
     # RCA history
     rca_db_path: str = "/var/lib/triage-service/rca_history.db"
 

@@ -43,6 +43,8 @@ from typing import Literal
 
 import yaml
 
+from app.config import settings
+from app.metrics import triage_validator_retries_total
 from app.models import LLMDecision
 
 logger = logging.getLogger(__name__)
@@ -208,6 +210,107 @@ _SURFACE_ONLY_HEDGE_PATTERNS: tuple[re.Pattern, ...] = (
     # "either ... or ..." pattern when both alternatives are vague
     re.compile(r"\beither\s+(?:the|an?)\s+\S+\s+(?:itself\s+is|is\s+performing|might\s+be)\b.{0,80}\bor\s+there\s+might\s+be\b", re.I),
 )
+
+
+# ---------------------------------------------------------------------------
+# Hypothesis-menu patterns (S3-HF-03 / Tier 2) — added 2026-04-29 after the
+# HighKongP95Latency 0b215ef3 incident.
+#
+# The 0b215ef3 RCA passed every existing validator: not surface-only (it
+# named a layer), no banned hedge phrase, no per-alert hallucination match.
+# It still failed because the cause was a HYPOTHESIS MENU instead of a
+# diagnosis: "...possibly due to a regressed query or saturated connection
+# pool." That sentence offers two alternatives within a layer without
+# committing to one. It's a half-finished diagnosis dressed up as analysis.
+#
+# Patterns target the shape: alternative-marker word + noun phrase +
+# disjunction marker (or / comma) + noun phrase. Tight enough to avoid
+# false-positiving on legitimate prose like "the JDBC pool was exhausted;
+# downstream MySQL also saw lock contention" (no alternative-marker) or
+# "either way, the cause is X" (idiomatic, negative-lookahead-guarded).
+#
+# Gated by settings.triage_hypothesis_menu_strict (default True). Hits
+# trigger the existing retry path; Tier 0 clamp (S3-HF-01) is the safety
+# net for retries that still emit hypothesis menus.
+# ---------------------------------------------------------------------------
+_HYPOTHESIS_MENU_PATTERNS: tuple[re.Pattern, ...] = (
+    # "possibly X or Y" / "possibly due to A or B" — the prototypical
+    # 0b215ef3 shape: "...possibly due to a regressed query or saturated
+    # connection pool."
+    re.compile(r"\bpossibly\s+(?:due\s+to\s+|caused\s+by\s+)?(?:a|an|the)?\s*\w+(?:\s+\w+){0,5}\s+or\s+(?:a|an|the)?\s*\w+", re.I),
+    # "either X or Y" where X and Y are noun phrases. Negative lookahead
+    # excludes idiomatic "either way" / "either case".
+    re.compile(r"\beither\s+(?!way\b|case\b)(?:a|an|the)?\s*\w+(?:\s+\w+){0,5}\s+or\s+(?:a|an|the)?\s*\w+", re.I),
+    # "may be due to (a slow query|pool saturation|GC)" — committee
+    # diagnosis with comma-separated or "or"-separated alternatives.
+    re.compile(r"\bmay\s+be\s+(?:due\s+to|caused\s+by|attributed\s+to)\s+(?:a|an|the)?\s*\w+(?:\s+\w+){0,3}(?:,|\s+or\s+)\s*(?:a|an|the|or)?\b", re.I),
+    # "could be (a slow query|saturated pool|...)" with separator
+    re.compile(r"\bcould\s+be\s+(?:due\s+to\s+)?(?:a|an|the)?\s*\w+(?:\s+\w+){0,3}(?:,|\s+or\s+)\s*(?:a|an|the|or)\b", re.I),
+    # "one of (slow query|pool saturation|GC)"
+    re.compile(r"\bone\s+of\s+(?:a|an|the)?\s*\w+(?:\s+\w+){0,3}(?:,|\s+or\s+)", re.I),
+    # "might be (X) or (Y)"
+    re.compile(r"\bmight\s+be\s+(?:due\s+to\s+|caused\s+by\s+)?(?:a|an|the)?\s*\w+(?:\s+\w+){0,4}\s+or\s+(?:a|an|the)?\s*\w+", re.I),
+    # "(perhaps|maybe) X or Y" — softer hedges in the same shape
+    re.compile(r"\b(?:perhaps|maybe)\s+(?:due\s+to\s+)?(?:a|an|the)?\s*\w+(?:\s+\w+){0,4}\s+or\s+(?:a|an|the)?\s*\w+", re.I),
+)
+
+
+# Stopwords for the cause-evidence overlap check. These are tokens too
+# generic to count as a "specific cause reference" — the rule wants the
+# RCA to share a meaningful diagnostic token (component name, error
+# type, query fragment, span operation) with the evidence, not just the
+# alert's framing words.
+_CAUSE_EVIDENCE_STOPWORDS: frozenset[str] = frozenset({
+    # Articles / fillers / common verbs (4+ chars to make _check_cause_evidence_overlap's tokenizer pick them up)
+    "this", "that", "these", "those", "with", "from", "have", "been",
+    "were", "will", "into", "onto", "than", "then", "when", "where",
+    "what", "which", "would", "could", "should", "might", "must",
+    # Generic alert/SRE vocabulary that appears on both sides without
+    # adding diagnostic information
+    "alert", "alerts", "metric", "metrics", "value", "values",
+    "system", "service", "issue", "issues", "problem", "problems",
+    "above", "below", "shows", "show", "indicates", "indicate",
+    "appears", "appear", "seems", "seem", "warning", "error",
+    "errors", "request", "requests", "response", "responses",
+    "high", "high.", "low", "elevated", "increased", "decreased",
+    "rate", "rates", "level", "levels", "count", "counts", "threshold",
+    "thresholds", "above", "below", "average", "median", "total",
+    "time", "times", "second", "seconds", "minute", "minutes",
+    "observed", "reported", "fired", "firing", "trigger", "triggered",
+    # Service names — too generic, an RCA mentioning only the service
+    # name hasn't named anything within the service
+    "kong", "spring", "boot", "spring-boot", "loki", "grafana",
+    "prometheus", "jaeger", "drain3", "monitoring",
+})
+
+
+def _check_cause_evidence_overlap(
+    rca_text: str,
+    evidence: list[str],
+) -> bool:
+    """Return True if the RCA shares no non-stopword token with the
+    evidence list — signals fabrication (RCA cites things that aren't
+    in the gathered data). Returns False if there IS overlap or if
+    evidence is too thin to ground against.
+
+    Tokens are 4+ char word-class lowercased, stopwords removed.
+    """
+    if not rca_text or not evidence:
+        return False  # caller skips check on empty inputs
+    # Letter-only tokenizer: splits underscored metric names naturally
+    # (hikaricp_connections_active -> [hikaricp, connections, active]),
+    # which is what we want for cross-matching prose and metric labels.
+    rca_tokens = set(re.findall(r"[a-z]{4,}", rca_text.lower()))
+    evidence_tokens: set[str] = set()
+    for e in evidence:
+        evidence_tokens.update(re.findall(r"[a-z]{4,}", str(e).lower()))
+    # If evidence itself has no specific tokens (only stopwords / numbers),
+    # skip the check — the LLM has nothing to ground against.
+    evidence_specific = evidence_tokens - _CAUSE_EVIDENCE_STOPWORDS
+    if not evidence_specific:
+        return False
+    overlap = (rca_tokens & evidence_tokens) - _CAUSE_EVIDENCE_STOPWORDS
+    return not overlap
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +550,48 @@ def validate(
             )
             break
 
+    # --- 1d. Hypothesis-menu scan (S3-HF-03 / Tier 2). The RCA names a
+    # layer but offers multiple alternative causes within that layer
+    # without committing — a half-finished diagnosis. Triggered by the
+    # 2026-04-29 0b215ef3 incident: "possibly a regressed query or
+    # saturated connection pool" passed all prior validators because it
+    # wasn't a surface-only lede AND wasn't a known hedge tail. Gated by
+    # settings.triage_hypothesis_menu_strict — disable via env if FP
+    # rate (visible on triage_validator_retries_total{reason}) > 5%.
+    if settings.triage_hypothesis_menu_strict:
+        for pattern in _HYPOTHESIS_MENU_PATTERNS:
+            m = pattern.search(combined)
+            if m:
+                phrase = m.group(0)
+                report.banned_phrase_hits.append(f"hypothesis-menu: {phrase!r}")
+                report.violations.append(
+                    f"hypothesis-menu in rca/reason: {phrase!r} — the RCA lists "
+                    "possible causes within a layer instead of naming one. Pick "
+                    "ONE cause backed by trace/metric evidence, or admit you "
+                    "can't narrow it (data_starved is the right tag for that)."
+                )
+                triage_validator_retries_total.labels(reason="hypothesis_menu").inc()
+                break
+
+    # --- 1e. Cause-must-reference-evidence (S3-HF-03 / Tier 2). The RCA
+    # prose must share at least one specific (non-stopword) token with
+    # decision.evidence. Catches fabrication: the LLM names a cause but
+    # nothing in the gathered data supports it. Skipped when evidence is
+    # empty (no signal to ground against) or when evidence has no
+    # specific tokens (only stopwords/numbers — the LLM has nothing to
+    # ground against). Gated by the same flag.
+    if settings.triage_hypothesis_menu_strict and decision.evidence:
+        if _check_cause_evidence_overlap(rca_text, decision.evidence):
+            report.banned_phrase_hits.append("cause-evidence-mismatch")
+            report.violations.append(
+                "cause-evidence-mismatch: RCA shares no specific token with "
+                "the evidence list — the named cause isn't supported by "
+                "anything the pipeline gathered. Either expand evidence to "
+                "include what supports the cause, or name a cause that the "
+                "gathered evidence actually shows."
+            )
+            triage_validator_retries_total.labels(reason="cause_evidence_mismatch").inc()
+
     # --- 2a. Vague-action scan on suggested_actions
     kept_actions: list[str] = []
     for a in decision.suggested_actions:
@@ -544,10 +689,29 @@ def build_retry_feedback(report: ValidationReport) -> str:
     if report.banned_phrase_hits and not (len(hallucination_hits) == len(report.banned_phrase_hits)):
         non_halluc = [p for p in report.banned_phrase_hits if not p.startswith("hallucination[")]
         phrases = ", ".join(f"{p!r}" for p in non_halluc)
-        # Distinguish surface-only feedback from data-thin (rule B) feedback —
-        # the LLM needs different guidance for each.
+        # Distinguish surface-only feedback from hypothesis-menu / cause-evidence
+        # feedback from data-thin (rule B) feedback — the LLM needs different
+        # guidance for each.
         is_surface_only = any("surface-only" in p for p in non_halluc)
-        if is_surface_only:
+        is_hypothesis_menu = any(p.startswith("hypothesis-menu:") for p in non_halluc)
+        is_cause_evidence = any(p == "cause-evidence-mismatch" for p in non_halluc)
+        if is_hypothesis_menu and not is_surface_only:
+            parts.append(
+                f"Your previous response listed alternatives instead of naming one cause: {phrases}. "
+                "A hypothesis menu is not a diagnosis. Pick ONE cause backed by specific "
+                "trace/metric evidence. If you genuinely can't narrow it down, say so "
+                "explicitly with `confidence: 0.4` or lower and mark `decision: INCONCLUSIVE` "
+                "rather than emitting a both-and answer dressed as a verdict."
+            )
+        elif is_cause_evidence and not is_surface_only:
+            parts.append(
+                "Your previous RCA named a cause that shares no specific token with the "
+                "evidence you gathered. Either (a) name a cause the evidence actually "
+                "supports, OR (b) expand the `evidence` field to include the metric/log/trace "
+                "that supports the named cause. The cause and the evidence must match — "
+                "fabrication (saying X when nothing in the data shows X) is the failure mode."
+            )
+        elif is_surface_only:
             parts.append(
                 f"Your previous response had a surface-only RCA lede: {phrases}. "
                 "Rule A: the first sentence MUST name a cause (a component, link, "

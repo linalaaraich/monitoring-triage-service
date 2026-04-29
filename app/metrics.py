@@ -106,6 +106,18 @@ drain3_clusters = Gauge(
     "Total Drain3 log template clusters (current count, not a counter)",
 )
 
+triage_validator_retries_total = Counter(
+    # S3-HF-03 (Tier 2). Increments every time the response validator
+    # catches a hypothesis-menu pattern ("possibly X or Y") or a
+    # cause-evidence-mismatch (RCA's first sentence shares no token with
+    # the evidence list). Used to monitor false-positive rate after the
+    # aggressive default ship; if rate > 5%, dial back via
+    # settings.triage_hypothesis_menu_strict=False.
+    "triage_validator_retries_total",
+    "Validator-triggered retries by reason (hypothesis_menu, cause_evidence_mismatch).",
+    ["reason"],
+)
+
 triage_bounded_agency_invocations_total = Counter(
     # Counts data-starved retries that triggered the bounded-agency loop in
     # pipeline.py. Outcome values: "tool_called" (LLM asked for one MCP tool
