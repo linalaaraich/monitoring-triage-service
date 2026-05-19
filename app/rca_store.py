@@ -323,12 +323,20 @@ class RCAStore:
         Used by Layer 2 pre-LLM triage to skip the Ollama call when the same
         alert was recently processed — if we just dismissed it, dismiss again;
         if we just suppressed it, suppress again.
+
+        Synthetic-test fires (audit-live cron, chaos harness) are excluded
+        from the lookup so their dismisses do not poison the suppression
+        cache for real fires (P2 fix, 2026-05-19 — one synthetic dismiss
+        was silencing 4+ real fires of the same alert).
         """
         since = (_utc_now() - timedelta(minutes=lookback_minutes)).isoformat()
         cursor = await self._db.execute(
             """SELECT triage_decision, llm_verdict, action_taken, rca_report, timestamp
                FROM rca_history
                WHERE alert_name = ? AND affected_service = ? AND timestamp > ?
+                 AND (alert_fingerprint IS NULL
+                      OR (alert_fingerprint NOT LIKE 'audit-live-%'
+                          AND alert_fingerprint NOT LIKE 'chaos-%'))
                ORDER BY timestamp DESC LIMIT 1""",
             (alert_name, affected_service, since),
         )

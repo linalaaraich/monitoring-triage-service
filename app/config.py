@@ -50,7 +50,10 @@ class Settings(BaseSettings):
 
     # Layer 2 pre-LLM triage (noise suppression without calling the LLM)
     triage_suppression_enabled: bool = True
-    triage_history_lookback_minutes: int = 15
+    # 2026-05-19 (P2 fix): lowered 15 → 10 after a real-load investigation
+    # showed one dismiss was silencing 5+ subsequent fires of the same alert
+    # within a 15-minute window. 10 minutes caps the cascade at ~3 fires.
+    triage_history_lookback_minutes: int = 10
 
     # If the first LLM pass produces a data-starved RCA (hedges like "insufficient
     # data" without naming a cause), retry once with an explicit anti-hedge prompt.

@@ -202,3 +202,71 @@ async def test_recent_decision_lookup_service_mismatch(store):
         lookback_minutes=15,
     )
     assert recent is None
+
+
+@pytest.mark.asyncio
+async def test_recent_decision_lookup_excludes_audit_live_fingerprints(store):
+    # P2 fix (2026-05-19): a dismiss saved with an audit-live-* fingerprint
+    # is a synthetic test and must NOT silence the next real fire of the
+    # same (alert_name, service) pair within the lookback window.
+    await store.save_decision(
+        RCARecord(
+            alert_name="MediumCpuUsage",
+            affected_service="spring-boot",
+            alert_fingerprint="audit-live-2026-05-19-mediumcpu",
+            triage_decision="investigate",
+            llm_verdict="dismiss",
+            action_taken="suppressed",
+        )
+    )
+    recent = await store.get_recent_decision_for_alert(
+        alert_name="MediumCpuUsage",
+        affected_service="spring-boot",
+        lookback_minutes=15,
+    )
+    assert recent is None, "synthetic audit-live dismiss must not poison real-fire suppression cache"
+
+
+@pytest.mark.asyncio
+async def test_recent_decision_lookup_excludes_chaos_fingerprints(store):
+    # Same invariant as above, for the chaos-harness prefix.
+    await store.save_decision(
+        RCARecord(
+            alert_name="TargetDown",
+            affected_service="spring-boot",
+            alert_fingerprint="chaos-target-down-run-7",
+            triage_decision="investigate",
+            llm_verdict="dismiss",
+            action_taken="suppressed",
+        )
+    )
+    recent = await store.get_recent_decision_for_alert(
+        alert_name="TargetDown",
+        affected_service="spring-boot",
+        lookback_minutes=15,
+    )
+    assert recent is None, "chaos-harness dismiss must not poison real-fire suppression cache"
+
+
+@pytest.mark.asyncio
+async def test_recent_decision_lookup_real_fingerprint_still_matches(store):
+    # Sanity check: a real (non-synthetic) fingerprint should still be
+    # returned by the lookup — the filter only excludes the synthetic
+    # prefixes.
+    await store.save_decision(
+        RCARecord(
+            alert_name="HighP95Latency",
+            affected_service="spring-boot",
+            alert_fingerprint="d8f1c9a3b7e24561",
+            triage_decision="investigate",
+            llm_verdict="dismiss",
+            action_taken="suppressed",
+        )
+    )
+    recent = await store.get_recent_decision_for_alert(
+        alert_name="HighP95Latency",
+        affected_service="spring-boot",
+        lookback_minutes=15,
+    )
+    assert recent is not None
+    assert recent["llm_verdict"] == "dismiss"
