@@ -4,6 +4,7 @@ import re as _re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
@@ -214,14 +215,7 @@ async def health() -> HealthResponse:
     return HealthResponse(uptime_seconds=round(uptime, 1))
 
 
-_FAVICON_SVG = (
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
-    '<rect width="64" height="64" rx="14" fill="#0B0D10"/>'
-    '<path d="M18 22 L32 38 L46 22" stroke="#3E8FE6" stroke-width="6" '
-    'stroke-linecap="round" stroke-linejoin="round" fill="none"/>'
-    '<circle cx="32" cy="48" r="4" fill="#3E8FE6"/>'
-    '</svg>'
-)
+_FAVICON_SVG = (Path(__file__).parent / "favicon.svg").read_text(encoding="utf-8")
 
 
 @app.get("/favicon.svg")
