@@ -159,6 +159,17 @@ class GatheredContext(BaseModel):
     # as ambient context — NOT alert-specific evidence — so small models
     # don't misread log-volume as the alert's observed metric.
     loki_is_fallback: bool = False
+    # S3-HF-07 (shipped 2026-05-19): Tier 1 deep trace gather. When the
+    # alert is latency-flavoured and the standard /tools/find_traces
+    # response yields a candidate trace, the pipeline fires a single
+    # /tools/get_trace call on the slowest trace and renders the per-span
+    # breakdown as `## Trace span breakdown` in the LLM prompt. Lets the
+    # LLM say "hikaricp pool exhausted, all spans queued" instead of
+    # "upstream is slow" — that's the entire Epic-4 trace-depth theme.
+    # None when the alert isn't latency-flavoured, when traces are empty,
+    # or when the MCP call failed (non-fatal — first-pass RCA still ships).
+    deep_trace: Optional[dict] = None
+    deep_trace_ms: int = 0
 
 
 # --- RCA history record ---

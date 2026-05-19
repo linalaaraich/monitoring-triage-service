@@ -655,7 +655,13 @@ The observed value above is ground-truth signal from Prometheus at the moment th
 
 ### Traces (Jaeger, last {settings.jaeger_trace_limit} traces)
 {json.dumps(context.traces, indent=2, default=str) if context.traces else "[Jaeger] returned 0 traces for service=" + alert.service + ". Likely normal for infrastructure alerts; a traced request-path would have surfaced a spring-boot/kong service here."}
-
+{(
+    chr(10) + "### Trace span breakdown (the slowest trace, drilled to per-span detail)" + chr(10) +
+    "This is the keystone evidence for latency-flavoured alerts: per-span durations, db.statement (PII-sanitized), http.target, error tags. Use it to NAME what's slow, not just say upstream is slow." + chr(10) +
+    "```json" + chr(10) +
+    json.dumps(context.deep_trace, indent=2, default=str) + chr(10) +
+    "```" + chr(10)
+) if context.deep_trace else ""}
 ### Context Gathering Stats
 - Sources available: {context.sources_available}/3
 - Prometheus: {context.prometheus_ms}ms, Loki: {context.loki_ms}ms, Jaeger: {context.jaeger_ms}ms

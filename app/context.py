@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re as _re
 import time
 from datetime import datetime, timezone
 
@@ -57,6 +58,56 @@ def _prom_result_empty(data) -> bool:
                 return False  # unknown shape — don't second-guess, treat as non-empty
             return len(result) == 0
     return False
+
+
+# S3-HF-07 PII sanitizer ------------------------------------------------------
+# Span `db.statement` tags can include literal parameter values, e.g.
+#   WHERE customer_id = 12345 AND email = 'lina@…' AND created_at > '2026-04-12'
+# We never want raw values in the LLM prompt. Replace single-quoted literals
+# and bare numeric literals with `?` so the LLM sees the query shape but not
+# the data. This matches the conservative approach used by ORMs producing
+# parameterised SQL.
+
+_SQL_QUOTED_LITERAL = _re.compile(r"'(?:[^']|'')*'")
+_SQL_NUMERIC_LITERAL = _re.compile(r"(?<![A-Za-z_0-9])-?\d+(?:\.\d+)?")
+
+
+def _sanitize_db_statement(stmt: str) -> str:
+    """Replace literal parameter values in a SQL statement with `?`."""
+    if not stmt or not isinstance(stmt, str):
+        return stmt
+    stripped = _SQL_QUOTED_LITERAL.sub("?", stmt)
+    stripped = _SQL_NUMERIC_LITERAL.sub("?", stripped)
+    return stripped
+
+
+def _sanitize_deep_trace(trace: dict) -> dict:
+    """Walk a /tools/get_trace response and sanitize sensitive tag values.
+
+    Targets: `db.statement` (SQL with literals), `http.target` (may contain
+    user IDs in path). Leaves structural fields (span_id, operation,
+    duration_ms, parent_span_id, error) intact so the LLM still sees the
+    shape of the request.
+    """
+    if not isinstance(trace, dict):
+        return trace
+    out = dict(trace)
+    sanitized_spans = []
+    for span in out.get("spans", []) or []:
+        if not isinstance(span, dict):
+            sanitized_spans.append(span)
+            continue
+        span_copy = dict(span)
+        tags = dict(span_copy.get("tags", {}) or {})
+        if "db.statement" in tags:
+            tags["db.statement"] = _sanitize_db_statement(tags["db.statement"])
+        if "http.target" in tags and isinstance(tags["http.target"], str):
+            # Replace numeric path segments (likely IDs) with `:id`.
+            tags["http.target"] = _re.sub(r"/\d+", "/:id", tags["http.target"])
+        span_copy["tags"] = tags
+        sanitized_spans.append(span_copy)
+    out["spans"] = sanitized_spans
+    return out
 
 
 def _absolute_window(alert_epoch: float, window_minutes: int) -> tuple[float, float]:
@@ -142,6 +193,25 @@ class ContextGatherer:
         else:
             ctx.traces, ctx.jaeger_ms = results[2]
             ctx.sources_available += 1
+
+            # S3-HF-07: deep-trace gather. One additional MCP call to drill
+            # into per-span attributes of the slowest trace, gated on alert
+            # archetype + trace duration. Non-fatal if it fails; the
+            # first-pass RCA still ships.
+            #
+            # /tools/find_traces returns either a list directly OR a wrapper
+            # dict like {"traces": [...], "count": N} depending on MCP
+            # version — unwrap defensively so the gate sees the list.
+            traces_list = (
+                ctx.traces.get("traces", []) if isinstance(ctx.traces, dict)
+                else (ctx.traces or [])
+            )
+            if self._should_fetch_deep_trace(alert, traces_list):
+                trace_id = self._pick_slowest_trace_id(traces_list)
+                if trace_id:
+                    deep, deep_ms = await self._fetch_deep_trace(trace_id)
+                    ctx.deep_trace = deep
+                    ctx.deep_trace_ms = deep_ms
 
         ctx.errors = errors
 
@@ -270,6 +340,70 @@ class ContextGatherer:
             if fb_lines:
                 return fb_lines, ms + fb_ms, True
         return lines, ms, False
+
+    # -------------------------------------------------------------------
+    # S3-HF-07 (2026-05-19): Tier 1 deep trace gather
+    #
+    # When the alert is latency-flavoured AND `_fetch_jaeger` returned at
+    # least one trace, we make one extra MCP call to /tools/get_trace on
+    # the slowest trace and surface per-span attributes (db.statement,
+    # http.target, error tags) to the LLM. Cost ceiling: exactly one
+    # extra MCP roundtrip per qualifying alert, gated by alert-name
+    # pattern so non-latency alerts (OOM, disk, target-down) skip it.
+    #
+    # PII: `db.statement` tags may contain literal parameter values
+    # (e.g. `WHERE email = 'lina@…'`). We sanitize before injection via
+    # _sanitize_db_statement so the LLM never sees the raw values.
+    # -------------------------------------------------------------------
+
+    _LATENCY_ALERTNAME_PATTERN = _re.compile(r"^.*P95Latency$|^.*ErrorRate$", _re.IGNORECASE)
+
+    def _should_fetch_deep_trace(self, alert: GrafanaAlert, traces: list[dict]) -> bool:
+        """Decide whether the deep-trace MCP call is worth firing.
+
+        Three gates: (a) the alertname matches the latency / error-rate
+        pattern; (b) we have at least one trace from find_traces; (c) the
+        slowest trace's duration is meaningful (>= 500ms — short traces
+        rarely warrant a span breakdown).
+        """
+        if not traces:
+            return False
+        if not self._LATENCY_ALERTNAME_PATTERN.match(alert.alertname or ""):
+            return False
+        slowest = max(
+            (t for t in traces if isinstance(t, dict)),
+            key=lambda t: t.get("duration_ms", 0) or 0,
+            default=None,
+        )
+        if slowest is None:
+            return False
+        return (slowest.get("duration_ms", 0) or 0) >= 500
+
+    def _pick_slowest_trace_id(self, traces: list[dict]) -> str | None:
+        candidates = [t for t in traces if isinstance(t, dict) and t.get("trace_id")]
+        if not candidates:
+            return None
+        slowest = max(candidates, key=lambda t: t.get("duration_ms", 0) or 0)
+        return slowest.get("trace_id")
+
+    async def _fetch_deep_trace(self, trace_id: str) -> tuple[dict | None, int]:
+        """Fetch full span detail for one trace via jaeger-mcp /tools/get_trace.
+
+        Returns (sanitized_payload, elapsed_ms). On any failure returns
+        (None, ms) — non-fatal; the first-pass RCA still ships.
+        """
+        try:
+            data, ms = await self._mcp_call(
+                server="jaeger",
+                url=f"{settings.jaeger_mcp_url}/tools/get_trace",
+                params={"trace_id": trace_id},
+            )
+        except Exception as exc:
+            logger.debug("Deep trace fetch failed: %s", exc)
+            return None, 0
+        if not isinstance(data, dict) or data.get("error"):
+            return None, ms
+        return _sanitize_deep_trace(data), ms
 
     async def _fetch_jaeger(
         self, alert: GrafanaAlert, abs_window: tuple[float, float] | None
