@@ -163,6 +163,16 @@ class Settings(BaseSettings):
         "monitoring":    "docker-vm",  # label used by TargetDown for anything on monitoring-vm
         # Host-level (systemd or equivalent daemons on the k3s node + VMs)
         "k3s-node":      "systemd",
+        # car-rental tenant (added 2026-05-19) — second Spring Boot + MySQL
+        # workload deployed alongside react-springboot-mysql on the same k3s
+        # cluster, namespace=rental. Same archetype coverage as the existing
+        # spring-boot service since the stack is structurally identical.
+        # Note: alert.service for the rental backend container is "backend"
+        # (the container name in the helm chart), not "rental-backend".
+        "backend":       "k8s",
+        "rental-backend": "k8s",
+        "rental-frontend": "k8s",
+        "rental-mysql":  "k8s",
     }
 
     # IP-to-hostname map for turning raw alert instances like "10.0.1.194:9100"
