@@ -2000,8 +2000,7 @@ async def dashboard_guide():
   <div class="eyebrow">AI root-cause triage · operator reference</div>
   <h1>Dashboard <span class="accent">guide</span></h1>
   <p class="subtitle">Every column, every internal code, every abbreviation explained.
-  If a label in the triage UI is unclear, find it here. The same content as the
-  monitoring-docs page, served locally so the dashboard stays self-contained.</p>
+  If a label in the triage UI is unclear, find it here.</p>
   <a href="/dashboard" class="nav-back">← Back to decisions</a>
 </div>
 
