@@ -1952,12 +1952,6 @@ _GUIDE_CSS = """
     font-size: 11px; font-weight: 500; letter-spacing: .3px;
     color: var(--blue); margin-bottom: 5px;
   }
-  .deep-link {
-    display: inline-block; margin-top: 8px; font-size: 12px;
-    color: var(--text-muted); border-bottom: 1px dotted var(--text-muted);
-    text-decoration: none;
-  }
-  .deep-link:hover { color: var(--blue); border-bottom-color: var(--blue); }
 """
 
 
@@ -1984,9 +1978,6 @@ async def dashboard_guide():
     Lina 2026-04-27: pulled this out of github-pages so the link stays
     inside the same host as the dashboard itself, and recolored to match
     the sage/white palette so it's visually coherent with /dashboard.
-    The fuller monitoring-docs version of the same content remains at
-    https://linalaaraich.github.io/monitoring-docs/dashboard-guide.html
-    for deep-dive reference, linked at the bottom of this page.
     """
     return f"""<!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -2279,16 +2270,6 @@ async def dashboard_guide():
     <strong>Triage path</strong> in the detail panel tells you which pipeline branch the alert took.
     If those three disagree, the row is interesting — open it and read the reasoning.</p>
   </div>
-</div>
-
-<div class="card">
-  <h3>Deeper reading</h3>
-  <p>This page covers the operator-facing UI. For the full architectural context — every
-  module, every config knob, every gotcha, the philosophy decisions log, the alerts-audit
-  with per-alert accuracy, and the Sprint 2 Epic 5 (UEBA) plan — see the monitoring-docs
-  site:</p>
-  <a class="deep-link" href="https://linalaaraich.github.io/monitoring-docs/dashboard-guide.html" target="_blank" rel="noopener">monitoring-docs version of this page (extended) →</a><br>
-  <a class="deep-link" href="https://linalaaraich.github.io/monitoring-docs/" target="_blank" rel="noopener">monitoring-docs home →</a>
 </div>
 
 </article>
