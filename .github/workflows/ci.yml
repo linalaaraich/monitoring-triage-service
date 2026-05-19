@@ -1,0 +1,45 @@
+name: ci
+
+# Runs pytest + the S3-HF-08 MCP-invariant lint on every push and PR.
+# Builds are gated on this passing — see build-push.yml which runs on
+# main pushes only after this workflow's checks have validated the code.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "scripts/**"
+      - "requirements.txt"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: MCP-only invariant lint
+        run: python scripts/check_mcp_invariant.py
+
+      - name: pytest
+        run: python -m pytest tests/ -q
