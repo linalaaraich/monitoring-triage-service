@@ -54,11 +54,23 @@ class JaegerGetTracesArgs(BaseModel):
     limit: int = Field(5, ge=1, le=20)
 
 class RCAHistorySimilarArgs(BaseModel):
-    """Find recent similar decisions to the one being investigated."""
+    """Find recent similar decisions to the one being investigated.
+
+    Post-S3-HF-05 (2026-05-19) this routes through rca_history_mcp's
+    /tools/get_similar_decisions endpoint (not a direct DB read), so
+    `min_quality` is forwarded to the MCP for quality-filtered retrieval.
+    Default "actionable" — the retry should learn only from prior RCAs
+    that were judged good. Set to "data_starved" or "needs_review" to
+    widen if the actionable-only set is empty.
+    """
     alert_name: str
     affected_service: str | None = None
     days: int = Field(7, ge=1, le=30)
     limit: int = Field(3, ge=1, le=10)
+    min_quality: str = Field(
+        "actionable",
+        description="Minimum rca_quality (actionable | data_starved | needs_review)",
+    )
 
 class RCAHistoryListExemplarsArgs(BaseModel):
     """List all curated RCA exemplars (canonical good-RCA shapes).
@@ -112,9 +124,12 @@ Tool catalog:
     traced-neighbor service, or filter for slow traces specifically.
 
 - rca_history.similar
-    args: { "alert_name": "<name>", "affected_service": "<opt>", "days": <1-30>, "limit": <1-10> }
+    args: { "alert_name": "<name>", "affected_service": "<opt>", "days": <1-30>, "limit": <1-10>, "min_quality": "<actionable|data_starved|needs_review>" }
     use when: this alert has fired before and you want to see what
-    prior RCAs concluded / what actions were tried.
+    prior RCAs concluded / what actions were tried. min_quality
+    defaults to "actionable" — only RCAs judged good are returned.
+    Widen to "data_starved" or "needs_review" if the actionable-only
+    set is empty.
 
 - rca_history.list_exemplars
     args: {}
@@ -218,23 +233,36 @@ async def execute_tool(
                 r.raise_for_status()
                 return {"tool": name, "args": args, "result": r.json()}
             elif name == "rca_history.similar":
-                # Direct DB lookup — no MCP client needed here
-                if hasattr(store, "get_recent_decisions_for_alert"):
-                    rows = await store.get_recent_decisions_for_alert(
-                        alert_name=args["alert_name"],
-                        affected_service=args.get("affected_service"),
-                        days=args.get("days", 7),
-                        limit=args.get("limit", 3),
-                    )
-                else:
-                    rows = await store.get_decisions(limit=args.get("limit", 3), alert_name=args["alert_name"])
-                return {"tool": name, "args": args, "result": rows}
+                # S3-HF-05 (2026-05-19): closes the second MCP-only-invariant
+                # bypass. Was a direct in-process call to store.get_decisions
+                # (no quality filter, no service filter in practice); now
+                # routes through rca_history_mcp's /tools/get_similar_decisions
+                # which adds proper quality-filtering. Same MCP that
+                # entity_baselines.py goes through post-S3-HF-04.
+                params = {
+                    "alert_name": args["alert_name"],
+                    "days": args.get("days", 7),
+                    "limit": args.get("limit", 3),
+                    "min_quality": args.get("min_quality", "actionable"),
+                }
+                if args.get("affected_service"):
+                    params["affected_service"] = args["affected_service"]
+                r = await client.get(
+                    f"{settings.rca_history_mcp_url}/tools/get_similar_decisions",
+                    params=params,
+                )
+                r.raise_for_status()
+                return {"tool": name, "args": args, "result": r.json()}
             elif name == "rca_history.list_exemplars":
-                # Local in-process call into the exemplars module — no
-                # HTTP / MCP roundtrip needed; same pattern as similar.
+                # `from app import exemplars` is intentional and exempt from
+                # the MCP-only data-access invariant — exemplars are local
+                # configuration (compiled-into-service YAML scaffolding the
+                # prompt), not external data the LLM could hallucinate. The
+                # CI lint (S3-HF-08) carries this exemption explicitly.
                 from app import exemplars as _ex
                 return {"tool": name, "args": args, "result": _ex.list_all()}
             elif name == "rca_history.get_exemplar":
+                # See note on rca_history.list_exemplars above re. exemption.
                 from app import exemplars as _ex
                 ex = _ex.get_by_id(args["exemplar_id"])
                 if ex is None:
