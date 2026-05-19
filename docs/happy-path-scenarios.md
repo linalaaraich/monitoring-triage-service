@@ -1,6 +1,8 @@
 # Happy-path scenarios — the triage service working as intended
 
-These eight scenarios describe the full CIRES triage pipeline running cleanly end-to-end: Grafana fires an alert, the service deduplicates, gathers context from Prometheus / Loki / Jaeger via the MCP servers in parallel, Drain3 annotates the logs, Ollama (`qwen2.5:7b-instruct`) on the GPU host produces a structured RCA, the validator passes it, an email is sent on ESCALATE, and the row lands on the dashboard with all evidence intact. Each scenario lists the alert payload, what each pillar contributed, the LLM's verdict, and the operator-facing artifacts (email + dashboard row + RCA history).
+These **fourteen** scenarios describe the full CIRES triage pipeline running cleanly end-to-end: Grafana fires an alert, the service deduplicates, gathers context from Prometheus / Loki / Jaeger via the MCP servers in parallel, Drain3 annotates the logs, Ollama (`qwen2.5:7b-instruct` on the laptop's GTX 1060) produces a structured RCA, the validator passes it, an email is sent on ESCALATE, and the row lands on the dashboard with all evidence intact. Each scenario lists the alert payload, what each pillar contributed, the LLM's verdict, and the operator-facing artifacts (email + dashboard row + RCA history).
+
+One scenario per archetype in `app/exemplars/library.yaml` (14 total). Scenarios 1–11 cover the original archetypes shipped in Sprint 2; scenarios 12–14 cover the three archetypes added during the 2026-04-28 audit cycle to close coverage gaps (`service-self-p95-saturation`, `critical-resource-saturation`, `otel-collector-degradation`).
 
 ## RCA prose quality — telemetry is the means, not the end
 
@@ -410,13 +412,99 @@ Reduce step (refId=B) reports `2.93` (days). Severity: warning — there is no c
 
 ---
 
+## Scenario 12 — Service-self p95 saturation (the slowness is *inside* the service, not upstream)
+
+**Initial state.** Spring-Boot v1.5.0 shipped at 13:40 with a new `/api/dashboard/aggregate` endpoint that scans the in-memory `OrderCache` (a `ConcurrentHashMap<UUID, Order>` of ~120 k entries) under a single `synchronized` block. Under load, the lock becomes the bottleneck; latency manifests entirely inside Spring-Boot's own handler — not in upstream MySQL, not in Kong, not in network. This is the **mirror image of Scenario 2**: same alert shape (p95 spike), opposite attribution.
+
+**Trigger.** At 14:18 local, `HighP95Latency` fires for `service=spring-boot, severity=warning`. Reduce step reports `1.84` (seconds). Annotation expression: `histogram_quantile(0.95, sum by (le)(rate(http_server_requests_seconds_bucket{job="app-spring-actuator"}[5m])))`.
+
+**Why this is *not* an `upstream-latency-attribution` (Scenario 2).** That archetype fires when a downstream service (Kong) reports high p95 driven by an upstream service it calls. Here, spring-boot is reporting its own p95 — there's no "upstream" to attribute to. The archetype matcher correctly picks `service-self-p95-saturation` because the alert is fired *on the service itself*, not on a gateway.
+
+**Context fan-out.**
+- **Prometheus MCP (210 ms).** Returns `http_server_requests_seconds_bucket` quantiles (p95 1.8 s, p99 2.4 s — climbing past 14:00), `jvm_gc_pause_seconds_sum` (flat — this is *not* a GC story), `jvm_threads_states_threads{state="blocked"}` jumped from a baseline of 2 to 47 around 14:00 onwards, `process_cpu_usage` at 88 % (a single thread fully consumed; you can see this in the `cpu_usage_idle` pattern), and the entity-baseline (via S3-HF-04 → prometheus-mcp) reports the request-rate is *normal* — this isn't a traffic spike.
+- **Loki MCP (180 ms).** No errors, no warnings, no slow-query logs. Just successful 200 responses with longer-than-usual server-times. Critically: **nothing is wrong from the application's own perspective.** Drain3 returns no novel clusters.
+- **Jaeger MCP (260 ms).** Top 20 latency traces: every span shows `OrderController.getDashboardAggregate` at 1.6-1.9 s with **no child spans** beyond fast in-memory access. There are no MySQL calls, no HTTP calls, no external dependencies in the slow path. Inside the span, custom tags reveal `lock.wait.ms=1620` on the synchronized block. This is the keystone evidence.
+
+**LLM verdict.** ESCALATE, severity warning, confidence 0.91. The RCA explicitly disconfirms upstream causes:
+
+> Spring-Boot's `/api/dashboard/aggregate` endpoint is saturating its own request handlers because of lock contention on the in-process `OrderCache` synchronized block. Trace evidence shows 1.6-1.9 s spent *inside* the spring-boot span with no child calls — `lock.wait.ms` tags consistently around 1.6 s on the affected traces. JVM thread states confirm this: blocked-thread count jumped from 2 to 47 around 14:00, while GC pause time is flat (this is not a heap/GC story) and request rate is normal (not a load story). The pattern post-dates the 13:40 deploy of v1.5.0, which introduced the new aggregate endpoint. Root cause: the new endpoint takes a coarse-grained `synchronized` lock on the entire OrderCache and serialises all callers. Upstream is fine — Kong p95 is 4 ms, MySQL query time is sub-millisecond and not in the slow span path.
+
+**Suggested actions.**
+
+1. `helm rollback spring-boot --revision <pre-v1.5.0>` — fastest restore-of-service. The endpoint is new; rollback removes the bottleneck immediately.
+2. `kubectl scale deploy/spring-boot --replicas=4 -n app` — temporary load-spreading if rollback is blocked (won't fix root cause, but blunts impact).
+3. After rollback succeeds and the team plans v1.5.1: redesign the aggregate endpoint to use `ConcurrentHashMap`'s native `reduce` / `forEachEntry` (lock-free) or partition the cache so the synchronized block scopes to a partition rather than the whole map. *(This is a code change; not a `suggested_action` since it's not a runtime verb.)*
+
+**Why it's a perfect cycle.** The exemplar matcher correctly distinguished service-self saturation from upstream attribution — the same alertname (`HighP95Latency`) routes to two different archetypes based on the service it fires *on*. The LLM didn't fall into the trap of "p95 is high, must be the database" — it followed the trace evidence into the spring-boot span and stopped there. The deploy correlation closed the case. The `lock.wait.ms` tag is the kind of evidence only the trace pillar can supply.
+
+---
+
+## Scenario 13 — Critical resource saturation (and *not* an adaptive-threshold noop)
+
+**Initial state.** The monitoring VM (`observability-rca-monitoring`) runs Prometheus / Loki / Jaeger / Grafana in docker-compose alongside an otel-collector. At 03:14 UTC, a Loki ingestion regression (a label-cardinality blowup from a misconfigured service) starts driving Loki's CPU usage off the chart: the monitoring VM's overall CPU climbs from a steady-state of 18 % to 96 % over 8 minutes and stays there.
+
+**Trigger.** `CriticalCpuUsage` fires for `instance=observability-rca-monitoring, service=monitoring, severity=critical`. Reduce step reports `0.96`. Annotation: `1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))`.
+
+**Why this is *not* an `adaptive-threshold-noop` (Scenario 7).** Scenario 7 dismisses a `Medium`/`HighCpuUsage` warning because the value is within the historical 7-day envelope — Tuesday-morning-ramp territory. This is **critical** severity, the value is **5× the historical p95 baseline** (typical Tuesday 03:14 sees ~22 % CPU; current 96 % is +28σ above baseline), and the archetype matcher routes `Critical(Cpu|Memory)Usage` to `critical-resource-saturation` regardless of baseline noise — critical is critical.
+
+**Context fan-out.**
+- **Prometheus MCP (220 ms).** `node_cpu_seconds_total` flame breakdown shows ~70 % of CPU time on a single process group (`loki` container). `container_cpu_usage_seconds_total{name="loki"}` quintupled vs. 30 min prior. `loki_ingester_chunks_created_total` rate exploded from ~10/s to ~800/s — that's the cardinality blowup tell. Entity baseline (via prometheus-mcp): 7-day p95 for this metric is 22 % CPU; current value is 28σ above. Sample count 10080 — authoritative.
+- **Loki MCP (300 ms).** Loki's own logs flooded with `level=warn caller=ingester.go:... msg="streams limit exceeded for user fake" stream={...}` — and the stream label is a UUID. Drain3 catches the novel cluster (`cluster #214 'streams limit exceeded ... stream=<UUID>'`) and reports it as novel since 03:14 with ~12 k recurrences in 8 min.
+- **Jaeger MCP.** Not relevant — Loki traffic isn't traced; skipped.
+
+**LLM verdict.** ESCALATE, severity critical, confidence 0.96.
+
+> The monitoring VM is saturated because **Loki is being asked to ingest a stream label of unbounded cardinality** — a new service appears to be tagging log streams with a UUID rather than a stable service identifier. CPU is at 96 % (28σ above the 7-day baseline of 22 %), driven almost entirely by Loki's ingestion path. Loki's own warning logs since 03:14 confirm the cardinality blowup ("streams limit exceeded for user fake", stream labels are UUIDs). This is critical because once Loki starts dropping streams the entire log pillar of the observability stack becomes unreliable — and because *this is the monitoring VM*, a sustained pin at 96 % CPU is one Prometheus-scrape timeout away from cascading into `TargetDown` on every job. **The whole observability surface is at risk if this isn't stopped within minutes.**
+
+**Suggested actions.**
+
+1. `docker compose -f /opt/monitoring/docker-compose.yml restart loki` — clear the ingestion backlog and give the operator a steady-state baseline to inspect from.
+2. `ansible-playbook -i inventory/tailnet.yml playbooks/loki.yml --tags=limits-config` — push a hard `max_streams_per_user` cap so this regression can't repeat after restart.
+3. Identify the offending producer: query `topk(5, count by (service_name) (rate({}[5m])))` against the running Loki to find which service is generating UUID-keyed streams; then patch that service's logging config or labels.
+4. After mitigations land, *raise* the recurrence-gate on `CriticalCpuUsage{instance="observability-rca-monitoring"}` — this is critical-bypass-eligible (see US-5.8); the gate should never have skipped it but the audit shows the metric path was healthy.
+
+**Why it's a perfect cycle.** The system correctly distinguished `critical-resource-saturation` from the adaptive-threshold noop archetype despite the alertnames being adjacent. The baseline σ-claim sharpens the case — "28σ above the 7-day baseline" is much more diagnostic than "above 80 %." The RCA names the second-order risk (cascading `TargetDown` on the whole observability stack) — that's the *severity* lens that an SRE applies to host-level alerts, and the exemplar prose primes the LLM to do the same. Critical severity bypasses the recurrence gate per the US-5.8 design — `triage_recurrence_critical_bypassed_total` increments and the operator sees the bypass surfaced in the dashboard.
+
+---
+
+## Scenario 14 — OTel collector degradation (the observability stack reporting on itself)
+
+**Initial state.** The k3s in-cluster otel-collector deployment received a config change at 11:40 that bumped its memory-limiter to 100 MiB. Under the existing trace-volume baseline (~6 k spans/min), the collector hits its limit and starts shedding spans when its internal queue overflows. There's no app-level failure; the failure is *in the telemetry pipeline itself*.
+
+**Trigger.** At 11:53 local, `OTelCollectorHighSpanDropRate` fires for `service=otel-collector, severity=warning`. Reduce step reports `0.17` (17 % of spans dropped over the 5-min window). Annotation: `rate(otelcol_processor_dropped_spans[5m]) / rate(otelcol_processor_received_spans[5m])`.
+
+**Why this archetype is special.** The system being observed and the system doing the observing partially overlap — when the otel-collector degrades, downstream RCAs **cannot trust trace evidence freshness** during the degradation window. The exemplar prose explicitly instructs the LLM to acknowledge this: *"Span drops mean some traces in the affected window are missing. Don't blame an upstream service for 'no slow spans' if span-drop is non-zero during that window — the absence of evidence is not evidence of absence."*
+
+**Context fan-out.**
+- **Prometheus MCP (250 ms).** Returns `otelcol_processor_dropped_spans` rate (climbing since 11:42), `otelcol_processor_queue_size` (pegged at queue max of 1000), `container_memory_working_set_bytes{container="otel-collector"}` (saw-toothing against the new 100 MiB limit), and `kube_pod_container_status_restarts_total{container="otel-collector"}=2` (two restarts since 11:42, matches the memory-limiter ejecting and restarting).
+- **Loki MCP (200 ms).** Pulls collector logs. Lots of `info refused_spans_total{reason="memory_limiter_high_threshold"}` followed by `warn dropping data ... queue is full`. Drain3 flags the cluster as novel since 11:42 with the rate climbing in lockstep with the dropped-spans metric.
+- **Jaeger MCP (180 ms).** Span count over the affected window is ~5 k where the baseline would be ~6 k — a visible deficit. **The pipeline tags this evidence as `*partial — 17 % of spans dropped during window`** so the LLM doesn't infer health from missing data.
+- **Deploy-events MCP (90 ms).** Returns the 11:40 config-map change for `otel-collector` — the memory_limiter setting moved from 256 MiB to 100 MiB.
+
+**LLM verdict.** ESCALATE, severity warning (escalating to critical if cascade signals appear), confidence 0.93.
+
+> The k3s otel-collector is dropping ~17 % of incoming spans because the memory_limiter set in the 11:40 config-map change (from 256 MiB to 100 MiB) is now insufficient under steady-state trace volume. The collector pod has restarted twice since 11:42 (memory_limiter ejects it from the data path; Kubernetes restarts; cycle repeats). `otelcol_processor_queue_size` is pegged at 1000 (queue max). Drain3 confirms the memory_limiter warning log is novel since 11:42. **Downstream RCA quality is degraded during this window: trace-based RCAs for any service from 11:42 onwards may be missing 17 % of their span evidence, so don't trust "no slow spans found" as a positive signal until this resolves.**
+
+**Suggested actions.**
+
+1. `kubectl rollout undo deployment/otel-collector -n observability` — fastest restoration. The config change is the proximate cause; reverting it brings the collector back to its known-good 256 MiB limit.
+2. After the rollout-undo, monitor `otelcol_processor_dropped_spans` rate; it should hit zero within one queue-flush cycle (~30 s).
+3. If the lower memory limit was intentional (e.g. resource-quota pressure on the k3s node): re-apply with `memory_limiter: 256 MiB` **and** add a `batch` processor with `send_batch_max_size=500` to spread the memory pressure across smaller batches before the limiter sees them.
+4. File a recurrence note: the audit cycle should add an alert on `kube_pod_container_status_restarts_total{container="otel-collector"}` (currently uncovered) so the next memory-limiter cycle is caught at the first restart, not the 17 %-drop threshold.
+
+**Why it's a perfect cycle.** The unique value of this archetype is that the RCA **labels the trust degradation of its own pillar** in the same paragraph it names the cause. A naive RCA on a downstream `HighP95Latency` alert during this window might conclude "no slow spans, must not be a real latency issue" — that would be wrong because 17 % of spans are missing. By flagging "trace evidence is degraded during this window," the LLM teaches the operator to weigh downstream evidence appropriately, and the validator's cause-evidence rule doesn't accidentally reject claims that lean on the metric pillar instead. This is the kind of meta-awareness that earns the LLM operator trust on the boring days that determine whether they reach for it on the bad days.
+
+*(Partially forward-looking note: `OTelCollectorHighQueueDepth` and `OTelCollectorHighMemoryUsage` are listed in this archetype's matcher regex but their Grafana rules are not yet provisioned. The exemplar regex stays as written so the archetype matches as those rules land; the audit static-prompt is aware of this.)*
+
+---
+
 ## Cross-cutting properties demonstrated by these scenarios
 
 | Property | Scenario(s) |
 |---|---|
-| Three-pillar context (metrics + logs + traces) all consulted, none redundant | 1, 2, 4, 6, 9, 10 |
-| Drain3 contributes a signal the other pillars cannot (novelty, rate change) | 1, 4, 5, 9, 11 |
-| Architecture-aware suggestions (k8s vs docker-vm vs systemd) | 1 (k8s), 2 (k8s), 4 (docker-vm), 9 (k8s), 10 (k8s + IaC), 11 (k8s) |
+| Three-pillar context (metrics + logs + traces) all consulted, none redundant | 1, 2, 4, 6, 9, 10, 12 |
+| Drain3 contributes a signal the other pillars cannot (novelty, rate change) | 1, 4, 5, 9, 11, 13, 14 |
+| Architecture-aware suggestions (k8s vs docker-vm vs systemd) | 1 (k8s), 2 (k8s), 4 (docker-vm), 9 (k8s), 10 (k8s + IaC), 11 (k8s), 12 (k8s), 13 (docker-vm), 14 (k8s) |
 | Validator catches and blocks investigation-as-action; only remediation verbs ship | All — explicitly visible in 11 |
 | LLM declines to hedge — names a cause or explicitly chooses DISMISS / INCONCLUSIVE | 3, 6 |
 | System stays quiet when nothing is wrong (no false-positive page) | 7 |
@@ -424,10 +512,14 @@ Reduce step (refId=B) reports `2.93` (days). Severity: warning — there is no c
 | Incidents collapse multiple alerts into one human-readable kill chain | 4, 9, 10 |
 | Operator feedback closes the loop and changes future routing | 8 |
 | Pre-failure detection (alert fires before user impact) | 11 |
-| Deploy / IaC correlation (RCA names a specific commit or apply event) | 1, 5, 9, 10, 11 |
+| Deploy / IaC correlation (RCA names a specific commit or apply event) | 1, 5, 9, 10, 11, 12, 14 |
 | Network / firewall / connectivity attribution distinct from app failure | 10 |
 | App-boot / config failure (CrashLoopBackOff) handled with rollback-first remediation | 9 |
+| **Same alertname routes to two different archetypes based on the service it fires on** | 2 vs 12 (`HighP95Latency` upstream vs self) |
+| **Critical severity bypasses recurrence gate** (US-5.8 design) | 13 |
+| **Baseline σ-claim from entity-baseline MCP path sharpens severity argument** (S3-HF-04) | 12, 13 |
+| **RCA labels degraded trust in its own evidence pillar when telemetry pipeline is affected** | 14 |
 | Email + dashboard + RCA history record stay consistent | All |
-| Pipeline latency stays under 90 s on warm cache, 60 s on first-inference cold | 1 (42 s), 2, 3 (~15 s), 4 (~60 s for bundle), 5, 6 (+~25 s for retry), 9, 10 (~70 s), 11 |
+| Pipeline latency stays under 90 s on warm cache, 60 s on first-inference cold | 1 (42 s), 2, 3 (~15 s), 4 (~60 s for bundle), 5, 6 (+~25 s for retry), 9, 10 (~70 s), 11, 12 (~55 s), 13 (~48 s), 14 (~60 s) |
 
 Each row above corresponds to an acceptance criterion already shipped in Sprint 2 or scoped in Sprint 2 Epic 5 — see `monitoring-docs/sprint2-epic5-ueba.html` for the spec, `monitoring-docs/decisions-log.html` for the rationale on each design call.
