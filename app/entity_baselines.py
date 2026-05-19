@@ -26,6 +26,8 @@ from typing import Optional
 
 import httpx
 
+from app.metrics import triage_mcp_duration_seconds, triage_mcp_requests_total
+
 logger = logging.getLogger(__name__)
 
 
@@ -127,43 +129,60 @@ def clear_cache() -> None:
 
 
 # -----------------------------------------------------------------------------
-# Prometheus query
+# Prometheus query — routes through prometheus-mcp (MCP-only invariant).
+#
+# Per the MCP-only data-access rule (S3-HF-04, shipped 2026-05-19), every
+# Prometheus read the LLM downstream will see must come through the MCP
+# bridge. The MCP server forwards to Prometheus and passes the response
+# JSON through largely unchanged, so the parsing logic below matches the
+# Prometheus instant-query response shape exactly.
 # -----------------------------------------------------------------------------
 
-async def _query_prometheus(
-    prometheus_url: str,
+async def _query_prom_mcp(
+    prometheus_mcp_url: str,
     promql: str,
     timeout_s: float = 10.0,
 ) -> Optional[float]:
-    """Run an instant query, return the first sample's value as float, or None.
+    """Run an instant query against prometheus-mcp; return scalar or None.
 
-    Used for scalar quantiles like quantile_over_time. Range queries use a
-    different shape — those have their own helper below.
+    Routes through prometheus-mcp's /query?expr= endpoint (same surface as
+    bounded_agency.py uses for retry-path Prom queries). Emits standard
+    MCP metrics (triage_mcp_requests_total + triage_mcp_duration_seconds,
+    server=prometheus) so this path is observable alongside the
+    context-gathering MCP traffic.
     """
+    start = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             resp = await client.get(
-                f"{prometheus_url.rstrip('/')}/api/v1/query",
-                params={"query": promql},
+                f"{prometheus_mcp_url.rstrip('/')}/query",
+                params={"expr": promql},
             )
+            elapsed = time.monotonic() - start
+            triage_mcp_duration_seconds.labels(server="prometheus").observe(elapsed)
             if resp.status_code != 200:
+                triage_mcp_requests_total.labels(server="prometheus", status="error").inc()
                 logger.warning(
-                    "Prometheus query returned %d for %r", resp.status_code, promql[:80]
+                    "prometheus-mcp returned %d for %r", resp.status_code, promql[:80]
                 )
                 return None
+            triage_mcp_requests_total.labels(server="prometheus", status="success").inc()
             data = resp.json()
+            # MCP passes Prometheus JSON through unchanged: {"data": {"result": [...]}}.
             result = data.get("data", {}).get("result", [])
             if not result:
                 return None
             value = result[0].get("value", [None, None])[1]
             return float(value) if value is not None else None
     except (httpx.HTTPError, ValueError) as e:
-        logger.debug("Prometheus query failed: %s", e)
+        triage_mcp_requests_total.labels(server="prometheus", status="error").inc()
+        triage_mcp_duration_seconds.labels(server="prometheus").observe(time.monotonic() - start)
+        logger.debug("prometheus-mcp query failed: %s", e)
         return None
 
 
 async def _query_count(
-    prometheus_url: str,
+    prometheus_mcp_url: str,
     metric: str,
     window_seconds: int,
     label_filter: str,
@@ -172,12 +191,12 @@ async def _query_count(
     """Count the number of samples in the window — used to decide whether
     the baseline is authoritative."""
     promql = f"count_over_time({metric}{{{label_filter}}}[{window_seconds}s])"
-    val = await _query_prometheus(prometheus_url, promql, timeout_s)
+    val = await _query_prom_mcp(prometheus_mcp_url, promql, timeout_s)
     return int(val) if val is not None else 0
 
 
 async def _compute_baseline(
-    prometheus_url: str,
+    prometheus_mcp_url: str,
     service: str,
     metric: str,
     window_seconds: int,
@@ -208,7 +227,7 @@ async def _compute_baseline(
         "count": f"count_over_time({sampled}[{window_seconds}s])",
     }
     results: dict[str, Optional[float]] = await asyncio.gather(
-        *[_query_prometheus(prometheus_url, q, timeout_s) for q in queries.values()],
+        *[_query_prom_mcp(prometheus_mcp_url, q, timeout_s) for q in queries.values()],
         return_exceptions=False,
     )
     keys = list(queries.keys())
@@ -232,7 +251,7 @@ async def _compute_baseline(
 # -----------------------------------------------------------------------------
 
 async def get_baseline(
-    prometheus_url: str,
+    prometheus_mcp_url: str,
     service: str,
     metric: str,
     *,
@@ -242,11 +261,17 @@ async def get_baseline(
 ) -> BaselineFacts:
     """Fetch a behavioral baseline for (service, metric) over the window.
 
+    Routes all underlying Prometheus reads through prometheus-mcp — see
+    the MCP-only data-access invariant captured in
+    `feedback_mcp_only_data_access.md` and the §9 audit section. Caller
+    passes `settings.prometheus_mcp_url` (defaults to
+    `http://prometheus-mcp:8091`).
+
     Cached per (service, metric, window) for cache_ttl_seconds. Cache
-    miss runs five parallel Prometheus queries (mean, stddev, p50, p95,
-    count). The cache exists because Prometheus quantile_over_time over
-    a 7-day range is non-trivial (~10080 samples at 1m resolution per
-    series); doing it on every alert would saturate Prometheus.
+    miss runs five parallel MCP queries (mean, stddev, p50, p95, count).
+    The cache exists because quantile_over_time over a 7-day range is
+    non-trivial (~10080 samples at 1m resolution per series); doing it
+    on every alert would saturate Prometheus through the MCP.
 
     Returns a BaselineFacts with sample_count ≤ 100 if Prometheus has
     insufficient history — caller renders that case via
@@ -262,7 +287,7 @@ async def get_baseline(
             return entry.facts
 
         facts = await _compute_baseline(
-            prometheus_url=prometheus_url,
+            prometheus_mcp_url=prometheus_mcp_url,
             service=service,
             metric=metric,
             window_seconds=window_seconds,

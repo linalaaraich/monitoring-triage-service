@@ -375,11 +375,12 @@ class TriagePipeline:
                 # Use the rule's PromQL expression as the baseline metric.
                 # The cache key is (service, metric_expr, window) so distinct
                 # alerts on the same service produce distinct baselines.
+                # S3-HF-04 (2026-05-19): baseline reads go through
+                # prometheus-mcp, not direct Prometheus. Closes the last
+                # known MCP-only-invariant bypass on the gathering path.
                 metric_facts.baseline = await asyncio.wait_for(
                     get_baseline(
-                        prometheus_url="http://" + settings.monitoring_vm_ip + ":9090"
-                            if hasattr(settings, "monitoring_vm_ip")
-                            else "http://prometheus:9090",
+                        prometheus_mcp_url=settings.prometheus_mcp_url,
                         service=alert.service,
                         metric=alert.annotations["expr"],
                     ),

@@ -1,7 +1,9 @@
-"""US-5.1 Phase B — entity_baselines tests.
+"""US-5.1 Phase B + S3-HF-04 — entity_baselines tests.
 
-Uses an httpx mock transport to stub Prometheus responses, so tests
-don't depend on a live Prometheus.
+Uses an httpx mock transport to stub prometheus-mcp responses, so tests
+don't depend on a live Prometheus or MCP server. Post-S3-HF-04 the
+baseline path goes through prometheus-mcp (`/query?expr=`) not direct
+Prometheus (`/api/v1/query?query=`).
 """
 from __future__ import annotations
 
@@ -14,17 +16,25 @@ from app.entity_baselines import clear_cache, get_baseline
 
 
 class _FakeProm:
-    """Minimal Prometheus stub — captures queries, returns canned values."""
+    """Minimal prometheus-mcp stub — captures queries, returns canned values.
+
+    Asserts each request hits the MCP `/query?expr=` surface, not the
+    legacy direct-Prometheus `/api/v1/query?query=` surface (S3-HF-04).
+    Test failure here means a regression of the MCP-only invariant.
+    """
 
     def __init__(self, by_query: dict[str, float | None]):
         self.by_query = by_query
         self.captured: list[str] = []
+        self.captured_paths: list[str] = []
 
     def transport(self) -> httpx.MockTransport:
         def handler(request: httpx.Request) -> httpx.Response:
             params = dict(request.url.params)
-            q = params.get("query", "")
+            # Post-S3-HF-04: MCP uses `expr` param, not `query`.
+            q = params.get("expr", "")
             self.captured.append(q)
+            self.captured_paths.append(request.url.path)
             for needle, val in self.by_query.items():
                 if needle in q:
                     if val is None:
@@ -66,7 +76,7 @@ async def test_baseline_returns_authoritative_facts_when_history_present(fake_pr
         "quantile_over_time(0.95,": 1100.0,
         "count_over_time": 2016,
     }
-    facts = await get_baseline("http://prom:9090", "spring-boot", "http_request_duration_p95")
+    facts = await get_baseline("http://prometheus-mcp:8091", "spring-boot", "http_request_duration_p95")
     assert facts.is_authoritative is True
     assert facts.sample_count == 2016
     assert facts.mean == 850.0
@@ -83,7 +93,7 @@ async def test_baseline_not_authoritative_when_thin_history(fake_prom):
         "quantile_over_time(0.95,": 900.0,
         "count_over_time": 30,
     }
-    facts = await get_baseline("http://prom:9090", "spring-boot", "http_request_duration_p95")
+    facts = await get_baseline("http://prometheus-mcp:8091", "spring-boot", "http_request_duration_p95")
     assert facts.is_authoritative is False
     assert "No behavioral baseline available" in facts.as_prose_line(8500.0)
 
@@ -97,7 +107,7 @@ async def test_sigma_above_baseline_computes(fake_prom):
         "quantile_over_time(0.95,": 1100.0,
         "count_over_time": 2016,
     }
-    facts = await get_baseline("http://prom:9090", "spring-boot", "http_request_duration_p95")
+    facts = await get_baseline("http://prometheus-mcp:8091", "spring-boot", "http_request_duration_p95")
     sigma = facts.sigma_above_baseline(8500.0)
     assert sigma is not None
     assert 30.0 < sigma < 31.0
@@ -110,7 +120,7 @@ async def test_prose_line_renders_above_baseline(fake_prom):
         "quantile_over_time(0.5,": 800.0, "quantile_over_time(0.95,": 1100.0,
         "count_over_time": 2016,
     }
-    facts = await get_baseline("http://prom:9090", "spring-boot", "http_request_duration_p95")
+    facts = await get_baseline("http://prometheus-mcp:8091", "spring-boot", "http_request_duration_p95")
     line = facts.as_prose_line(8500.0)
     assert "spring-boot/http_request_duration_p95" in line
     assert "30.6σ above baseline" in line
@@ -123,7 +133,7 @@ async def test_prose_line_handles_zero_stddev(fake_prom):
         "quantile_over_time(0.5,": 100.0, "quantile_over_time(0.95,": 100.0,
         "count_over_time": 2016,
     }
-    facts = await get_baseline("http://prom:9090", "kong", "stable_metric")
+    facts = await get_baseline("http://prometheus-mcp:8091", "kong", "stable_metric")
     assert facts.sigma_above_baseline(110.0) is None
     assert "degenerate" in facts.as_prose_line(110.0)
 
@@ -135,9 +145,9 @@ async def test_cache_hit_skips_prometheus(fake_prom):
         "quantile_over_time(0.5,": 800.0, "quantile_over_time(0.95,": 1100.0,
         "count_over_time": 2016,
     }
-    await get_baseline("http://prom:9090", "spring-boot", "metric_x")
+    await get_baseline("http://prometheus-mcp:8091", "spring-boot", "metric_x")
     fake_prom.captured.clear()
-    await get_baseline("http://prom:9090", "spring-boot", "metric_x")
+    await get_baseline("http://prometheus-mcp:8091", "spring-boot", "metric_x")
     assert fake_prom.captured == []
 
 
@@ -148,9 +158,9 @@ async def test_cache_miss_for_different_service(fake_prom):
         "quantile_over_time(0.5,": 800.0, "quantile_over_time(0.95,": 1100.0,
         "count_over_time": 2016,
     }
-    await get_baseline("http://prom:9090", "spring-boot", "metric_x")
+    await get_baseline("http://prometheus-mcp:8091", "spring-boot", "metric_x")
     fake_prom.captured.clear()
-    await get_baseline("http://prom:9090", "kong", "metric_x")
+    await get_baseline("http://prometheus-mcp:8091", "kong", "metric_x")
     assert len(fake_prom.captured) == 5
 
 
@@ -161,12 +171,36 @@ async def test_cache_expiry(fake_prom, monkeypatch):
         "quantile_over_time(0.5,": 800.0, "quantile_over_time(0.95,": 1100.0,
         "count_over_time": 2016,
     }
-    await get_baseline("http://prom:9090", "spring-boot", "metric_x", cache_ttl_seconds=1)
+    await get_baseline("http://prometheus-mcp:8091", "spring-boot", "metric_x", cache_ttl_seconds=1)
     fake_prom.captured.clear()
     real_monotonic = time.monotonic
     monkeypatch.setattr("app.entity_baselines.time.monotonic", lambda: real_monotonic() + 100)
-    await get_baseline("http://prom:9090", "spring-boot", "metric_x", cache_ttl_seconds=1)
+    await get_baseline("http://prometheus-mcp:8091", "spring-boot", "metric_x", cache_ttl_seconds=1)
     assert len(fake_prom.captured) == 5
+
+
+@pytest.mark.asyncio
+async def test_baseline_routes_through_prometheus_mcp_surface(fake_prom):
+    """S3-HF-04 regression guard: every baseline read must hit the MCP
+    `/query?expr=` surface, never the direct-Prometheus `/api/v1/query?query=`
+    surface. If this test ever fails, the MCP-only invariant has regressed
+    on the baseline path."""
+    fake_prom.by_query = {
+        "avg_over_time": 850.0, "stddev_over_time": 250.0,
+        "quantile_over_time(0.5,": 800.0, "quantile_over_time(0.95,": 1100.0,
+        "count_over_time": 2016,
+    }
+    await get_baseline("http://prometheus-mcp:8091", "spring-boot", "http_request_duration_p95")
+
+    # Five parallel queries — mean, stddev, p50, p95, count.
+    assert len(fake_prom.captured) == 5
+    # All hits must be the MCP /query endpoint, never /api/v1/query.
+    assert all(p == "/query" for p in fake_prom.captured_paths), (
+        f"unexpected paths: {fake_prom.captured_paths}"
+    )
+    # The PromQL expressions themselves are unchanged — only the transport differs.
+    assert any("avg_over_time" in q for q in fake_prom.captured)
+    assert any("quantile_over_time(0.95," in q for q in fake_prom.captured)
 
 
 @pytest.mark.asyncio
@@ -178,6 +212,6 @@ async def test_baseline_falls_back_gracefully_on_prometheus_error(monkeypatch):
         async def get(self, *a, **kw):
             raise httpx.ConnectError("prom down")
     monkeypatch.setattr("app.entity_baselines.httpx.AsyncClient", _ErrClient)
-    facts = await get_baseline("http://prom:9090", "spring-boot", "metric_x")
+    facts = await get_baseline("http://prometheus-mcp:8091", "spring-boot", "metric_x")
     assert facts.sample_count == 0
     assert facts.is_authoritative is False
