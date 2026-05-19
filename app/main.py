@@ -214,6 +214,34 @@ async def health() -> HealthResponse:
     return HealthResponse(uptime_seconds=round(uptime, 1))
 
 
+_FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+    '<rect width="64" height="64" rx="14" fill="#0B0D10"/>'
+    '<path d="M18 22 L32 38 L46 22" stroke="#3E8FE6" stroke-width="6" '
+    'stroke-linecap="round" stroke-linejoin="round" fill="none"/>'
+    '<circle cx="32" cy="48" r="4" fill="#3E8FE6"/>'
+    '</svg>'
+)
+
+
+@app.get("/favicon.svg")
+async def favicon_svg() -> Response:
+    return Response(
+        content=_FAVICON_SVG,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/favicon.ico")
+async def favicon_ico() -> Response:
+    return Response(
+        content=_FAVICON_SVG,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/decisions")
 async def decisions(
     limit: int = Query(50, ge=1, le=500),
@@ -1603,6 +1631,7 @@ async def dashboard(
         f'<!DOCTYPE html><html lang="en"><head>'
         f'<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
         f'<title>RCA Triage platform · Decisions</title>'
+        f'<link rel="icon" type="image/svg+xml" href="/favicon.svg">'
         # Apply the persisted theme class to <html> SYNCHRONOUSLY, before
         # any rendering. The auto-refresh does a full page reload every
         # 30s; without this the page paints with the dark default first
@@ -1968,6 +1997,7 @@ async def dashboard_guide():
     return f"""<!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>RCA Triage platform · Dashboard Guide</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <script>(function(){{try{{if(localStorage.getItem("triage-theme")==="light")document.documentElement.classList.add("light");}}catch(e){{}}}})();</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
