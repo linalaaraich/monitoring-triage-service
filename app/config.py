@@ -169,6 +169,9 @@ class Settings(BaseSettings):
         # spring-boot service since the stack is structurally identical.
         # Note: alert.service for the rental backend container is "backend"
         # (the container name in the helm chart), not "rental-backend".
+        # Charts mirrored 2026-05-20 into
+        # monitoring-project/charts/rental-{backend,frontend,db}/
+        # — see charts/RENTAL-TENANT.md for the source-of-truth note.
         "backend":       "k8s",
         "rental-backend": "k8s",
         "rental-frontend": "k8s",
