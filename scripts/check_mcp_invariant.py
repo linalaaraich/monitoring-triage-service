@@ -22,6 +22,19 @@ What this lint catches
      external data — the exemption is intentional, but the list is bounded
      so a NEW caller has to be explicitly added here with a rationale.
 
+4. References to `settings.grafana_url` / `settings.loki_api_url` /
+     `settings.jaeger_url` outside `startup_backfill.py` + `drain_analyzer.py`.
+     Rule 1 catches raw ports but misses the Grafana datasource-proxy bypass
+     on :3000 (the settings field carries that URL). Added 2026-05-20 after
+     the fanout-agent hunt surfaced the gap.
+
+5. Owner-gated yaml/json loads of in-tree config files. A second module
+     loading `hallucination_blocklist.yaml`, `suggested_actions.yaml`,
+     `library.yaml`, or `bypass_llm.yaml` outside its declared owner module
+     is a silent bypass of the canonical owner — those YAML reads mutate
+     the LLM output (drop actions, fill suggested_actions, set the exemplar
+     block, gate the LLM call). Added 2026-05-20.
+
 Exemption protocol
 ------------------
 If you have a legitimate need to violate the rule (e.g. a boot-time
@@ -94,6 +107,65 @@ _ALLOW_EXEMPLAR_IMPORT = {
 
 
 # ---------------------------------------------------------------------------
+# Rule 4 — direct httpx calls to settings.{grafana,loki,jaeger}_url
+# ---------------------------------------------------------------------------
+# Surfaced 2026-05-20 fanout-hunt: Rule 1 catches raw ports :9090/:3100/:16686
+# but misses the Grafana datasource-proxy bypass at port :3000 (which routes
+# Prometheus queries through Grafana). The settings fields themselves carry
+# the bypass URLs. A new caller of settings.grafana_url / settings.loki_api_url
+# (note: distinct from settings.loki_mcp_url) / settings.jaeger_url that
+# issues an HTTP request through them — outside the boot-time / Drain3-input
+# paths — is a bypass the LLM-gathering path could exploit.
+#
+# The rule requires BOTH: (a) a reference to settings.{grafana,loki,jaeger}_url
+# AND (b) an HTTP-call context on the same line — httpx.*, client.{get,post,…},
+# requests.*, aiohttp.*, await *.get/post(. UI-link consumers (`<a href=…>`,
+# action-template `{grafana}` substitutions, Jaeger trace permalinks in the
+# notifier) are intentionally NOT flagged — they render URLs for operators
+# to click, they don't fetch data through the URL.
+_RAW_SETTINGS_URL_REF = re.compile(
+    r"settings\.(grafana_url|loki_api_url|jaeger_url)\b"
+)
+_HTTP_CALL_CONTEXT = re.compile(
+    r"\b(httpx|requests|aiohttp)\.\w+\s*\(|"
+    r"\bclient\.(get|post|put|patch|delete|request|stream)\s*\(|"
+    r"\bawait\s+\w+\.(get|post|put|patch|delete|request)\s*\("
+)
+_ALLOW_RAW_SETTINGS_URL = {
+    "app/config.py":            "settings field declaration — config, not calls",
+    "app/startup_backfill.py":  "boot-time exempt — Grafana datasource proxy backfill",
+    "app/drain_analyzer.py":    "Drain3 INPUT path — see _ALLOW_DIRECT_OBSERVABILITY rationale",
+}
+
+
+# ---------------------------------------------------------------------------
+# Rule 5 — owner-gated yaml/json reads of in-tree config files
+# ---------------------------------------------------------------------------
+# Surfaced 2026-05-20 fanout-hunt: response_validator, action_templates, and
+# the exemplar loader each read a YAML file and the result mutates the LLM
+# output (drops actions / fills suggested_actions / sets the exemplar prompt
+# block). Today only the importing module reads each file, but the lint
+# never asserts that — a second module loading the same YAML would be a
+# silent bypass of the canonical owner.
+#
+# Each `(filename, owner_module)` pair below pins the file to its owner.
+# yaml.safe_load / json.load of the keyed filename outside the owner is a
+# bypass.
+_YAML_OWNER_MAP: dict[str, str] = {
+    "hallucination_blocklist.yaml": "app/response_validator.py",
+    "suggested_actions.yaml":       "app/action_templates.py",
+    "library.yaml":                 "app/exemplars/__init__.py",
+    "bypass_llm.yaml":              "app/policy.py",  # US-3-CO13 placeholder (file may not yet exist)
+}
+_YAML_OR_JSON_LOAD = re.compile(
+    r"\b(yaml\.safe_load|json\.load)\s*\("
+)
+# Best-effort filename detector — matches `…/<name>.yaml` or `<name>.yaml`
+# referenced in the same line or the surrounding 3 lines.
+_YAML_FILENAME = re.compile(r"([\w.-]+\.(?:yaml|yml|json))")
+
+
+# ---------------------------------------------------------------------------
 # Scanner
 # ---------------------------------------------------------------------------
 
@@ -110,7 +182,8 @@ def check_file(path: Path) -> list[tuple[str, int, str]]:
     except (OSError, UnicodeDecodeError):
         return findings
 
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    lines = text.splitlines()
+    for lineno, line in enumerate(lines, start=1):
         # Skip comments and docstrings (best-effort — line-level only)
         stripped = line.strip()
         if stripped.startswith("#"):
@@ -130,6 +203,27 @@ def check_file(path: Path) -> list[tuple[str, int, str]]:
         # Rule 3 — exemplar in-process import
         if _EXEMPLAR_IMPORT.match(line) and rel not in _ALLOW_EXEMPLAR_IMPORT:
             findings.append((rel, lineno, "direct-exemplar-import"))
+
+        # Rule 4 — raw settings.*_url reference in an HTTP-call context
+        if (
+            rel not in _ALLOW_RAW_SETTINGS_URL
+            and _RAW_SETTINGS_URL_REF.search(line)
+            and _HTTP_CALL_CONTEXT.search(line)
+        ):
+            findings.append((rel, lineno, "raw-settings-url-fetch"))
+
+        # Rule 5 — yaml/json load of an owner-gated config file
+        # (look at the load call's line ±3 for a yaml filename)
+        if _YAML_OR_JSON_LOAD.search(line):
+            window_start = max(0, lineno - 4)
+            window_end = min(len(lines), lineno + 3)
+            window = "\n".join(lines[window_start:window_end])
+            for fname in _YAML_FILENAME.findall(window):
+                owner = _YAML_OWNER_MAP.get(fname)
+                if owner and rel != owner:
+                    findings.append(
+                        (rel, lineno, f"owner-gated-yaml-load:{fname}→{owner}")
+                    )
 
     return findings
 
