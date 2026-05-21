@@ -32,6 +32,34 @@ from app.rca_store import RCAStore, _classify_rca_quality
 logger = logging.getLogger(__name__)
 
 
+def _is_shelved_in_disguise(decision, quality: str) -> bool:
+    """Return True when the LLM picked ESCALATE but every other signal
+    says this RCA isn't operator-actionable.
+
+    Reason: 2026-05-21 14:55-18:55 UTC audit found 2/6 emails were
+    exactly this shape (e.g. Drain3 at conf=0.00 with "Shelved..."
+    action). The Drain3 playbook (llm_client.py:554-556) tells the LLM
+    to pick `dismiss` for these cases, but the model sometimes outputs
+    `escalate` anyway. The pipeline gate must be defensive.
+
+    Triggers (any one is enough):
+      - confidence < 0.40 (LLM self-rated this as low-trust)
+      - quality in (needs_review, data_starved) — thin output
+      - ALL suggested_actions contain "shelved" (LLM explicitly shelved)
+    """
+    if decision.decision != Decision.ESCALATE:
+        return False
+    if decision.confidence is not None and decision.confidence < 0.40:
+        return True
+    if quality in ("needs_review", "data_starved"):
+        return True
+    if decision.suggested_actions and all(
+        "shelved" in (a or "").lower() for a in decision.suggested_actions
+    ):
+        return True
+    return False
+
+
 class TriagePipeline:
     def __init__(
         self,
@@ -730,6 +758,21 @@ class TriagePipeline:
             if rest:
                 observed_str += " [" + ", ".join(f"{k}={v}" for k, v in rest) + "]"
 
+        # "Shelved-in-disguise" gate — the LLM picked ESCALATE but every
+        # other signal says this RCA isn't operator-actionable. Don't page;
+        # keep the row for review. See `_is_shelved_in_disguise` docstring
+        # for the rule and the 2026-05-21 audit context.
+        is_shelved_in_disguise = _is_shelved_in_disguise(decision, quality)
+        if is_shelved_in_disguise:
+            logger.info(
+                "Shelved-in-disguise gate: %s escalate at conf=%s quality=%s "
+                "actions=%r — recording as shelved, no email",
+                alert.alertname,
+                f"{decision.confidence:.2f}" if decision.confidence is not None else "None",
+                quality,
+                (decision.suggested_actions or [])[:3],
+            )
+
         record = RCARecord(
             alert_source=source,
             alert_name=alert.alertname,
@@ -741,7 +784,11 @@ class TriagePipeline:
             llm_confidence=f"{decision.confidence:.2f}" if decision.confidence is not None else None,
             rca_report=decision.rca,
             llm_reasoning=decision.reason,
-            action_taken="emailed" if decision.decision == Decision.ESCALATE else "suppressed",
+            action_taken=(
+                "shelved" if is_shelved_in_disguise
+                else "emailed" if decision.decision == Decision.ESCALATE
+                else "suppressed"
+            ),
             investigation_duration_ms=elapsed_ms,
             rca_quality=quality,
             alert_instance=alert.instance,
@@ -761,7 +808,7 @@ class TriagePipeline:
         # record for an alert the LLM actually finished. Save-first would be
         # cleaner but persisting before emailing breaks ordering guarantees
         # elsewhere; wrap-and-log is the safer change.
-        if decision.decision == Decision.ESCALATE:
+        if decision.decision == Decision.ESCALATE and not is_shelved_in_disguise:
             try:
                 await self.notifier.send_escalation(
                     alert, decision, record, history["count"], ctx=ctx,
@@ -776,6 +823,13 @@ class TriagePipeline:
                 )
                 emails_sent.labels(type="escalation_failed").inc()
                 alerts_processed.labels(decision="escalate").inc()
+        elif is_shelved_in_disguise:
+            alerts_processed.labels(decision="shelved").inc()
+            logger.info(
+                "Alert %s SHELVED (LLM verdict was ESCALATE but signals say "
+                "not operator-actionable): %s",
+                alert.alertname, decision.reason,
+            )
         else:
             alerts_processed.labels(decision="dismiss").inc()
             logger.info(
