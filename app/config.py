@@ -140,6 +140,10 @@ class Settings(BaseSettings):
     service_deployment_type: dict[str, str] = {
         # k3s workloads (live in the k3s cluster, namespace=app/frontend/network/observability)
         "spring-boot":   "k8s",
+        # spring-boot-app + springboot-app are Grafana / OTel label variants for
+        # the same workload; charts/spring-boot/ is the canonical deployment.
+        # Kept as aliases so a stray label spelling doesn't fall back to
+        # "unknown" (audit I-2, 2026-05-21).
         "spring-boot-app": "k8s",
         "springboot-app": "k8s",
         "kong":          "k8s",

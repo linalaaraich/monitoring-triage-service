@@ -109,6 +109,10 @@ exemplars:
     # upstream-latency-attribution shape. Without this exemplar, p95 alerts on
     # spring-boot scored only 0.60 against upstream-latency-attribution
     # (services=[kong]) and the LLM regressed to surface-level output.
+    # PARTIALLY FORWARD-LOOKING: the `Critical` alternative in the alertname
+    # regex covers a `CriticalP95Latency` rule that doesn't exist in
+    # `alertrules.yml.j2` yet — kept so the archetype is ready when the
+    # critical-tier latency rule lands (audit I-1, 2026-05-21).
     archetype: "Service p95 spike — the alerted service IS the bottleneck"
     match:
       alertname: "^(High|Critical)P95Latency$"
