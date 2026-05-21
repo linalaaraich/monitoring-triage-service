@@ -41,6 +41,37 @@ def _to_local_time(iso_utc_str: str | None, with_zone_label: bool = False) -> st
     base = local.strftime("%Y-%m-%d %H:%M:%S")
     return f"{base} Casablanca" if with_zone_label else base
 
+
+def _build_dashboard_search_blob(r: dict, local_ts: str) -> str:
+    """Construct the lowercased haystack the dashboard's client-side filter
+    matches against (rendered into each row's ``data-search`` attribute).
+
+    Includes every field an operator might paste in: the decision UUID,
+    the local-time timestamp string they see in the table, the raw ISO
+    timestamp, the alert fingerprint, plus all visible cells and the RCA
+    prose. Lina filed the original miss on 2026-05-21 — searching the
+    UUID returned nothing because the blob only contained alert_name +
+    service + severity + verdict + action + rca prose.
+    """
+    return ' '.join([
+        r.get('id') or '',
+        local_ts,
+        r.get('timestamp') or '',
+        r.get('alert_name') or '',
+        r.get('affected_service') or '',
+        r.get('alert_source') or '',
+        (r.get('severity') or '').lower(),
+        r.get('llm_verdict') or '',
+        r.get('action_taken') or '',
+        r.get('triage_decision') or '',
+        r.get('rca_quality') or '',
+        r.get('alert_fingerprint') or '',
+        r.get('alert_instance') or '',
+        r.get('alert_component') or '',
+        r.get('rca_report') or '',
+        r.get('llm_reasoning') or '',
+    ]).lower()
+
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, Response
 
@@ -1557,8 +1588,10 @@ async def dashboard(
 
     body_rows = ""
     for r in rows:
-        did = _html.escape(r.get('id') or '')
-        ts = _html.escape(_to_local_time(r.get('timestamp')))
+        raw_id = r.get('id') or ''
+        local_ts = _to_local_time(r.get('timestamp'))
+        did = _html.escape(raw_id)
+        ts = _html.escape(local_ts)
         alert_name = r.get('alert_name') or '—'
         service = r.get('affected_service') or '—'
         severity = (r.get('severity') or '').lower()
@@ -1566,12 +1599,8 @@ async def dashboard(
         duration = int(r.get('investigation_duration_ms') or 0)
         verdict = r.get('llm_verdict') or ''
 
-        # Data used by the client-side filter — includes everything visible + the RCA text
-        search_blob = ' '.join([
-            alert_name, service, r.get('alert_source') or '',
-            severity, verdict, action,
-            r.get('rca_report') or '', r.get('llm_reasoning') or '',
-        ]).lower()
+        # Client-side filter input — see _build_dashboard_search_blob().
+        search_blob = _build_dashboard_search_blob(r, local_ts)
 
         body_rows += (
             f'<tr class="summary" data-id="{did}" data-search="{_html.escape(search_blob, quote=True)}" onclick="toggleDetail(\'{did}\')">'
