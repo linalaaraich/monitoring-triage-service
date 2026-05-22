@@ -185,6 +185,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Mount design assets for the v2 dashboard preview (Claude Design output,
+# 2026-05-22 — see solution-brief.html §12 + design-prompt.html). React-via-
+# CDN + Babel-in-browser; pre-compilation is a Sprint 5 polish item.
+from fastapi.staticfiles import StaticFiles as _StaticFiles
+import pathlib as _pathlib
+_design_dir = _pathlib.Path(__file__).parent / "static" / "design"
+if _design_dir.exists():
+    app.mount("/static/design", _StaticFiles(directory=str(_design_dir)), name="design")
+
 
 # --- Validation error logging (added 2026-04-27 to debug Grafana 422s) ---
 # Logs the offending raw body + the Pydantic field errors for any webhook
@@ -2310,6 +2319,332 @@ async def dashboard_guide():
 
 <script>{_GUIDE_JS}</script>
 </body></html>"""
+
+
+# ────────────────────────────────────────────────────────────────────
+# /dashboard/v2 — Claude Design output (2026-05-22 supervisor-feedback redesign)
+# ────────────────────────────────────────────────────────────────────
+# This route serves the v2 operator dashboard rendered via the React mockup
+# from Claude Design (see solution-brief.html §12 + design-prompt.html).
+# The existing /dashboard route stays unchanged — v2 is a live preview the
+# supervisor can compare against the current dashboard before we swap.
+#
+# Implementation shape (Phase 1, 2026-05-22):
+#   • React 18 + Babel-standalone via unpkg CDN (matches Claude Design's
+#     output exactly; no build step needed).
+#   • Design assets at /static/design/* served by the StaticFiles mount.
+#   • Real /decisions data injected as window.CIRES_ALERTS via a transformer
+#     that maps RCARecord → the CIRES_ALERT shape the design expects.
+#   • Renders only <Dashboard mode="default"/> — not the design-canvas
+#     wrapper, which is a review surface.
+#   • Phase 2 (next session): detail-page route, email template wiring,
+#     feedback page, then swap /dashboard → v2.
+
+# Mapping tables for the transformer. Keep these conservative — when in
+# doubt return a sensible default rather than guessing.
+_V2_VERDICT_MAP = {
+    "escalate": "ESCALATE",
+    "dismiss": "DISMISS",
+    "inconclusive": "PENDING",
+    "shelved": "SHELVED",  # synthetic — derived from action_taken below
+}
+
+_V2_ALERT_NAME_PLAIN = {
+    "HighP95Latency": "High p95 latency",
+    "HighKongP95Latency": "High p95 latency on Kong gateway",
+    "HighCpuUsage": "High CPU usage",
+    "CriticalCpuUsage": "Critical CPU usage",
+    "MediumCpuUsage": "Elevated CPU usage",
+    "HighMemoryUsage": "High memory usage",
+    "CriticalMemoryUsage": "Critical memory usage",
+    "MediumMemoryUsage": "Elevated memory usage",
+    "PodHighMemoryUsage": "Pod memory pressure",
+    "PodHighCpuUsage": "Pod CPU saturation",
+    "TargetDown": "Prometheus target down",
+    "Drain3AnomalyDetected": "Novel log-template anomaly",
+    "HighDiskUsage": "High disk usage",
+    "CriticalDiskUsage": "Critical disk usage",
+    "DiskFillingUp": "Disk filling up",
+    "LokiHighDiskUsage": "Loki disk usage high",
+    "LokiCriticalDiskUsage": "Loki disk usage critical",
+    "LokiIngestionRateLow": "Loki ingestion rate dropped",
+    "LokiDiskFillingUp": "Loki disk filling up",
+    "OTelCollectorDown": "OTel collector down",
+    "OTelCollectorHighSpanDropRate": "OTel collector dropping spans",
+}
+
+_V2_SERVICE_TYPE = {
+    "spring-boot": "backend",
+    "spring-boot-app": "backend",
+    "springboot-app": "backend",
+    "backend": "backend",
+    "rental-backend": "backend",
+    "frontend": "frontend",
+    "rental-frontend": "frontend",
+    "kong": "network",
+    "kong-kong-proxy": "network",
+    "rental-mysql": "db",
+    "mysql": "db",
+    "loki": "infra",
+    "prometheus": "infra",
+    "jaeger": "infra",
+    "grafana": "infra",
+    "cadvisor": "infra",
+    "node-exporter": "infra",
+    "monitoring": "infra",
+    "otel-collector": "infra",
+    "k3s-node": "infra",
+    "drain3": "infra",
+}
+
+_V2_NAMESPACE = {
+    "spring-boot": "app",
+    "spring-boot-app": "app",
+    "springboot-app": "app",
+    "frontend": "frontend",
+    "kong": "network",
+    "kong-kong-proxy": "network",
+    "backend": "rental",
+    "rental-backend": "rental",
+    "rental-frontend": "rental",
+    "rental-mysql": "rental",
+    "loki": "observability",
+    "prometheus": "observability",
+    "jaeger": "observability",
+    "grafana": "observability",
+    "otel-collector": "observability",
+    "drain3": "observability",
+    "k3s-node": "kube-system",
+    "monitoring": "observability",
+}
+
+
+def _v2_transform_row(r: dict) -> dict:
+    """Map a /decisions RCARecord row → the CIRES_ALERT shape the design expects.
+
+    Conservative — when source data is missing, return a usable default
+    rather than guessing. Phase 2 will tighten the mapping (incident history
+    aggregation, drain3 snapshot, real environment from labels).
+    """
+    import json as _json2
+    raw_id = (r.get("id") or "")
+    short_id = raw_id[:8] if raw_id else "—"
+    svc = (r.get("affected_service") or "—")
+    alert_name = r.get("alert_name") or "—"
+    verdict_lower = (r.get("llm_verdict") or "").lower()
+    action_taken = (r.get("action_taken") or "").lower()
+
+    # Verdict mapping — shelved overrides if action_taken="shelved"
+    if action_taken == "shelved":
+        verdict = "SHELVED"
+    else:
+        verdict = _V2_VERDICT_MAP.get(verdict_lower, "PENDING")
+
+    # Indicator (sustained / spike / recurring) — heuristic for Phase 1:
+    # we don't have fire-history aggregation yet, so use the alert family +
+    # action_taken as a proxy. Phase 2 will use the real fire-count history.
+    if (r.get("triage_decision") or "") in ("suppressed_duplicate", "recurrence_gated_pre_llm"):
+        indicator = "recurring"
+    elif action_taken == "emailed" and alert_name in ("HighKongP95Latency", "HighP95Latency", "Drain3AnomalyDetected", "HighCpuUsage", "HighMemoryUsage", "PodHighMemoryUsage"):
+        indicator = "sustained"
+    else:
+        indicator = "spike"
+
+    # Time formatting — Tangier UTC+01:00 per the design's locale ask.
+    ts_iso = r.get("timestamp") or ""
+    try:
+        from datetime import datetime, timezone, timedelta
+        dt = datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
+        tng = dt.astimezone(timezone(timedelta(hours=1)))
+        time_local = tng.strftime("%Y-%m-%d %H:%M:%S")
+        time_short = tng.strftime("%H:%M:%S")
+        date_short = tng.strftime("%Y-%m-%d")
+    except Exception:
+        time_local = ts_iso[:19].replace("T", " ")
+        time_short = ts_iso[11:19] if len(ts_iso) > 19 else "—"
+        date_short = ts_iso[:10] if len(ts_iso) > 10 else "—"
+
+    # Parse suggested_actions (stored as JSON string)
+    actions = []
+    raw_actions = r.get("suggested_actions") or "[]"
+    try:
+        if isinstance(raw_actions, str):
+            parsed = _json2.loads(raw_actions)
+        else:
+            parsed = raw_actions
+        if isinstance(parsed, list):
+            for a in parsed[:3]:
+                # action can be a plain string or {cmd, why} dict
+                if isinstance(a, str):
+                    actions.append({"cmd": a, "why": ""})
+                elif isinstance(a, dict):
+                    actions.append({"cmd": a.get("cmd", str(a)), "why": a.get("why", "")})
+    except Exception:
+        actions = [{"cmd": str(raw_actions)[:200], "why": ""}]
+    if not actions:
+        actions = [{"cmd": "—", "why": "No suggested action — investigate via the linked tools."}]
+
+    # Parse evidence (stored as JSON string)
+    evidence = []
+    raw_ev = r.get("evidence") or "[]"
+    try:
+        if isinstance(raw_ev, str):
+            parsed = _json2.loads(raw_ev)
+        else:
+            parsed = raw_ev
+        if isinstance(parsed, list):
+            for e in parsed[:5]:
+                if isinstance(e, str):
+                    evidence.append({"source": "prom", "text": e, "link": "Grafana"})
+                elif isinstance(e, dict):
+                    evidence.append(e)
+    except Exception:
+        pass
+
+    # Tags — derive from quality + decision shape
+    tags = []
+    q = (r.get("rca_quality") or "").lower()
+    td = (r.get("triage_decision") or "").lower()
+    if q == "actionable":
+        tags.append("actionable")
+    if q == "data_starved":
+        tags.append("data-starved")
+    if q == "needs_review":
+        tags.append("needs-review")
+    if action_taken == "shelved":
+        tags.append("shelved")
+    if td == "recurrence_gated_pre_llm":
+        tags.append("recurrence-gated")
+    if not tags:
+        tags = ["—"]
+
+    # First sentence of the RCA report as the "reason"
+    rca = r.get("rca_report") or ""
+    if rca:
+        end = rca.find(". ")
+        reason = rca[: end + 1] if end > 0 else rca[:240]
+    else:
+        reason = "No RCA prose recorded."
+
+    confidence = None
+    try:
+        confidence = float(r.get("llm_confidence")) if r.get("llm_confidence") not in (None, "") else None
+    except Exception:
+        confidence = None
+
+    return {
+        "id": short_id,
+        "uuid": raw_id,
+        "fingerprint": (r.get("alert_fingerprint") or "")[:16] or "—",
+        "timeISO": ts_iso,
+        "timeLocal": time_local,
+        "timeShort": time_short,
+        "dateShort": date_short,
+        "relTime": "",  # Phase 2: compute from now()
+        "activeFor": "",
+        "env": "prod",  # Phase 2: extract from labels if available
+        "namespace": _V2_NAMESPACE.get(svc, svc[:20] or "—"),
+        "serviceType": _V2_SERVICE_TYPE.get(svc, "infra"),
+        "component": svc,
+        "alertName": alert_name,
+        "alertPlain": _V2_ALERT_NAME_PLAIN.get(alert_name, alert_name),
+        "verdict": verdict,
+        "severity": (r.get("severity") or "info").lower(),
+        "indicator": indicator,
+        "reason": reason,
+        "boldSubject": svc if svc and svc != "—" else "",
+        "actions": actions,
+        "tags": tags,
+        "confidence": confidence,
+        "quality": q,
+        "fireCount": 1,  # Phase 2: aggregate by fingerprint
+        "history": [{"time": time_local, "verdict": verdict, "delta": "first seen"}],
+        "evidence": evidence,
+        "drain3": {},  # Phase 2: pull from /drain3/stats when matched
+    }
+
+
+@app.get("/dashboard/v2", response_class=HTMLResponse)
+async def dashboard_v2(size: int = Query(50, ge=10, le=200)):
+    """Preview of the 2026-05-22 redesigned dashboard.
+
+    Renders the Claude Design <Dashboard/> component against real
+    /decisions data. See solution-brief.html §12 + design-prompt.html
+    for the design spec; static assets at /static/design/.
+    """
+    import json as _json2
+    rows = await _store.get_decisions(limit=size, offset=0, since_days=15)
+    alerts = [_v2_transform_row(r) for r in rows]
+    alerts_json = _json2.dumps(alerts, default=str)
+
+    # Current Tangier time for the design's top-bar clock
+    from datetime import datetime, timezone, timedelta
+    now_tng = datetime.now(timezone(timedelta(hours=1))).strftime("%Y-%m-%d %H:%M:%S")
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Observability · AI RCA — v2 Dashboard Preview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/design/tokens.css"/>
+<style>
+  body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); }}
+  #root {{ min-height: 100vh; }}
+  .v2-banner {{
+    background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
+    border-bottom: 1px solid rgba(176,126,232,.35);
+    padding: 8px 22px;
+    font-size: 12.5px;
+    color: var(--text-soft, #c0c5d0);
+    display: flex; align-items: center; gap: 14px;
+  }}
+  .v2-banner strong {{ color: var(--accent-purple, #b07ee8); }}
+  .v2-banner a {{ color: var(--accent-cyan, #40d0d0); text-decoration: none; }}
+  .v2-banner a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+
+<div class="v2-banner">
+  <strong>v2 preview</strong>
+  <span>2026-05-22 Claude Design redesign rendered against live /decisions data.</span>
+  <span style="flex: 1"></span>
+  <a href="/dashboard">↩ existing /dashboard</a>
+  <a href="https://linalaaraich.github.io/monitoring-docs/solution-brief.html#supervisor-feedback" target="_blank">§12 feedback</a>
+  <a href="https://linalaaraich.github.io/monitoring-docs/design-prompt.html" target="_blank">design prompt</a>
+</div>
+
+<div id="root"></div>
+
+<script>
+  window.CIRES_ALERTS = {alerts_json};
+  window.CIRES_NOW_LOCAL = "{now_tng}";
+</script>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="/static/design/atoms.jsx"></script>
+<script type="text/babel" src="/static/design/dashboard.jsx"></script>
+
+<script type="text/babel" data-presets="react">
+  function App() {{
+    return (
+      <div className="cires" data-theme="dark" style={{{{ minHeight: "100vh" }}}}>
+        <Dashboard mode="default"/>
+      </div>
+    );
+  }}
+  ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+
+</body>
+</html>""")
 
 
 @app.get("/metrics")

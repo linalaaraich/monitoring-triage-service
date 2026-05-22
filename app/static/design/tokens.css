@@ -1,0 +1,202 @@
+/* Observability · AI RCA — design tokens */
+:root {
+  --bg:           #0f1117;
+  --bg-soft:      #13151e;
+  --card:         #1a1d27;
+  --card-alt:     #1e2230;
+  --card-hi:      #232838;
+  --border:       #2a2d3a;
+  --border-hi:    #3a3f52;
+  --text:         #e4e6ee;
+  --text-soft:    #c0c5d0;
+  --muted:        #8890a0;
+  --muted-2:      #5b6172;
+  --accent-blue:  #4ea8de;
+  --accent-green: #6bcf7f;
+  --accent-orange:#f0a050;
+  --accent-purple:#b07ee8;
+  --accent-red:   #e06070;
+  --accent-cyan:  #40d0d0;
+  --accent-yellow:#e0d060;
+
+  --code-bg:      #0a0c11;
+  --shadow-md:    0 12px 28px rgba(0,0,0,.45);
+
+  --font-ui: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Light theme overrides — applied via [data-theme="light"] on .cires wrapper */
+.cires[data-theme="light"] {
+  --bg:           #f4f6fa;
+  --bg-soft:      #ffffff;
+  --card:         #ffffff;
+  --card-alt:     #f0f3f8;
+  --card-hi:      #e6eaf2;
+  --border:       #e2e6ee;
+  --border-hi:    #cbd1de;
+  --text:         #1a1d27;
+  --text-soft:    #3a3f52;
+  --muted:        #6b7385;
+  --muted-2:      #a0a6b3;
+  --accent-blue:  #1e88d5;
+  --accent-green: #16a34a;
+  --accent-orange:#d97706;
+  --accent-purple:#8b5cf6;
+  --accent-red:   #dc2626;
+  --accent-cyan:  #0891b2;
+  --accent-yellow:#a16207;
+
+  --code-bg:      #f7f8fb;
+  --shadow-md:    0 12px 28px rgba(20,28,52,.10);
+}
+
+.cires {
+  font-family: var(--font-ui);
+  color: var(--text);
+  background: var(--bg);
+  font-size: 15px;
+  line-height: 1.45;
+  font-feature-settings: "cv11", "ss01", "ss03";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+.cires *, .cires *::before, .cires *::after { box-sizing: border-box; }
+.cires .mono { font-family: var(--font-mono); }
+.cires button { font-family: inherit; }
+
+/* Pills — use the accent color via CSS variables so they re-tint in light mode */
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; font-weight: 600;
+  padding: 3px 10px; border-radius: 6px;
+  letter-spacing: 0.02em; line-height: 1.4;
+  white-space: nowrap;
+  border: 1px solid;
+}
+.pill.lg { font-size: 12.5px; padding: 5px 12px; }
+.pill .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+
+.pill-red    { background: color-mix(in oklab, var(--accent-red)    14%, transparent); border-color: color-mix(in oklab, var(--accent-red)    45%, transparent); color: color-mix(in oklab, var(--accent-red)    85%, var(--text)); }
+.pill-amber  { background: color-mix(in oklab, var(--accent-orange) 14%, transparent); border-color: color-mix(in oklab, var(--accent-orange) 45%, transparent); color: color-mix(in oklab, var(--accent-orange) 85%, var(--text)); }
+.pill-blue   { background: color-mix(in oklab, var(--accent-blue)   14%, transparent); border-color: color-mix(in oklab, var(--accent-blue)   45%, transparent); color: color-mix(in oklab, var(--accent-blue)   85%, var(--text)); }
+.pill-gray   { background: color-mix(in oklab, var(--text)           6%, transparent); border-color: var(--border-hi); color: var(--text-soft); }
+.pill-green  { background: color-mix(in oklab, var(--accent-green)  14%, transparent); border-color: color-mix(in oklab, var(--accent-green)  45%, transparent); color: color-mix(in oklab, var(--accent-green)  85%, var(--text)); }
+.pill-purple { background: color-mix(in oklab, var(--accent-purple) 14%, transparent); border-color: color-mix(in oklab, var(--accent-purple) 45%, transparent); color: color-mix(in oklab, var(--accent-purple) 85%, var(--text)); }
+.pill-yellow { background: color-mix(in oklab, var(--accent-yellow) 14%, transparent); border-color: color-mix(in oklab, var(--accent-yellow) 45%, transparent); color: color-mix(in oklab, var(--accent-yellow) 85%, var(--text)); }
+.pill-cyan   { background: color-mix(in oklab, var(--accent-cyan)   14%, transparent); border-color: color-mix(in oklab, var(--accent-cyan)   45%, transparent); color: color-mix(in oklab, var(--accent-cyan)   85%, var(--text)); }
+.pill-mono   { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; }
+
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent-green);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--accent-green) 55%, transparent), 0 0 1px color-mix(in oklab, var(--accent-green) 90%, transparent);
+  display: inline-block;
+}
+
+/* Generic card */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.card-sm { border-radius: 8px; }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px; font-weight: 500;
+  padding: 7px 12px; border-radius: 7px;
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--border);
+  cursor: pointer; transition: background .12s, border-color .12s;
+}
+.btn:hover { background: var(--card-alt); border-color: var(--border-hi); }
+.btn.primary {
+  background: rgba(78,168,222,.12); border-color: rgba(78,168,222,.45); color: #b9dcf2;
+}
+.btn.primary:hover { background: rgba(78,168,222,.20); }
+.btn.ghost { background: transparent; }
+.btn.sm { font-size: 12px; padding: 4px 9px; border-radius: 6px; }
+
+/* Inputs */
+.input, .select {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: inherit; font-size: 13px;
+  padding: 7px 10px; border-radius: 7px;
+  outline: none;
+}
+.input:focus, .select:focus { border-color: var(--accent-blue); }
+.input::placeholder { color: var(--muted-2); }
+
+/* Table */
+.tbl { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+.tbl th {
+  text-align: left;
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+  position: sticky; top: 0;
+}
+.tbl td {
+  padding: 13px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-soft);
+  vertical-align: middle;
+}
+.tbl tr.row { cursor: pointer; transition: background .1s; }
+.tbl tr.row:hover { background: var(--card-alt); }
+.tbl tr.expanded { background: var(--card-alt); }
+.tbl tr.expanded-detail td { background: var(--card-hi); padding: 0; border-bottom: 1px solid var(--border); }
+
+/* Subtle hover lift */
+.lift { transition: transform .12s, box-shadow .12s; }
+.lift:hover { transform: translateY(-1px); }
+
+/* Scrollbars (artboard inner scroll if any) */
+.cires ::-webkit-scrollbar { width: 10px; height: 10px; }
+.cires ::-webkit-scrollbar-thumb { background: #2a2d3a; border-radius: 6px; }
+.cires ::-webkit-scrollbar-track { background: transparent; }
+
+/* Cause callout */
+.callout {
+  border-left: 3px solid var(--accent-red);
+  padding: 14px 18px;
+  background: color-mix(in oklab, var(--accent-red) 7%, transparent);
+  border-radius: 0 10px 10px 0;
+}
+.callout.amber { border-left-color: var(--accent-orange); background: color-mix(in oklab, var(--accent-orange) 7%, transparent); }
+.callout.blue  { border-left-color: var(--accent-blue);   background: color-mix(in oklab, var(--accent-blue) 7%, transparent); }
+
+/* Code chip */
+.codechip {
+  font-family: var(--font-mono); font-size: 12.5px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  padding: 6px 10px; border-radius: 6px;
+  display: inline-flex; align-items: center; gap: 8px;
+  color: var(--text);
+}
+.codechip .cmd-prefix { color: var(--accent-cyan); user-select: none; }
+
+/* Section labels */
+.section-label {
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+/* Toast */
+.toast {
+  position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+  background: var(--card-hi); border: 1px solid var(--border-hi);
+  padding: 8px 14px; border-radius: 8px;
+  font-size: 13px;
+  box-shadow: 0 12px 28px rgba(0,0,0,.45);
+}
