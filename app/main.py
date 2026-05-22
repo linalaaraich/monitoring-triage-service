@@ -2608,16 +2608,35 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
     except Exception:
         confidence = None
 
-    # Drain3 snapshot — surfaced for Drain3AnomalyDetected alerts on the detail
-    # page; dashboard only consults `anomalyRate` for a sustained-confidence cue.
-    drain3_card = {}
+    # Drain3 snapshot — only populated for Drain3AnomalyDetected alerts. Must
+    # be None (falsy) for other alert types so detail.jsx's `if (!d) return null`
+    # short-circuits cleanly instead of crashing on undefined nested fields.
+    drain3_card = None
     if alert_name == "Drain3AnomalyDetected" and drain3_stats:
+        matched_template_str = (drain3_stats.get("top_new_patterns_per_service", {}).get(svc, [""]) or [""])[0] or ""
         drain3_card = {
             "learnedTotal": drain3_stats.get("total_clusters", 0),
             "anomalyRate": drain3_stats.get("recent_anomaly_rate", 0.0),
-            "linesIngested24h": drain3_stats.get("total_lines_processed", 0),
-            "matchedTemplate": (drain3_stats.get("top_new_patterns_per_service", {}).get(svc, [None])[0] or ""),
+            "linesIngested": drain3_stats.get("total_lines_processed", 0),
+            "matchedTemplate": matched_template_str,
+            "relatedTemplates": [],
         }
+
+    # LLM reasoning — split llm_reasoning into discrete steps. The design's
+    # ReasoningSection accesses a.reasoning.length without a null guard, so
+    # an undefined here crashes the whole DetailPage. Always return a list.
+    reasoning_steps = []
+    llm_reasoning_text = r.get("llm_reasoning") or ""
+    if llm_reasoning_text:
+        # Split on newlines or numbered-list markers (1. 2. etc)
+        import re as _re_steps
+        candidates = _re_steps.split(r"\n\s*|\.\s+(?=[A-Z])", llm_reasoning_text)
+        for c in candidates:
+            c = c.strip().lstrip("0123456789.) ").strip()
+            if c and len(c) > 4:
+                reasoning_steps.append(c)
+        if not reasoning_steps:
+            reasoning_steps = [llm_reasoning_text.strip()]
 
     return {
         "id": short_id,
@@ -2653,6 +2672,13 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
         "history": history,
         "evidence": evidence,
         "drain3": drain3_card,
+        # Detail-page-specific fields (safe defaults — detail.jsx reads these
+        # without null guards in places)
+        "reasoning": reasoning_steps,
+        "related": [],  # populated by the detail route, not the dashboard route
+        "deploy": None,  # SF-11 work — placeholder for deploy-correlation card
+        "promql": r.get("promql_expr") or "",
+        "ip": r.get("alert_instance") or "",
     }
 
 
@@ -2922,12 +2948,19 @@ async def dashboard_v2_alert(short_id: str):
         drain3_stats=drain3_stats,
         now_utc=now_utc,
     )
-    # Transform related (each gets its own one-row history, but it's just for
-    # the sidebar — fire-count level of detail is enough)
-    related_alerts = [_v2_transform_row(r, drain3_stats=drain3_stats, now_utc=now_utc) for r in related]
-
-    # The design's DetailPage reads `a.relatedAlerts`. Wire it on.
-    alert["relatedAlerts"] = related_alerts
+    # Transform related — the design's RelatedSidebar reads `a.related` and
+    # accesses {id, title, time, verdict} on each entry. Shape them
+    # explicitly so we don't depend on the full CIRES_ALERT object.
+    related_simplified = []
+    for r in related:
+        rt = _v2_transform_row(r, drain3_stats=drain3_stats, now_utc=now_utc)
+        related_simplified.append({
+            "id": rt["id"],
+            "title": rt["alertPlain"],
+            "time": rt["timeShort"] or rt["relTime"],
+            "verdict": rt["verdict"],
+        })
+    alert["related"] = related_simplified
 
     # Top-bar/sidebar stats reuse the dashboard transform so the chrome
     # looks the same. Compute the same way as the dashboard route.
