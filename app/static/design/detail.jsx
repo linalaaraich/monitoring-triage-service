@@ -478,22 +478,26 @@ function DetailPage({ a, openReasoning = false, openRaw = false }) {
   const [reasoningOpen, setReasoningOpen] = useDetailState(openReasoning);
   const [rawOpen, setRawOpen] = useDetailState(openRaw);
   const [theme] = window.useTheme();
+  const [collapsed, setCollapsed] = window.useSidebarCollapsed();
 
   return (
-    <div className="cires" data-theme={theme} style={{ background: "var(--bg)", minHeight: "100%" }}>
-      <TopBar uptimeSec={47812} openAlerts={7} emailed24h={12} shelved24h={38} medianLatency={4.3} page="detail"/>
-      <DetailHeader a={a}/>
-      <div style={{ padding: "24px 28px 40px", display: "grid", gridTemplateColumns: "1fr 320px", gap: 28, maxWidth: 1480, margin: "0 auto" }}>
-        <main>
-          <CauseSection a={a}/>
-          <ActionSection a={a}/>
-          <HistorySection a={a}/>
-          <EvidenceSection a={a}/>
-          <Drain3Section a={a}/>
-          <ReasoningSection a={a} expanded={reasoningOpen} onToggle={()=>setReasoningOpen(!reasoningOpen)}/>
-          <RawDataSection a={a} expanded={rawOpen} onToggle={()=>setRawOpen(!rawOpen)}/>
-        </main>
-        <RelatedSidebar a={a}/>
+    <div className="cires" data-theme={theme} style={{ background: "var(--bg)", minHeight: "100%", display: "flex" }}>
+      <window.Sidebar active="triage" collapsed={collapsed} onToggleCollapse={() => setCollapsed(!collapsed)}/>
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+        <TopBar uptimeSec={47812} openAlerts={7} emailed24h={12} shelved24h={38} medianLatency={4.3} page="detail"/>
+        <DetailHeader a={a}/>
+        <div style={{ padding: "24px 28px 40px", display: "grid", gridTemplateColumns: "1fr 320px", gap: 28, maxWidth: 1480, margin: "0 auto", width: "100%" }}>
+          <main>
+            <CauseSection a={a}/>
+            <ActionSection a={a}/>
+            <HistorySection a={a}/>
+            <EvidenceSection a={a}/>
+            <Drain3Section a={a}/>
+            <ReasoningSection a={a} expanded={reasoningOpen} onToggle={()=>setReasoningOpen(!reasoningOpen)}/>
+            <RawDataSection a={a} expanded={rawOpen} onToggle={()=>setRawOpen(!rawOpen)}/>
+          </main>
+          <RelatedSidebar a={a}/>
+        </div>
       </div>
     </div>
   );

@@ -2752,6 +2752,7 @@ async def dashboard_v2(size: int = Query(50, ge=10, le=200)):
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
 
 <script type="text/babel" src="/static/design/atoms.jsx"></script>
+<script type="text/babel" src="/static/design/sidebar.jsx"></script>
 <script type="text/babel" src="/static/design/dashboard.jsx"></script>
 
 <script type="text/babel" data-presets="react">

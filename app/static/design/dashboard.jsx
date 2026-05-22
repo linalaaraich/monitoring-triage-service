@@ -280,30 +280,31 @@ function Pagination({ shown = 20, total = 287, page = 1 }) {
 }
 
 // ─────────────────────────────────────────────────────────
-function DashboardChrome({ children, state, openFilter, setOpenFilter }) {
+function DashboardChrome({ children, state, openFilter, setOpenFilter, active = "triage" }) {
   const [theme] = window.useTheme();
+  const [collapsed, setCollapsed] = window.useSidebarCollapsed();
   return (
-    <div className="cires" data-theme={theme} style={{ background: "var(--bg)", minHeight: "100%" }}>
-      <TopBar uptimeSec={47812} openAlerts={7} emailed24h={12} shelved24h={38} medianLatency={4.3}/>
-      <FilterBar openFilter={openFilter} onOpen={setOpenFilter}/>
-      <div style={{ padding: "16px 22px 0" }}>
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
-          <div>
-            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: -0.01 }}>
-              Triage feed
-            </h1>
-            <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>
-              Live alerts the LLM judged worth your attention. The cheap-path gates absorbed <span style={{ color: "var(--accent-green)" }}>147</span> alerts since midnight.
+    <div className="cires" data-theme={theme} style={{ background: "var(--bg)", minHeight: "100%", display: "flex" }}>
+      <window.Sidebar active={active} collapsed={collapsed} onToggleCollapse={() => setCollapsed(!collapsed)}/>
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+        <TopBar uptimeSec={47812} openAlerts={7} emailed24h={12} shelved24h={38} medianLatency={4.3}/>
+        <FilterBar openFilter={openFilter} onOpen={setOpenFilter}/>
+        <div style={{ padding: "16px 22px 0" }}>
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
+            <div>
+              <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+                The cheap-path gates absorbed <span style={{ color: "var(--accent-green)" }}>147</span> alerts since midnight. Showing what the LLM judged worth your attention.
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>Sort by</span>
+              <button className="btn sm" style={{ color: "var(--text)" }}>Newest <Icon.chevD/></button>
+              <button className="btn sm" style={{ color: "var(--muted)" }}>Density: comfy</button>
             </div>
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ fontSize: 12, color: "var(--muted)" }}>Sort by</span>
-            <button className="btn sm" style={{ color: "var(--text)" }}>Newest <Icon.chevD/></button>
-            <button className="btn sm" style={{ color: "var(--muted)" }}>Density: comfy</button>
-          </div>
         </div>
+        {children}
       </div>
-      {children}
     </div>
   );
 }

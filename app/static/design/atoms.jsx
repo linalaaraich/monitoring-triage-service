@@ -28,6 +28,28 @@ function useTheme() {
   return [theme, apply];
 }
 
+// Sidebar collapsed-state hook (persists across artboards/refreshes via localStorage)
+const SIDEBAR_COLLAPSED_KEY = "obs-rca-sidebar-collapsed";
+function useSidebarCollapsed() {
+  const [c, setC] = useState(() => {
+    try { return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1"; } catch (e) { return false; }
+  });
+  useEffect(() => {
+    const t = setInterval(() => {
+      try {
+        const v = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+        if (v !== c) setC(v);
+      } catch (e) {}
+    }, 400);
+    return () => clearInterval(t);
+  }, [c]);
+  const apply = (next) => {
+    try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0"); } catch (e) {}
+    setC(next);
+  };
+  return [c, apply];
+}
+
 function ThemeToggle() {
   const [theme, setTheme] = useTheme();
   const isLight = theme === "light";
@@ -178,31 +200,20 @@ function TopBar({ uptimeSec = 47812, openAlerts = 7, emailed24h = 12, shelved24h
     <div style={{
       background: "var(--bg-soft)",
       borderBottom: "1px solid var(--border)",
-      padding: "12px 22px",
-      display: "flex", alignItems: "center", gap: 22,
-      position: "sticky", top: 0, zIndex: 10,
+      padding: "11px 22px",
+      display: "flex", alignItems: "center", gap: 18,
+      position: "sticky", top: 0, zIndex: 10, height: 60, flexShrink: 0,
     }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={{
-          width: 26, height: 26, borderRadius: 7,
-          background: "linear-gradient(135deg, #4ea8de, #b07ee8)",
-          display: "grid", placeItems: "center",
-          position: "relative",
-        }}>
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#0f1117" strokeWidth="2" strokeLinecap="round">
-            <circle cx="8" cy="8" r="2"/>
-            <path d="M3 8a5 5 0 0 1 10 0M1 8a7 7 0 0 1 14 0"/>
-          </svg>
+      <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.15 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
+          {page === "dashboard" ? "Triage feed" : "Alert detail"}
         </div>
-        <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.1 }}>
-          <div style={{ fontSize: 14.5, fontWeight: 600 }}>Observability · AI RCA</div>
-          <div style={{ fontSize: 11, color: "var(--muted)", letterSpacing: 0.04 }}>
-            {page === "dashboard" ? "Triage Dashboard" : "Alert Detail"}
-          </div>
+        <div style={{ fontSize: 11, color: "var(--muted)" }}>
+          {page === "dashboard" ? "Live alerts the LLM judged worth your attention" : "Click-through from the triage feed"}
         </div>
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: 14, borderLeft: "1px solid var(--border)" }}>
         <span className="live-dot"></span>
         <span style={{ fontSize: 12, color: "var(--text-soft)" }}>Live</span>
         <span className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>{uptime}</span>
@@ -221,13 +232,6 @@ function TopBar({ uptimeSec = 47812, openAlerts = 7, emailed24h = 12, shelved24h
       <Stat label="LLM p50" value={`${medianLatency}s`} accent="var(--accent-purple)"/>
 
       <ThemeToggle/>
-
-      <div style={{
-        width: 30, height: 30, borderRadius: "50%",
-        background: "linear-gradient(135deg, #b07ee8, #40d0d0)",
-        display: "grid", placeItems: "center",
-        fontSize: 12, fontWeight: 600, color: "#0f1117", marginLeft: 6,
-      }}>YB</div>
     </div>
   );
 }
@@ -246,5 +250,5 @@ Object.assign(window, {
   EnvPill, VerdictPill, SeverityPill, NsPill, CompPill,
   ServiceIcon, StateIcon, Icon, TopBar, Stat,
   ENV_STYLES, VERDICT_STYLES, SEVERITY_STYLES, VERDICT_DOT,
-  useTheme, ThemeToggle,
+  useTheme, ThemeToggle, useSidebarCollapsed,
 });
