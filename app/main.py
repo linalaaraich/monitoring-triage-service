@@ -2474,6 +2474,10 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
     dt = None
     try:
         dt = datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
+        # Stored timestamps are sometimes naive ISO strings (no Z, no offset).
+        # Treat naive as UTC — that's the storage convention in rca_store.py.
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         tng = dt.astimezone(timezone(timedelta(hours=1)))
         time_local = tng.strftime("%Y-%m-%d %H:%M:%S")
         time_short = tng.strftime("%H:%M:%S")
@@ -2491,6 +2495,8 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
     if first_fire_ts:
         try:
             first_dt = datetime.fromisoformat(first_fire_ts.replace("Z", "+00:00"))
+            if first_dt.tzinfo is None:
+                first_dt = first_dt.replace(tzinfo=timezone.utc)
             active_for = _v2_humanize_duration((now_utc - first_dt).total_seconds())
         except Exception:
             pass
@@ -2516,6 +2522,8 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
     for prev in prior[-9:]:  # cap at last 9 prior fires + current = 10 total
         try:
             pdt = datetime.fromisoformat((prev.get("timestamp") or "").replace("Z", "+00:00"))
+            if pdt.tzinfo is None:
+                pdt = pdt.replace(tzinfo=timezone.utc)
             ptng = pdt.astimezone(timezone(timedelta(hours=1)))
             ptime = ptng.strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
