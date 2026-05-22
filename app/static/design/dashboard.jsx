@@ -259,9 +259,9 @@ function ExpandedDetail({ a }) {
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <div className="section-label">Quick actions</div>
-        <button className="btn primary lift" style={{ justifyContent: "space-between" }}>
+        <a className="btn primary lift" href={`/dashboard/v2/alert/${a.id}`} style={{ justifyContent: "space-between", textDecoration: "none" }}>
           <span>View full detail</span><Icon.chevR/>
-        </button>
+        </a>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           <a className="btn lift" style={{ justifyContent: "space-between" }}>Grafana <Icon.ext/></a>
           <a className="btn lift" style={{ justifyContent: "space-between" }}>Loki <Icon.ext/></a>

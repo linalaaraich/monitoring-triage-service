@@ -2851,6 +2851,201 @@ async def dashboard_v2(
 </html>""")
 
 
+@app.get("/dashboard/v2/alert/{short_id}", response_class=HTMLResponse)
+async def dashboard_v2_alert(short_id: str):
+    """Phase 2.1 — alert detail page click-through from /dashboard/v2.
+
+    Resolves the 8-char short_id back to the full UUID (by scanning the
+    most-recent 500 rows), transforms via the same _v2_transform_row
+    pipeline, and renders the design's <DetailPage> component.
+    Related alerts in a ±10 min window are populated for the right
+    sidebar.
+    """
+    import json as _json2
+    from datetime import datetime, timezone, timedelta
+    now_utc = datetime.now(timezone.utc)
+
+    # Resolve short_id (8-char prefix) → full UUID by scanning recent rows
+    scan = await _store.get_decisions(limit=500, offset=0, since_days=15)
+    short_id = (short_id or "").strip().lower()
+    target = None
+    for r in scan:
+        rid = (r.get("id") or "").lower()
+        if rid.startswith(short_id):
+            target = r
+            break
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"No alert found with short_id prefix '{short_id}' in the last 15 days")
+
+    # Build fingerprint history from the same scan
+    fp = target.get("alert_fingerprint") or ""
+    history_rows = []
+    if fp:
+        for r in scan:
+            if (r.get("alert_fingerprint") or "") == fp and (r.get("timestamp") or "") < (target.get("timestamp") or ""):
+                history_rows.append(r)
+        history_rows.sort(key=lambda x: x.get("timestamp") or "")
+
+    # Related alerts — ±10 min window on the same namespace or affected_service
+    target_ts_str = target.get("timestamp") or ""
+    related = []
+    try:
+        target_dt = datetime.fromisoformat(target_ts_str.replace("Z", "+00:00"))
+        if target_dt.tzinfo is None:
+            target_dt = target_dt.replace(tzinfo=timezone.utc)
+        win_lo = target_dt - timedelta(minutes=10)
+        win_hi = target_dt + timedelta(minutes=10)
+        for r in scan:
+            if (r.get("id") or "") == target.get("id"):
+                continue
+            try:
+                rdt = datetime.fromisoformat((r.get("timestamp") or "").replace("Z", "+00:00"))
+                if rdt.tzinfo is None:
+                    rdt = rdt.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if win_lo <= rdt <= win_hi:
+                same_ns = (r.get("affected_service") or "") == (target.get("affected_service") or "")
+                if same_ns:
+                    related.append(r)
+                    if len(related) >= 5:
+                        break
+    except Exception:
+        pass
+
+    drain3_stats = _drain.get_stats() if _drain is not None else {}
+
+    # Transform target
+    alert = _v2_transform_row(
+        target,
+        fingerprint_history={fp: history_rows} if fp else None,
+        drain3_stats=drain3_stats,
+        now_utc=now_utc,
+    )
+    # Transform related (each gets its own one-row history, but it's just for
+    # the sidebar — fire-count level of detail is enough)
+    related_alerts = [_v2_transform_row(r, drain3_stats=drain3_stats, now_utc=now_utc) for r in related]
+
+    # The design's DetailPage reads `a.relatedAlerts`. Wire it on.
+    alert["relatedAlerts"] = related_alerts
+
+    # Top-bar/sidebar stats reuse the dashboard transform so the chrome
+    # looks the same. Compute the same way as the dashboard route.
+    midnight_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_ago = now_utc - timedelta(days=1)
+    def _ts_dt(r):
+        try:
+            d = datetime.fromisoformat((r.get("timestamp") or "").replace("Z", "+00:00"))
+            return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d
+        except Exception:
+            return None
+    emailed_24h = 0; shelved_24h = 0; cheap_path_since_midnight = 0
+    llm_durations = []; open_fingerprints = set()
+    by_fp_count: dict[str, int] = {}
+    for r in scan:
+        ts = _ts_dt(r)
+        if ts is None:
+            continue
+        act = (r.get("action_taken") or "").lower()
+        td = (r.get("triage_decision") or "").lower()
+        rfp = r.get("alert_fingerprint") or ""
+        if rfp:
+            by_fp_count[rfp] = by_fp_count.get(rfp, 0) + 1
+        if ts >= day_ago:
+            if act == "emailed":
+                emailed_24h += 1
+                if rfp: open_fingerprints.add(rfp)
+            if act == "shelved":
+                shelved_24h += 1
+            dur = r.get("investigation_duration_ms") or 0
+            if dur > 0:
+                llm_durations.append(dur / 1000.0)
+        if ts >= midnight_utc and td in ("triage_suppressed", "suppressed_duplicate", "recurrence_gated_pre_llm"):
+            cheap_path_since_midnight += 1
+    llm_durations.sort()
+    median_latency_s = round(llm_durations[len(llm_durations) // 2], 1) if llm_durations else 0.0
+    import time as _t
+    uptime_sec = int(_t.time() - _PROC_START_TIME)
+    dashboard_stats = {
+        "uptimeSec": uptime_sec,
+        "openAlerts": len(open_fingerprints),
+        "emailed24h": emailed_24h,
+        "shelved24h": shelved_24h,
+        "medianLatency": median_latency_s,
+        "cheap_path_since_midnight": cheap_path_since_midnight,
+    }
+    sidebar_badges = {
+        "triage": len(open_fingerprints),
+        "incidents": len(by_fp_count),
+        "anomalies": (drain3_stats.get("total_anomalies") or 0),
+    }
+    now_tng = now_utc.astimezone(timezone(timedelta(hours=1))).strftime("%Y-%m-%d %H:%M:%S")
+    alert_json = _json2.dumps(alert, default=str)
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Alert {short_id} — Observability · AI RCA</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/design/tokens.css"/>
+<style>
+  body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); }}
+  #root {{ min-height: 100vh; }}
+  .v2-banner {{
+    background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
+    border-bottom: 1px solid rgba(176,126,232,.35);
+    padding: 8px 22px;
+    font-size: 12.5px;
+    color: var(--text-soft, #c0c5d0);
+    display: flex; align-items: center; gap: 14px;
+  }}
+  .v2-banner strong {{ color: var(--accent-purple, #b07ee8); }}
+  .v2-banner a {{ color: var(--accent-cyan, #40d0d0); text-decoration: none; }}
+  .v2-banner a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+
+<div class="v2-banner">
+  <strong>v2 preview · detail page</strong>
+  <span>Alert <code style="color:var(--accent-yellow)">{short_id}</code></span>
+  <span style="flex: 1"></span>
+  <a href="/dashboard/v2">← back to feed</a>
+  <a href="/dashboard">↩ existing /dashboard</a>
+</div>
+
+<div id="root"></div>
+
+<script>
+  window.CIRES_ALERT = {alert_json};
+  window.CIRES_NOW_LOCAL = "{now_tng}";
+  window.CIRES_DASHBOARD_STATS = {_json2.dumps(dashboard_stats)};
+  window.CIRES_SIDEBAR_BADGES = {_json2.dumps(sidebar_badges)};
+</script>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="/static/design/atoms.jsx"></script>
+<script type="text/babel" src="/static/design/sidebar.jsx"></script>
+<script type="text/babel" src="/static/design/detail.jsx"></script>
+
+<script type="text/babel" data-presets="react">
+  function App() {{
+    return <DetailPage a={{window.CIRES_ALERT}}/>;
+  }}
+  ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+
+</body>
+</html>""")
+
+
 @app.get("/metrics")
 async def metrics():
     # US-5.3: refresh precision/recall gauges lazily before serving. Lazy
