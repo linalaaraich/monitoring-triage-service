@@ -17,7 +17,14 @@ function FilterChip({ label, value, open, onClick }) {
   );
 }
 
-function FilterBar({ openFilter, onOpen }) {
+function chipLabel(set) {
+  if (!set || set.size === 0) return "all";
+  const arr = Array.from(set);
+  if (arr.length === 1) return arr[0];
+  return arr[0] + " +" + (arr.length - 1);
+}
+
+function FilterBar({ openFilter, onOpen, searchQuery, setSearchQuery, filters, toggleFilter, clearAllFilters }) {
   return (
     <div style={{
       background: "var(--bg)",
@@ -31,17 +38,17 @@ function FilterBar({ openFilter, onOpen }) {
         <span style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 0.08 }}>Filters</span>
       </div>
       <div style={{ position: "relative" }}>
-        <FilterChip label="Environment" value="prod, stg" open={openFilter==='env'} onClick={()=>onOpen(openFilter==='env'?null:'env')}/>
-        {openFilter === 'env' && <EnvDropdown/>}
+        <FilterChip label="Environment" value={chipLabel(filters.env)} open={openFilter==='env'} onClick={()=>onOpen(openFilter==='env'?null:'env')}/>
+        {openFilter === 'env' && <EnvDropdown selected={filters.env} onToggle={(v)=>toggleFilter('env', v)}/>}
       </div>
       <div style={{ position: "relative" }}>
-        <FilterChip label="Namespace" value="all" open={openFilter==='ns'} onClick={()=>onOpen(openFilter==='ns'?null:'ns')}/>
-        {openFilter === 'ns' && <NsDropdown/>}
+        <FilterChip label="Namespace" value={chipLabel(filters.namespace)} open={openFilter==='ns'} onClick={()=>onOpen(openFilter==='ns'?null:'ns')}/>
+        {openFilter === 'ns' && <NsDropdown selected={filters.namespace} onToggle={(v)=>toggleFilter('namespace', v)}/>}
       </div>
-      <FilterChip label="Service" value="all"/>
+      <FilterChip label="Service" value={chipLabel(filters.service_type)}/>
       <div style={{ position: "relative" }}>
-        <FilterChip label="Verdict" value="ESCALATE +1" open={openFilter==='verdict'} onClick={()=>onOpen(openFilter==='verdict'?null:'verdict')}/>
-        {openFilter === 'verdict' && <VerdictDropdown/>}
+        <FilterChip label="Verdict" value={chipLabel(filters.verdict)} open={openFilter==='verdict'} onClick={()=>onOpen(openFilter==='verdict'?null:'verdict')}/>
+        {openFilter === 'verdict' && <VerdictDropdown selected={filters.verdict} onToggle={(v)=>toggleFilter('verdict', v)}/>}
       </div>
       <FilterChip label="Range" value="last 24 h"/>
 
@@ -52,12 +59,14 @@ function FilterBar({ openFilter, onOpen }) {
       }}>
         <Icon.search style={{ color: "var(--muted)" }}/>
         <input className="input" style={{ background: "transparent", border: 0, padding: 0, flex: 1, fontSize: 13 }}
-          placeholder="Search alert, service, component, RCA text…"/>
+          placeholder="Search alert, service, component, RCA text…"
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}/>
         <span className="mono" style={{ fontSize: 10.5, color: "var(--muted-2)" }}>⌘K</span>
       </div>
 
       <div style={{ flex: 1 }}></div>
-      <button className="btn ghost" style={{ color: "var(--muted)", fontSize: 12.5 }}>Clear all</button>
+      <button className="btn ghost" style={{ color: "var(--muted)", fontSize: 12.5 }} onClick={clearAllFilters}>Clear all</button>
     </div>
   );
 }
@@ -75,9 +84,9 @@ function DropdownPanel({ children, w = 220, style }) {
     </div>
   );
 }
-function DropdownRow({ checked, color, label, count, mono }) {
+function DropdownRow({ checked, color, label, count, mono, onClick }) {
   return (
-    <div style={{
+    <div onClick={onClick} style={{
       display: "flex", alignItems: "center", gap: 9,
       padding: "6px 8px", borderRadius: 6,
       background: checked ? "var(--card-alt)" : "transparent",
@@ -95,37 +104,58 @@ function DropdownRow({ checked, color, label, count, mono }) {
     </div>
   );
 }
-function EnvDropdown() {
+function EnvDropdown({ selected, onToggle }) {
+  const sel = selected || new Set();
+  const opts = [
+    { color: "#e06070", label: "prod", count: "3" },
+    { color: "#f0a050", label: "stg", count: "2" },
+    { color: "#f0a050", label: "preprod", count: "1" },
+    { color: "#4ea8de", label: "uat", count: "1" },
+    { color: "#4ea8de", label: "int", count: "0" },
+    { color: "#8890a0", label: "dev", count: "1" },
+  ];
   return <DropdownPanel>
     <div style={{ fontSize: 10.5, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.08, padding: "4px 8px 8px" }}>Environment</div>
-    <DropdownRow checked color="#e06070" label="prod" count="3"/>
-    <DropdownRow checked color="#f0a050" label="stg" count="2"/>
-    <DropdownRow color="#f0a050" label="preprod" count="1"/>
-    <DropdownRow color="#4ea8de" label="uat" count="1"/>
-    <DropdownRow color="#4ea8de" label="int" count="0"/>
-    <DropdownRow color="#8890a0" label="dev" count="1"/>
+    {opts.map(o => (
+      <DropdownRow key={o.label} checked={sel.has(o.label)} color={o.color} label={o.label} count={o.count}
+        onClick={onToggle ? () => onToggle(o.label) : undefined}/>
+    ))}
   </DropdownPanel>;
 }
-function NsDropdown() {
+function NsDropdown({ selected, onToggle }) {
+  const sel = selected || new Set();
+  const opts = [
+    { label: "app", count: "2" },
+    { label: "rental", count: "2" },
+    { label: "network", count: "1" },
+    { label: "observability", count: "1" },
+    { label: "camera", count: "1" },
+    { label: "kube-system", count: "0" },
+  ];
   return <DropdownPanel w={240}>
     <div style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--bg-soft)", borderRadius: 6, padding: "5px 9px", marginBottom: 6 }}>
       <Icon.search style={{ color: "var(--muted-2)" }}/>
       <input className="input" placeholder="Filter namespaces…" style={{ background: "transparent", border: 0, padding: 0, flex: 1, fontSize: 12.5 }}/>
     </div>
-    <DropdownRow checked label="app" count="2" mono/>
-    <DropdownRow label="rental" count="2" mono/>
-    <DropdownRow label="network" count="1" mono/>
-    <DropdownRow label="observability" count="1" mono/>
-    <DropdownRow label="camera" count="1" mono/>
-    <DropdownRow label="kube-system" count="0" mono/>
+    {opts.map(o => (
+      <DropdownRow key={o.label} checked={sel.has(o.label)} label={o.label} count={o.count} mono
+        onClick={onToggle ? () => onToggle(o.label) : undefined}/>
+    ))}
   </DropdownPanel>;
 }
-function VerdictDropdown() {
+function VerdictDropdown({ selected, onToggle }) {
+  const sel = selected || new Set();
+  const opts = [
+    { color: "#e06070", label: "ESCALATE", count: "3" },
+    { color: "#f0a050", label: "SHELVED", count: "1" },
+    { color: "#8890a0", label: "DISMISS", count: "2" },
+    { color: "#4ea8de", label: "PENDING", count: "1" },
+  ];
   return <DropdownPanel>
-    <DropdownRow checked color="#e06070" label="ESCALATE" count="3"/>
-    <DropdownRow checked color="#f0a050" label="SHELVED" count="1"/>
-    <DropdownRow color="#8890a0" label="DISMISS" count="2"/>
-    <DropdownRow color="#4ea8de" label="PENDING" count="1"/>
+    {opts.map(o => (
+      <DropdownRow key={o.label} checked={sel.has(o.label)} color={o.color} label={o.label} count={o.count}
+        onClick={onToggle ? () => onToggle(o.label) : undefined}/>
+    ))}
   </DropdownPanel>;
 }
 
@@ -250,7 +280,32 @@ function ExpandedDetail({ a }) {
 }
 
 // ─────────────────────────────────────────────────────────
-function Pagination({ shown = 20, total = 287, page = 1 }) {
+function Pagination(props) {
+  // Real values come from window.CIRES_PAGINATION (server-injected). Falls
+  // back to mock numbers if the page is viewed without a backend.
+  const p = (typeof window !== "undefined" ? window.CIRES_PAGINATION : null) || {};
+  const _total = props.total ?? p.total ?? 0;
+  const _page = props.page ?? p.page ?? 1;
+  const _size = props.size ?? p.size ?? 20;
+  const lastPage = Math.max(1, Math.ceil(_total / _size));
+  const startRow = _total === 0 ? 0 : (_page - 1) * _size + 1;
+  const endRow = Math.min(_page * _size, _total);
+
+  function navTo(n) {
+    if (n < 1 || n > lastPage || n === _page) return;
+    const u = new URL(window.location.href);
+    u.searchParams.set("page", String(n));
+    u.searchParams.set("size", String(_size));
+    window.location.href = u.toString();
+  }
+  // Page numbers: 1, current-1, current, current+1, last. Dedupe + sort.
+  const seen = new Set();
+  const pageNums = [];
+  for (const n of [1, _page - 1, _page, _page + 1, lastPage]) {
+    if (n >= 1 && n <= lastPage && !seen.has(n)) { seen.add(n); pageNums.push(n); }
+  }
+  pageNums.sort((a, b) => a - b);
+
   return (
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -258,42 +313,62 @@ function Pagination({ shown = 20, total = 287, page = 1 }) {
       background: "var(--bg-soft)",
     }}>
       <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
-        Showing <span style={{ color: "var(--text)" }}>{(page-1)*20+1}–{Math.min(page*20, total)}</span> of <span style={{ color: "var(--text)" }}>{total}</span> alerts
+        Showing <span style={{ color: "var(--text)" }}>{startRow}–{endRow}</span> of <span style={{ color: "var(--text)" }}>{_total}</span> alerts
       </div>
       <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-        <button className="btn sm" style={{ color: "var(--muted)" }}>← Prev</button>
-        {[1,2,3].map(n => <button key={n} className="btn sm" style={{
-          minWidth: 28, justifyContent: "center",
-          background: n === page ? "var(--card-hi)" : "transparent",
-          borderColor: n === page ? "var(--border-hi)" : "transparent",
-          color: n === page ? "var(--text)" : "var(--muted)",
-        }}>{n}</button>)}
-        <span style={{ color: "var(--muted-2)", padding: "0 6px" }}>…</span>
-        <button className="btn sm" style={{ minWidth: 28, justifyContent: "center", color: "var(--muted)" }}>15</button>
-        <button className="btn sm">Next →</button>
+        <button className="btn sm" onClick={() => navTo(_page - 1)} disabled={_page <= 1}
+          style={{ color: _page > 1 ? "var(--text)" : "var(--muted-2)", cursor: _page > 1 ? "pointer" : "default" }}>← Prev</button>
+        {pageNums.map((n, i) => {
+          const prev = pageNums[i - 1];
+          const gap = prev !== undefined && n - prev > 1;
+          return (
+            <React.Fragment key={n}>
+              {gap && <span style={{ color: "var(--muted-2)", padding: "0 6px" }}>…</span>}
+              <button className="btn sm" onClick={() => navTo(n)} style={{
+                minWidth: 28, justifyContent: "center",
+                background: n === _page ? "var(--card-hi)" : "transparent",
+                borderColor: n === _page ? "var(--border-hi)" : "transparent",
+                color: n === _page ? "var(--text)" : "var(--muted)",
+                cursor: "pointer",
+              }}>{n}</button>
+            </React.Fragment>
+          );
+        })}
+        <button className="btn sm" onClick={() => navTo(_page + 1)} disabled={_page >= lastPage}
+          style={{ color: _page < lastPage ? "var(--text)" : "var(--muted-2)", cursor: _page < lastPage ? "pointer" : "default" }}>Next →</button>
       </div>
       <div style={{ fontSize: 12, color: "var(--muted-2)" }}>
-        Auto-refresh in <span className="mono" style={{ color: "var(--muted)" }}>00:12</span>
+        Page <span className="mono" style={{ color: "var(--muted)" }}>{_page} / {lastPage}</span>
       </div>
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────
-function DashboardChrome({ children, state, openFilter, setOpenFilter, active = "triage" }) {
+function DashboardChrome({ children, state, openFilter, setOpenFilter, active = "triage",
+  searchQuery = "", setSearchQuery = () => {},
+  filters = { env: new Set(), namespace: new Set(), service_type: new Set(), verdict: new Set() },
+  toggleFilter = () => {}, clearAllFilters = () => {} }) {
   const [theme] = window.useTheme();
   const [collapsed, setCollapsed] = window.useSidebarCollapsed();
+  // Cheap-path-since-midnight counter is server-injected via
+  // window.CIRES_DASHBOARD_STATS.cheap_path_since_midnight; fall back to the
+  // original mock value so the design canvas still renders standalone.
+  const _stats = (typeof window !== "undefined" ? window.CIRES_DASHBOARD_STATS : null) || {};
+  const cheapPath = _stats.cheap_path_since_midnight ?? 147;
   return (
     <div className="cires" data-theme={theme} style={{ background: "var(--bg)", minHeight: "100%", display: "flex" }}>
       <window.Sidebar active={active} collapsed={collapsed} onToggleCollapse={() => setCollapsed(!collapsed)}/>
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-        <TopBar uptimeSec={47812} openAlerts={7} emailed24h={12} shelved24h={38} medianLatency={4.3}/>
-        <FilterBar openFilter={openFilter} onOpen={setOpenFilter}/>
+        <TopBar/>
+        <FilterBar openFilter={openFilter} onOpen={setOpenFilter}
+          searchQuery={searchQuery} setSearchQuery={setSearchQuery}
+          filters={filters} toggleFilter={toggleFilter} clearAllFilters={clearAllFilters}/>
         <div style={{ padding: "16px 22px 0" }}>
           <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
             <div>
               <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
-                The cheap-path gates absorbed <span style={{ color: "var(--accent-green)" }}>147</span> alerts since midnight. Showing what the LLM judged worth your attention.
+                The cheap-path gates absorbed <span style={{ color: "var(--accent-green)" }}>{cheapPath}</span> alerts since midnight. Showing what the LLM judged worth your attention.
               </div>
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -335,6 +410,8 @@ function DashboardTable({ rows, expandedId, onToggle }) {
             ))}
           </tbody>
         </table>
+        {/* Pagination — wired to window.CIRES_PAGINATION (server-injected). */}
+        <Pagination/>
       </div>
     </div>
   );
@@ -345,6 +422,22 @@ function Dashboard({ mode = "default" }) {
   const [expandedId, setExpandedId] = useDashState(mode === "expanded" ? "8df8a37a" : null);
   const [openFilter, setOpenFilter] = useDashState(mode === "filters" ? "ns" : null);
   const [toast, setToast] = useDashState(null);
+  const [searchQuery, setSearchQuery] = useDashState("");
+  const [filters, setFilters] = useDashState({
+    env: new Set(), namespace: new Set(), service_type: new Set(), verdict: new Set(),
+  });
+
+  function toggleFilter(key, value) {
+    setFilters(prev => {
+      const nextSet = new Set(prev[key]);
+      if (nextSet.has(value)) nextSet.delete(value); else nextSet.add(value);
+      return { ...prev, [key]: nextSet };
+    });
+  }
+  function clearAllFilters() {
+    setFilters({ env: new Set(), namespace: new Set(), service_type: new Set(), verdict: new Set() });
+    setSearchQuery("");
+  }
 
   const rows = window.CIRES_ALERTS;
 
@@ -365,7 +458,7 @@ function Dashboard({ mode = "default" }) {
             <div style={{ fontSize: 22, fontWeight: 600, marginBottom: 8 }}>All clear</div>
             <div style={{ color: "var(--muted)", fontSize: 14, maxWidth: 540, margin: "0 auto", lineHeight: 1.55 }}>
               No alerts in the last <strong style={{ color: "var(--text-soft)" }}>24 hours</strong>.<br/>
-              The cheap-path gates absorbed <strong style={{ color: "var(--accent-green)" }}>147</strong> alerts since midnight. Nothing required your attention.
+              The cheap-path gates absorbed <strong style={{ color: "var(--accent-green)" }}>{((typeof window !== "undefined" ? window.CIRES_DASHBOARD_STATS : null) || {}).cheap_path_since_midnight ?? 147}</strong> alerts since midnight. Nothing required your attention.
             </div>
             <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 24 }}>
               <button className="btn">View gate stats</button>
@@ -427,9 +520,25 @@ function Dashboard({ mode = "default" }) {
     );
   }
 
+  const q = (searchQuery || "").trim().toLowerCase();
+  const visibleRows = (rows || []).filter(r => {
+    if (filters.env.size > 0 && !filters.env.has(r.env)) return false;
+    if (filters.namespace.size > 0 && !filters.namespace.has(r.namespace)) return false;
+    if (filters.service_type.size > 0 && !filters.service_type.has(r.serviceType)) return false;
+    if (filters.verdict.size > 0 && !filters.verdict.has(r.verdict)) return false;
+    if (q) {
+      const hay = [r.alertPlain, r.component, r.namespace, r.reason, r.id]
+        .filter(Boolean).join(" ").toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
   return (
-    <DashboardChrome openFilter={openFilter} setOpenFilter={setOpenFilter}>
-      <DashboardTable rows={rows} expandedId={expandedId} onToggle={(id) => setExpandedId(expandedId === id ? null : id)}/>
+    <DashboardChrome openFilter={openFilter} setOpenFilter={setOpenFilter}
+      searchQuery={searchQuery} setSearchQuery={setSearchQuery}
+      filters={filters} toggleFilter={toggleFilter} clearAllFilters={clearAllFilters}>
+      <DashboardTable rows={visibleRows} expandedId={expandedId} onToggle={(id) => setExpandedId(expandedId === id ? null : id)}/>
       {toast && <div className="toast">Copied {toast} to clipboard</div>}
     </DashboardChrome>
   );

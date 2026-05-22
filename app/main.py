@@ -185,6 +185,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Process start time — used for the v2 dashboard's TopBar uptime stat.
+import time as _time_at_import
+_PROC_START_TIME = _time_at_import.time()
+
 # Mount design assets for the v2 dashboard preview (Claude Design output,
 # 2026-05-22 — see solution-brief.html §12 + design-prompt.html). React-via-
 # CDN + Babel-in-browser; pre-compilation is a Sprint 5 polish item.
@@ -2653,7 +2657,10 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
 
 
 @app.get("/dashboard/v2", response_class=HTMLResponse)
-async def dashboard_v2(size: int = Query(50, ge=10, le=200)):
+async def dashboard_v2(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=10, le=200),
+):
     """Preview of the 2026-05-22 redesigned dashboard.
 
     Renders the Claude Design <Dashboard/> component against real
@@ -2664,14 +2671,24 @@ async def dashboard_v2(size: int = Query(50, ge=10, le=200)):
     from datetime import datetime, timezone, timedelta
     now_utc = datetime.now(timezone.utc)
 
-    # Pull a wider slab than `size` so we can build per-fingerprint history
-    # before slicing to the page. 200-row cap protects /decisions latency.
-    raw_rows = await _store.get_decisions(limit=200, offset=0, since_days=15)
+    # Page/size → offset for the /decisions slab. Pull a wider slab than
+    # `size` so we can build per-fingerprint history across the window
+    # before slicing to this page. The window is the last 15 days.
+    offset = (page - 1) * size
+    total_in_window = await _store.count_decisions(since_days=15)
+    last_page = max(1, (total_in_window + size - 1) // size)
+    raw_rows = await _store.get_decisions(limit=size, offset=offset, since_days=15)
 
-    # Build fingerprint → prior-fires map. For each row, "prior" = every
-    # OTHER row with the same fingerprint older than this one (oldest first).
+    # For fingerprint-history aggregation we need a wider slab than just
+    # this page. Pull additional rows in the same window so the timeline
+    # can show prior fires that didn't make this page.
+    if offset + size < total_in_window:
+        history_slab = await _store.get_decisions(limit=200, offset=0, since_days=15)
+    else:
+        history_slab = raw_rows
+
     by_fp: dict[str, list] = {}
-    for r in raw_rows:
+    for r in history_slab:
         fp = r.get("alert_fingerprint") or ""
         if fp:
             by_fp.setdefault(fp, []).append(r)
@@ -2681,14 +2698,12 @@ async def dashboard_v2(size: int = Query(50, ge=10, le=200)):
     # Drain3 stats once per request (used for Drain3AnomalyDetected rows)
     drain3_stats = _drain.get_stats() if _drain is not None else {}
 
-    # Transform — for each row, pass the prior fires with the same fingerprint
-    page_rows = raw_rows[:size]
+    # Transform the page rows
     alerts = []
-    for r in page_rows:
+    for r in raw_rows:
         fp = r.get("alert_fingerprint") or ""
         history_for_row = []
         if fp and fp in by_fp:
-            # everything older than this row, oldest first
             for prev in by_fp[fp]:
                 if (prev.get("timestamp") or "") < (r.get("timestamp") or ""):
                     history_for_row.append(prev)
@@ -2699,6 +2714,69 @@ async def dashboard_v2(size: int = Query(50, ge=10, le=200)):
             now_utc=now_utc,
         ))
     alerts_json = _json2.dumps(alerts, default=str)
+
+    # ─── TopBar + sidebar stats (computed from the same slab; no new DB hits) ───
+    # Use the wider history_slab (up to 200 most-recent rows in window) for the
+    # 24h-bounded stats.
+    midnight_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_ago = now_utc - timedelta(days=1)
+    def _ts_dt(r):
+        try:
+            d = datetime.fromisoformat((r.get("timestamp") or "").replace("Z", "+00:00"))
+            return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d
+        except Exception:
+            return None
+    emailed_24h = 0
+    shelved_24h = 0
+    cheap_path_since_midnight = 0
+    llm_durations = []
+    open_fingerprints = set()
+    for r in history_slab:
+        ts = _ts_dt(r)
+        if ts is None:
+            continue
+        act = (r.get("action_taken") or "").lower()
+        td = (r.get("triage_decision") or "").lower()
+        if ts >= day_ago:
+            if act == "emailed":
+                emailed_24h += 1
+                fp = r.get("alert_fingerprint") or ""
+                if fp:
+                    open_fingerprints.add(fp)
+            if act == "shelved":
+                shelved_24h += 1
+            dur = r.get("investigation_duration_ms") or 0
+            if dur > 0:
+                llm_durations.append(dur / 1000.0)
+        if ts >= midnight_utc and td in ("triage_suppressed", "suppressed_duplicate", "recurrence_gated_pre_llm"):
+            cheap_path_since_midnight += 1
+    llm_durations.sort()
+    median_latency_s = round(llm_durations[len(llm_durations) // 2], 1) if llm_durations else 0.0
+
+    # Process uptime — _PROC_START is set at import time below.
+    import time as _t
+    uptime_sec = int(_t.time() - _PROC_START_TIME)
+
+    dashboard_stats = {
+        "uptimeSec": uptime_sec,
+        "openAlerts": len(open_fingerprints),
+        "emailed24h": emailed_24h,
+        "shelved24h": shelved_24h,
+        "medianLatency": median_latency_s,
+        "cheap_path_since_midnight": cheap_path_since_midnight,
+    }
+    sidebar_badges = {
+        "triage": len(open_fingerprints),
+        "incidents": len(by_fp),  # distinct fingerprints in window
+        "anomalies": (drain3_stats.get("total_anomalies") or 0),
+    }
+    pagination = {
+        "page": page,
+        "size": size,
+        "total": total_in_window,
+        "lastPage": last_page,
+        "shown": len(alerts),
+    }
 
     # Current Tangier time for the design's top-bar clock
     now_tng = now_utc.astimezone(timezone(timedelta(hours=1))).strftime("%Y-%m-%d %H:%M:%S")
@@ -2745,6 +2823,9 @@ async def dashboard_v2(size: int = Query(50, ge=10, le=200)):
 <script>
   window.CIRES_ALERTS = {alerts_json};
   window.CIRES_NOW_LOCAL = "{now_tng}";
+  window.CIRES_PAGINATION = {_json2.dumps(pagination)};
+  window.CIRES_DASHBOARD_STATS = {_json2.dumps(dashboard_stats)};
+  window.CIRES_SIDEBAR_BADGES = {_json2.dumps(sidebar_badges)};
 </script>
 
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>

@@ -189,13 +189,53 @@ const Icon = {
 };
 
 // ────────────────────────────────────────────────────────────
-// Top bar — shared by dashboard and detail page
-function TopBar({ uptimeSec = 47812, openAlerts = 7, emailed24h = 12, shelved24h = 38, medianLatency = 4.3, page = "dashboard", onBack }) {
-  const h = Math.floor(uptimeSec / 3600);
-  const m = Math.floor((uptimeSec % 3600) / 60);
-  const s = uptimeSec % 60;
+// Live-ticking clock hook — seeds from server-injected window.CIRES_NOW_LOCAL
+// ("YYYY-MM-DD HH:MM:SS" in Tangier local time) and advances one second per
+// browser tick. Falls back to a static design-canvas value if the server has
+// not injected anything (e.g. when viewing /static/design/... directly).
+function useLiveClock() {
+  const seed = (typeof window !== "undefined" && window.CIRES_NOW_LOCAL) || "2026-05-22 16:45:08";
+  const [nowLocal, setNowLocal] = useState(seed);
+  useEffect(() => {
+    // Parse the seed as a local-time wall clock (no timezone math — we just
+    // advance the displayed string). Use Date.parse on the ISO-ish form.
+    const parsed = new Date(seed.replace(" ", "T"));
+    if (isNaN(parsed.getTime())) return;
+    const startedAt = Date.now();
+    const t = setInterval(() => {
+      const elapsedMs = Date.now() - startedAt;
+      const d = new Date(parsed.getTime() + elapsedMs);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const dd = String(d.getDate()).padStart(2, "0");
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mi = String(d.getMinutes()).padStart(2, "0");
+      const ss = String(d.getSeconds()).padStart(2, "0");
+      setNowLocal(`${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`);
+    }, 1000);
+    return () => clearInterval(t);
+  }, [seed]);
+  return nowLocal;
+}
+
+// ────────────────────────────────────────────────────────────
+// Top bar — shared by dashboard and detail page.
+// Reads live stats from window.CIRES_DASHBOARD_STATS (server-injected) and
+// falls back to the previous hardcoded props so the design canvas page still
+// renders standalone.
+function TopBar({ uptimeSec, openAlerts, emailed24h, shelved24h, medianLatency, page = "dashboard", onBack }) {
+  const stats = (typeof window !== "undefined" ? window.CIRES_DASHBOARD_STATS : null) || {};
+  const _uptimeSec      = uptimeSec      ?? stats.uptimeSec      ?? 47812;
+  const _openAlerts     = openAlerts     ?? stats.openAlerts     ?? 7;
+  const _emailed24h     = emailed24h     ?? stats.emailed24h     ?? 12;
+  const _shelved24h     = shelved24h     ?? stats.shelved24h     ?? 38;
+  const _medianLatency  = medianLatency  ?? stats.medianLatency  ?? 4.3;
+
+  const h = Math.floor(_uptimeSec / 3600);
+  const m = Math.floor((_uptimeSec % 3600) / 60);
+  const s = _uptimeSec % 60;
   const uptime = `${h}h ${String(m).padStart(2,'0')}m ${String(s).padStart(2,'0')}s`;
-  const nowLocal = window.CIRES_NOW_LOCAL || "2026-05-22 16:45:08";
+  const nowLocal = useLiveClock();
   return (
     <div style={{
       background: "var(--bg-soft)",
@@ -226,10 +266,10 @@ function TopBar({ uptimeSec = 47812, openAlerts = 7, emailed24h = 12, shelved24h
 
       <div style={{ flex: 1 }}></div>
 
-      <Stat label="Open" value={openAlerts} accent="var(--accent-red)"/>
-      <Stat label="Emailed 24h" value={emailed24h} accent="var(--accent-orange)"/>
-      <Stat label="Shelved 24h" value={shelved24h} accent="var(--accent-yellow)"/>
-      <Stat label="LLM p50" value={`${medianLatency}s`} accent="var(--accent-purple)"/>
+      <Stat label="Open" value={_openAlerts} accent="var(--accent-red)"/>
+      <Stat label="Emailed 24h" value={_emailed24h} accent="var(--accent-orange)"/>
+      <Stat label="Shelved 24h" value={_shelved24h} accent="var(--accent-yellow)"/>
+      <Stat label="LLM p50" value={`${_medianLatency}s`} accent="var(--accent-purple)"/>
 
       <ThemeToggle/>
     </div>

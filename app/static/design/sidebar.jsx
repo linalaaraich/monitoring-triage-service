@@ -4,13 +4,17 @@
 const SIDEBAR_W = 224;
 const SIDEBAR_W_COLLAPSED = 64;
 
+// Fallback badge values — used when window.CIRES_SIDEBAR_BADGES is not
+// server-injected (i.e. design canvas viewed directly).
+const NAV_BADGE_FALLBACKS = { triage: 7, incidents: 3, anomalies: "12" };
+
 const NAV_GROUPS = [
   {
     label: "Incident response",
     items: [
-      { id: "triage",    label: "Triage feed",   icon: "triage",    badge: 7, accent: "var(--accent-red)" },
-      { id: "incidents", label: "Incidents",     icon: "incidents", badge: 3, accent: "var(--accent-orange)" },
-      { id: "anomalies", label: "Anomalies",     icon: "anomalies", badge: "12" },
+      { id: "triage",    label: "Triage feed",   icon: "triage",    accent: "var(--accent-red)" },
+      { id: "incidents", label: "Incidents",     icon: "incidents", accent: "var(--accent-orange)" },
+      { id: "anomalies", label: "Anomalies",     icon: "anomalies" },
     ],
   },
   {
@@ -91,6 +95,21 @@ function NavItem({ item, active, collapsed }) {
 
 function Sidebar({ active = "triage", collapsed = false, onToggleCollapse }) {
   const w = collapsed ? SIDEBAR_W_COLLAPSED : SIDEBAR_W;
+  // Resolve badges at render time so server-injected window.CIRES_SIDEBAR_BADGES
+  // wins, with NAV_BADGE_FALLBACKS as the safety net.
+  const injectedBadges = (typeof window !== "undefined" ? window.CIRES_SIDEBAR_BADGES : null) || {};
+  const resolveBadge = (id) => {
+    if (injectedBadges[id] != null) return injectedBadges[id];
+    if (NAV_BADGE_FALLBACKS[id] != null) return NAV_BADGE_FALLBACKS[id];
+    return undefined;
+  };
+  const navGroups = NAV_GROUPS.map(g => ({
+    ...g,
+    items: g.items.map(it => {
+      const b = resolveBadge(it.id);
+      return b !== undefined ? { ...it, badge: b } : it;
+    }),
+  }));
   return (
     <aside style={{
       width: w, flexShrink: 0,
@@ -140,7 +159,7 @@ function Sidebar({ active = "triage", collapsed = false, onToggleCollapse }) {
 
       {/* Nav */}
       <div style={{ flex: 1, overflowY: "auto", padding: collapsed ? "10px 8px" : "12px 12px" }}>
-        {NAV_GROUPS.map((g, gi) => (
+        {navGroups.map((g, gi) => (
           <div key={g.label} style={{ marginBottom: 18 }}>
             {!collapsed && <div style={{
               fontSize: 10, color: "var(--muted-2)",
