@@ -2419,18 +2419,41 @@ _V2_NAMESPACE = {
 }
 
 
-def _v2_transform_row(r: dict) -> dict:
+def _v2_humanize_duration(seconds: float) -> str:
+    """'3 min ago', '1 h 24 m', '6 d 2 h' — operator-readable durations."""
+    if seconds < 0:
+        seconds = 0
+    if seconds < 60:
+        return f"{int(seconds)} s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} min"
+    if seconds < 86400:
+        h = int(seconds // 3600); m = int((seconds % 3600) // 60)
+        return f"{h} h {m} m" if m else f"{h} h"
+    d = int(seconds // 86400); h = int((seconds % 86400) // 3600)
+    return f"{d} d {h} h" if h else f"{d} d"
+
+
+def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
+                       drain3_stats: dict | None = None,
+                       now_utc=None) -> dict:
     """Map a /decisions RCARecord row → the CIRES_ALERT shape the design expects.
 
-    Conservative — when source data is missing, return a usable default
-    rather than guessing. Phase 2 will tighten the mapping (incident history
-    aggregation, drain3 snapshot, real environment from labels).
+    `fingerprint_history`: dict mapping alert_fingerprint → list[prior_row]
+    (oldest first), used to compute fireCount + history timeline.
+    `drain3_stats`: optional dict from _drain.get_stats(), used for the
+    Drain3 detail-page tile and the dashboard sustained indicator.
+    `now_utc`: reference datetime for relTime / activeFor calculations.
     """
     import json as _json2
+    from datetime import datetime, timezone, timedelta
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
     raw_id = (r.get("id") or "")
     short_id = raw_id[:8] if raw_id else "—"
     svc = (r.get("affected_service") or "—")
     alert_name = r.get("alert_name") or "—"
+    fingerprint = r.get("alert_fingerprint") or ""
     verdict_lower = (r.get("llm_verdict") or "").lower()
     action_taken = (r.get("action_taken") or "").lower()
 
@@ -2440,20 +2463,16 @@ def _v2_transform_row(r: dict) -> dict:
     else:
         verdict = _V2_VERDICT_MAP.get(verdict_lower, "PENDING")
 
-    # Indicator (sustained / spike / recurring) — heuristic for Phase 1:
-    # we don't have fire-history aggregation yet, so use the alert family +
-    # action_taken as a proxy. Phase 2 will use the real fire-count history.
-    if (r.get("triage_decision") or "") in ("suppressed_duplicate", "recurrence_gated_pre_llm"):
-        indicator = "recurring"
-    elif action_taken == "emailed" and alert_name in ("HighKongP95Latency", "HighP95Latency", "Drain3AnomalyDetected", "HighCpuUsage", "HighMemoryUsage", "PodHighMemoryUsage"):
-        indicator = "sustained"
-    else:
-        indicator = "spike"
+    # Fire-history aggregation. fingerprint_history is built once per request
+    # by the route handler from the same /decisions slab — no extra DB hits.
+    prior = (fingerprint_history or {}).get(fingerprint, [])
+    fire_count = len(prior) + 1 if fingerprint else 1
+    first_fire_ts = (prior[0].get("timestamp") if prior else r.get("timestamp")) or r.get("timestamp")
 
     # Time formatting — Tangier UTC+01:00 per the design's locale ask.
     ts_iso = r.get("timestamp") or ""
+    dt = None
     try:
-        from datetime import datetime, timezone, timedelta
         dt = datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
         tng = dt.astimezone(timezone(timedelta(hours=1)))
         time_local = tng.strftime("%Y-%m-%d %H:%M:%S")
@@ -2463,6 +2482,51 @@ def _v2_transform_row(r: dict) -> dict:
         time_local = ts_iso[:19].replace("T", " ")
         time_short = ts_iso[11:19] if len(ts_iso) > 19 else "—"
         date_short = ts_iso[:10] if len(ts_iso) > 10 else "—"
+
+    # relTime — "3 min ago" / "1 h 24 m ago" relative to now
+    rel_time = "—"
+    active_for = ""
+    if dt is not None:
+        rel_time = _v2_humanize_duration((now_utc - dt).total_seconds()) + " ago"
+    if first_fire_ts:
+        try:
+            first_dt = datetime.fromisoformat(first_fire_ts.replace("Z", "+00:00"))
+            active_for = _v2_humanize_duration((now_utc - first_dt).total_seconds())
+        except Exception:
+            pass
+
+    # Indicator (sustained / spike / recurring). Now driven by real fire-count
+    # + duration since first fire, not a heuristic on alert name.
+    td_lower = (r.get("triage_decision") or "").lower()
+    if td_lower in ("suppressed_duplicate", "recurrence_gated_pre_llm") or fire_count >= 3:
+        indicator = "recurring"
+    elif active_for and any(active_for.endswith(unit) for unit in (" h", " d")) or (
+        active_for and " h " in active_for or " d " in active_for
+    ):
+        indicator = "sustained"
+    elif action_taken == "emailed" and alert_name in ("HighKongP95Latency", "HighP95Latency",
+                                                       "PodHighMemoryUsage", "CriticalCpuUsage",
+                                                       "CriticalMemoryUsage"):
+        indicator = "sustained"
+    else:
+        indicator = "spike"
+
+    # Incident history timeline — every prior fire of this fingerprint + this row.
+    history = []
+    for prev in prior[-9:]:  # cap at last 9 prior fires + current = 10 total
+        try:
+            pdt = datetime.fromisoformat((prev.get("timestamp") or "").replace("Z", "+00:00"))
+            ptng = pdt.astimezone(timezone(timedelta(hours=1)))
+            ptime = ptng.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            ptime = (prev.get("timestamp") or "")[:19]
+        pverdict = _V2_VERDICT_MAP.get((prev.get("llm_verdict") or "").lower(), "PENDING")
+        if (prev.get("action_taken") or "").lower() == "shelved":
+            pverdict = "SHELVED"
+        history.append({"time": ptime, "verdict": pverdict, "delta": "prior fire"})
+    history.append({"time": time_local, "verdict": verdict, "delta": (
+        "first seen" if not prior else "still active — sustained" if indicator == "sustained" else "re-fired"
+    )})
 
     # Parse suggested_actions (stored as JSON string)
     actions = []
@@ -2532,17 +2596,33 @@ def _v2_transform_row(r: dict) -> dict:
     except Exception:
         confidence = None
 
+    # Drain3 snapshot — surfaced for Drain3AnomalyDetected alerts on the detail
+    # page; dashboard only consults `anomalyRate` for a sustained-confidence cue.
+    drain3_card = {}
+    if alert_name == "Drain3AnomalyDetected" and drain3_stats:
+        drain3_card = {
+            "learnedTotal": drain3_stats.get("total_clusters", 0),
+            "anomalyRate": drain3_stats.get("recent_anomaly_rate", 0.0),
+            "linesIngested24h": drain3_stats.get("total_lines_processed", 0),
+            "matchedTemplate": (drain3_stats.get("top_new_patterns_per_service", {}).get(svc, [None])[0] or ""),
+        }
+
     return {
         "id": short_id,
         "uuid": raw_id,
-        "fingerprint": (r.get("alert_fingerprint") or "")[:16] or "—",
+        "fingerprint": fingerprint[:16] or "—",
         "timeISO": ts_iso,
         "timeLocal": time_local,
         "timeShort": time_short,
         "dateShort": date_short,
-        "relTime": "",  # Phase 2: compute from now()
-        "activeFor": "",
-        "env": "prod",  # Phase 2: extract from labels if available
+        "relTime": rel_time,
+        "activeFor": active_for,
+        # env: heuristic for the single-cluster test bed. Real multi-env support
+        # is SF-1 in Sprint 4 (extract from alert labels — `env`, `environment`,
+        # or k8s namespace prefix). For now everything on observability-rca-k3s
+        # reads as `prod`; rental-namespace alerts read as `stg` so the operator
+        # sees at least two values in the column.
+        "env": "stg" if "rental" in svc else "prod",
         "namespace": _V2_NAMESPACE.get(svc, svc[:20] or "—"),
         "serviceType": _V2_SERVICE_TYPE.get(svc, "infra"),
         "component": svc,
@@ -2557,10 +2637,10 @@ def _v2_transform_row(r: dict) -> dict:
         "tags": tags,
         "confidence": confidence,
         "quality": q,
-        "fireCount": 1,  # Phase 2: aggregate by fingerprint
-        "history": [{"time": time_local, "verdict": verdict, "delta": "first seen"}],
+        "fireCount": fire_count,
+        "history": history,
         "evidence": evidence,
-        "drain3": {},  # Phase 2: pull from /drain3/stats when matched
+        "drain3": drain3_card,
     }
 
 
@@ -2573,13 +2653,47 @@ async def dashboard_v2(size: int = Query(50, ge=10, le=200)):
     for the design spec; static assets at /static/design/.
     """
     import json as _json2
-    rows = await _store.get_decisions(limit=size, offset=0, since_days=15)
-    alerts = [_v2_transform_row(r) for r in rows]
+    from datetime import datetime, timezone, timedelta
+    now_utc = datetime.now(timezone.utc)
+
+    # Pull a wider slab than `size` so we can build per-fingerprint history
+    # before slicing to the page. 200-row cap protects /decisions latency.
+    raw_rows = await _store.get_decisions(limit=200, offset=0, since_days=15)
+
+    # Build fingerprint → prior-fires map. For each row, "prior" = every
+    # OTHER row with the same fingerprint older than this one (oldest first).
+    by_fp: dict[str, list] = {}
+    for r in raw_rows:
+        fp = r.get("alert_fingerprint") or ""
+        if fp:
+            by_fp.setdefault(fp, []).append(r)
+    for fp in by_fp:
+        by_fp[fp].sort(key=lambda x: x.get("timestamp") or "")
+
+    # Drain3 stats once per request (used for Drain3AnomalyDetected rows)
+    drain3_stats = _drain.get_stats() if _drain is not None else {}
+
+    # Transform — for each row, pass the prior fires with the same fingerprint
+    page_rows = raw_rows[:size]
+    alerts = []
+    for r in page_rows:
+        fp = r.get("alert_fingerprint") or ""
+        history_for_row = []
+        if fp and fp in by_fp:
+            # everything older than this row, oldest first
+            for prev in by_fp[fp]:
+                if (prev.get("timestamp") or "") < (r.get("timestamp") or ""):
+                    history_for_row.append(prev)
+        alerts.append(_v2_transform_row(
+            r,
+            fingerprint_history={fp: history_for_row} if fp else None,
+            drain3_stats=drain3_stats,
+            now_utc=now_utc,
+        ))
     alerts_json = _json2.dumps(alerts, default=str)
 
     # Current Tangier time for the design's top-bar clock
-    from datetime import datetime, timezone, timedelta
-    now_tng = datetime.now(timezone(timedelta(hours=1))).strftime("%Y-%m-%d %H:%M:%S")
+    now_tng = now_utc.astimezone(timezone(timedelta(hours=1))).strftime("%Y-%m-%d %H:%M:%S")
 
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="en">
