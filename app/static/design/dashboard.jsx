@@ -266,7 +266,7 @@ function ExpandedDetail({ a }) {
           <a className="btn lift" style={{ justifyContent: "space-between" }}>Grafana <Icon.ext/></a>
           <a className="btn lift" style={{ justifyContent: "space-between" }}>Loki <Icon.ext/></a>
           <a className="btn lift" style={{ justifyContent: "space-between" }}>Jaeger <Icon.ext/></a>
-          <a className="btn lift" style={{ justifyContent: "space-between" }}>Rate alert <Icon.ext/></a>
+          <a className="btn lift" href={`/dashboard/v2/alert/${a.id}/rate`} style={{ justifyContent: "space-between", textDecoration: "none" }}>Rate alert <Icon.ext/></a>
         </div>
         {a.fireCount > 1 && <div style={{
           fontSize: 12, color: "var(--muted)", marginTop: 4,

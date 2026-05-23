@@ -329,6 +329,51 @@ async def feedback_confirm(req: FeedbackRequest) -> FeedbackResponse:
     return await _record_feedback(req, feedback_type="confirm")
 
 
+# SF-7 (2026-05-23): the v2 rate-this-alert endpoint. Richer than
+# override/confirm — collects rating + per-axis correctness + actual cause
+# + tags + notes. The form shape comes from the Claude Design feedback.jsx
+# page (supervisor-approved). Resolves the 8-char short_id back to the
+# full UUID (same prefix-scan as the detail route).
+from pydantic import BaseModel as _BaseModel
+class V2FeedbackRequest(_BaseModel):
+    rating: str | None = None              # "yes" / "no" / "partial"
+    verdict_was_right: str | None = None   # "yes" / "no" / "maybe"
+    action_was_right: str | None = None    # "yes" / "no" / "partial" / "n_a"
+    actual_cause: str | None = None
+    tags: list[str] = []
+    notes: str | None = None
+    rater: str | None = None
+
+@app.post("/feedback/rate/{short_id}", status_code=201)
+async def feedback_rate(short_id: str, req: V2FeedbackRequest) -> dict:
+    """Save a v2-rate row for an alert identified by short_id (8-char prefix)."""
+    import uuid as _uuid
+    short = (short_id or "").strip().lower()
+    if not short:
+        raise HTTPException(status_code=400, detail="short_id is required")
+    # Resolve short_id → full UUID
+    scan = await _store.get_decisions(limit=500, offset=0, since_days=30)
+    target = None
+    for r in scan:
+        if (r.get("id") or "").lower().startswith(short):
+            target = r
+            break
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"No alert found with short_id prefix '{short}' in the last 30 days")
+    saved = await _store.record_v2_feedback(
+        feedback_id=str(_uuid.uuid4()),
+        decision_id=target["id"],
+        rating=req.rating,
+        verdict_was_right=req.verdict_was_right,
+        action_was_right=req.action_was_right,
+        actual_cause=req.actual_cause,
+        tags=req.tags,
+        notes=req.notes,
+        rater=req.rater,
+    )
+    return {"ok": True, "decision_id": target["id"], "saved": saved}
+
+
 async def _record_feedback(req: FeedbackRequest, feedback_type: str) -> FeedbackResponse:
     # Validate the decision exists — catches typos before they pollute the
     # feedback table with orphan rows.
@@ -3009,6 +3054,109 @@ async def dashboard_v2_alert(short_id: str):
 <script type="text/babel" data-presets="react">
   function App() {{
     return <DetailPage a={{window.CIRES_ALERT}}/>;
+  }}
+  ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+
+</body>
+</html>""")
+
+
+@app.get("/dashboard/v2/alert/{short_id}/rate", response_class=HTMLResponse)
+async def dashboard_v2_alert_rate(short_id: str):
+    """SF-7 (2026-05-23) — operator feedback page for a specific alert.
+
+    Renders the design's <FeedbackForm/> component (from feedback.jsx)
+    against the resolved alert. Submit posts to /feedback/rate/{short_id}.
+    """
+    import json as _json2
+    from datetime import datetime, timezone, timedelta
+    now_utc = datetime.now(timezone.utc)
+
+    scan = await _store.get_decisions(limit=500, offset=0, since_days=30)
+    short = (short_id or "").strip().lower()
+    target = None
+    for r in scan:
+        if (r.get("id") or "").lower().startswith(short):
+            target = r
+            break
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"No alert found with short_id prefix '{short}' in the last 30 days")
+
+    drain3_stats = _drain.get_stats() if _drain is not None else {}
+    alert = _v2_transform_row(target, drain3_stats=drain3_stats, now_utc=now_utc)
+    alert_json = _json2.dumps(alert, default=str)
+    now_tng = now_utc.astimezone(timezone(timedelta(hours=1))).strftime("%Y-%m-%d %H:%M:%S")
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Rate alert {short_id} — Observability · AI RCA</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/design/tokens.css"/>
+<style>
+  body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); }}
+  #root {{ min-height: 100vh; }}
+  .v2-banner {{
+    background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
+    border-bottom: 1px solid rgba(176,126,232,.35);
+    padding: 8px 22px;
+    font-size: 12.5px;
+    color: var(--text-soft, #c0c5d0);
+    display: flex; align-items: center; gap: 14px;
+  }}
+  .v2-banner strong {{ color: var(--accent-purple, #b07ee8); }}
+  .v2-banner a {{ color: var(--accent-cyan, #40d0d0); text-decoration: none; }}
+</style>
+</head>
+<body>
+
+<div class="v2-banner">
+  <strong>v2 preview · rate alert</strong>
+  <span>Alert <code style="color:var(--accent-yellow)">{short_id}</code></span>
+  <span style="flex: 1"></span>
+  <a href="/dashboard/v2/alert/{short_id}">← back to alert detail</a>
+  <a href="/dashboard/v2">↩ feed</a>
+</div>
+
+<div id="root"></div>
+
+<script>
+  // SF-7: design's feedback.jsx reads from window.CIRES_ALERTS[0]; we
+  // inject a single-element array so the form picks up the right alert.
+  window.CIRES_ALERTS = [{alert_json}];
+  window.CIRES_ALERT = {alert_json};
+  window.CIRES_NOW_LOCAL = "{now_tng}";
+  window.CIRES_RATE_SHORT_ID = {_json2.dumps(short)};
+
+  // Submit handler — POST to /feedback/rate/{{short_id}}, on success
+  // re-render with the submitted state.
+  window.cires_submit_rating = async function(payload) {{
+    const r = await fetch(`/feedback/rate/${{window.CIRES_RATE_SHORT_ID}}`, {{
+      method: "POST",
+      headers: {{ "Content-Type": "application/json" }},
+      body: JSON.stringify(payload),
+    }});
+    if (!r.ok) throw new Error(`HTTP ${{r.status}}`);
+    return r.json();
+  }};
+</script>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="/static/design/atoms.jsx"></script>
+<script type="text/babel" src="/static/design/sidebar.jsx"></script>
+<script type="text/babel" src="/static/design/feedback.jsx"></script>
+
+<script type="text/babel" data-presets="react">
+  function App() {{
+    return <FeedbackEmpty/>;
   }}
   ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>

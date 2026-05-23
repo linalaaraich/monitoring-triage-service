@@ -120,7 +120,7 @@ function FeedbackHeader({ a }) {
 }
 
 function FeedbackForm({ filled = false, submitted = false }) {
-  const a = window.CIRES_ALERTS[0];
+  const a = window.CIRES_ALERT || (window.CIRES_ALERTS && window.CIRES_ALERTS[0]) || {};
   const [theme] = window.useTheme();
   const [useful, setUseful] = useFb(filled ? "yes" : null);
   const [verdict, setVerdict] = useFb(filled ? "yes" : null);
@@ -130,6 +130,10 @@ function FeedbackForm({ filled = false, submitted = false }) {
   const [notes, setNotes] = useFb(filled
     ? "Action was right direction but I scaled spring-boot to 8 not 6. Worth checking why the LLM picked 6."
     : "");
+  // SF-7 (2026-05-23): submit state + error state, swap to confirmation on success.
+  const [isSubmitted, setIsSubmitted] = useFb(submitted);
+  const [submitErr, setSubmitErr] = useFb(null);
+  const [busy, setBusy] = useFb(false);
 
   const toggleTag = (v) => {
     const next = new Set(tags);
@@ -137,7 +141,36 @@ function FeedbackForm({ filled = false, submitted = false }) {
     setTags(next);
   };
 
-  if (submitted) {
+  // POST /feedback/rate/{short_id} via the helper injected by the
+  // server-rendered page (window.cires_submit_rating).
+  const onSave = async () => {
+    if (busy) return;
+    setBusy(true); setSubmitErr(null);
+    const payload = {
+      rating: useful,
+      verdict_was_right: verdict,
+      action_was_right: action,
+      actual_cause: cause || null,
+      tags: Array.from(tags),
+      notes: notes || null,
+      rater: "operator", // SF-7 placeholder; real session-bound rater in Sprint 5
+    };
+    try {
+      if (typeof window.cires_submit_rating !== "function") {
+        // Local/canvas preview without backend — just simulate
+        await new Promise(r => setTimeout(r, 200));
+      } else {
+        await window.cires_submit_rating(payload);
+      }
+      setIsSubmitted(true);
+    } catch (e) {
+      setSubmitErr(String(e && e.message ? e.message : e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (isSubmitted || submitted) {
     return (
       <div className="cires" data-theme={theme} style={{ background: "var(--bg)", minHeight: "100%", padding: 24 }}>
         <div className="card" style={{
@@ -214,9 +247,12 @@ function FeedbackForm({ filled = false, submitted = false }) {
             <div style={{ fontSize: 12, color: "var(--muted)" }}>
               Submitted feedback is anonymous to the team but tagged to <span style={{ color: "var(--text-soft)" }}>y.benhaddou</span> for audit.
             </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn ghost" style={{ color: "var(--muted)" }}>Cancel</button>
-              <button className="btn primary">Save feedback</button>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {submitErr && <span style={{ color: "var(--accent-red)", fontSize: 12 }}>Save failed: {submitErr}</span>}
+              <button className="btn ghost" style={{ color: "var(--muted)" }} onClick={() => window.history.back()}>Cancel</button>
+              <button className="btn primary" onClick={onSave} disabled={busy} style={{ opacity: busy ? 0.6 : 1, cursor: busy ? "default" : "pointer" }}>
+                {busy ? "Saving…" : "Save feedback"}
+              </button>
             </div>
           </div>
         </div>

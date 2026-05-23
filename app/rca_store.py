@@ -178,6 +178,30 @@ class RCAStore:
         await self._db.execute(CREATE_FEEDBACK_INDEX_DECISION)
         await self._db.execute(CREATE_FEEDBACK_INDEX_ACTIVE)
 
+        # SF-7 (2026-05-23): extend the feedback table with the rich
+        # rate-this-alert fields the v2 feedback page collects. Detect
+        # missing columns + ALTER TABLE ADD COLUMN per the rca_history
+        # migration pattern above.
+        feedback_cols = set()
+        async with self._db.execute("PRAGMA table_info(feedback)") as cur:
+            async for row in cur:
+                feedback_cols.add(row[1])
+        feedback_new_columns = [
+            ("rating",             "TEXT"),  # useful: yes / no / partial
+            ("verdict_was_right",  "TEXT"),  # yes / no / maybe
+            ("action_was_right",   "TEXT"),  # yes / no / partial / n_a
+            ("actual_cause",       "TEXT"),  # free text, optional
+            ("tags",               "TEXT"),  # JSON list (chip selections)
+            ("notes",              "TEXT"),  # textarea, ≤280 chars
+            ("rater",              "TEXT"),  # operator identifier
+        ]
+        for name, sql_type in feedback_new_columns:
+            if name not in feedback_cols:
+                logger.info("Migrating feedback: adding column %s", name)
+                await self._db.execute(
+                    f"ALTER TABLE feedback ADD COLUMN {name} {sql_type}"
+                )
+
         await self._db.commit()
         logger.info("RCA history database initialized at %s", self.db_path)
 
@@ -486,6 +510,72 @@ class RCAStore:
             decision_id, feedback_type, active_until,
         )
         return dict(row)
+
+    async def record_v2_feedback(
+        self,
+        feedback_id: str,
+        decision_id: str,
+        rating: str | None,
+        verdict_was_right: str | None,
+        action_was_right: str | None,
+        actual_cause: str | None,
+        tags: list | None,
+        notes: str | None,
+        rater: str | None,
+    ) -> dict:
+        """SF-7 (2026-05-23) — UPSERT a richer 'rate' feedback row.
+
+        Uses feedback_type='rate' to share the (decision_id, feedback_type)
+        UNIQUE constraint with the existing override/confirm rows — operators
+        can both rate an alert AND confirm/override it, without one
+        clobbering the other. Re-rating the same alert updates the row in
+        place (last rating wins).
+        """
+        import json as _json
+        now = _utc_now()
+        tags_json = _json.dumps(tags or [])
+        # Clamp notes to 280 chars defensively (frontend already enforces).
+        notes_clamped = (notes or "")[:280]
+
+        await self._db.execute(
+            """INSERT INTO feedback (
+                   id, decision_id, feedback_type, operator_note,
+                   created_at, active_until,
+                   rating, verdict_was_right, action_was_right,
+                   actual_cause, tags, notes, rater
+               )
+               VALUES (?, ?, 'rate', ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(decision_id, feedback_type) DO UPDATE SET
+                   operator_note    = excluded.operator_note,
+                   created_at       = excluded.created_at,
+                   rating           = excluded.rating,
+                   verdict_was_right= excluded.verdict_was_right,
+                   action_was_right = excluded.action_was_right,
+                   actual_cause     = excluded.actual_cause,
+                   tags             = excluded.tags,
+                   notes            = excluded.notes,
+                   rater            = excluded.rater""",
+            (
+                feedback_id, decision_id, notes_clamped, now.isoformat(),
+                rating, verdict_was_right, action_was_right,
+                actual_cause, tags_json, notes_clamped, rater,
+            ),
+        )
+        await self._db.commit()
+
+        cursor = await self._db.execute(
+            """SELECT id, decision_id, feedback_type, created_at,
+                      rating, verdict_was_right, action_was_right,
+                      actual_cause, tags, notes, rater
+               FROM feedback WHERE decision_id = ? AND feedback_type = 'rate'""",
+            (decision_id,),
+        )
+        row = await cursor.fetchone()
+        logger.info(
+            "Recorded v2 rating: decision_id=%s rating=%s tags=%s rater=%s",
+            decision_id, rating, tags_json, rater,
+        )
+        return dict(row) if row else {}
 
     async def get_active_overrides_for_alert(
         self,

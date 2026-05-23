@@ -665,7 +665,7 @@ Root cause:
 
         # The four button URLs.
         dashboard_url = f"{settings.triage_dashboard_url.rstrip('/')}/dashboard/v2/alert/{short_id}"
-        rate_url = f"{dashboard_url}#rate"  # SF-7 lands the actual rate page on Tue
+        rate_url = f"{settings.triage_dashboard_url.rstrip('/')}/dashboard/v2/alert/{short_id}/rate"
         grafana_url = alert.generatorURL or settings.grafana_url
         loki_url = settings.loki_url
         # jaeger_url = settings.jaeger_url  # not in the 4-button row per design
