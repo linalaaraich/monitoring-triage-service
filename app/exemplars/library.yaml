@@ -37,7 +37,7 @@ exemplars:
   - id: oom-loop
     archetype: "JVM container OOM-kill loop"
     match:
-      alertname: "^(High|Medium|Critical)MemoryUsage$"
+      alertname: "^(Pod)?(High|Medium|Critical)MemoryUsage$"
       services: ["spring-boot", "spring-boot-app", "springboot-app"]
       deployment_types: ["k8s"]
       signal: "metric"
@@ -159,7 +159,7 @@ exemplars:
     # adaptive-threshold-noop (which dismisses seasonal CPU ramps).
     archetype: "Critical CPU/memory saturation on an application service — paged tier"
     match:
-      alertname: "^Critical(Cpu|Memory)Usage$"
+      alertname: "^(Pod)?Critical(Cpu|Memory)Usage$"
       services: ["spring-boot", "spring-boot-app", "springboot-app", "kong", "frontend", "k3s-node"]
       deployment_types: ["k8s", "systemd"]
       signal: "metric"
@@ -305,6 +305,13 @@ exemplars:
     doc_anchor: "scenario-4--cascade-incident-4-alerts-collapsed-into-one-coherent-kill-chain-rca"
 
   - id: drain3-novelty-post-deploy
+    # INTERNAL-WEBHOOK (audit 2026-05-22): Drain3AnomalyDetected is NOT a
+    # Grafana alertrule — the drain3 background thread self-fires by POSTing
+    # directly to `/webhook/drain3` (see `config.drain3_self_webhook_url` and
+    # the drain3 worker loop in `app/drain3_runner.py`). The alert bypasses
+    # Grafana's alertmanager entirely (no alert history, no silences), so
+    # audit Grafana-rule cross-references should SKIP this exemplar — its
+    # lack of a matching `alertrules.yml.j2` entry is by design, not drift.
     archetype: "Drain3 self-fired on a brand-new error template post-deploy"
     match:
       alertname: "^Drain3AnomalyDetected$"
@@ -344,6 +351,7 @@ exemplars:
     # rule yet. This exemplar will activate once those rules ship via
     # monitoring-project. Until then it is reachable only through
     # explicit `get_by_id` from the bounded-agency tool path.
+    # FORWARD-LOOKING
     archetype: "First pass INCONCLUSIVE; one extra MCP query resolves to ESCALATE"
     match:
       alertname: "^High(Frontend)?ErrorRate$"
@@ -379,7 +387,7 @@ exemplars:
   - id: adaptive-threshold-noop
     archetype: "Adaptive-threshold rule absorbs a known seasonal traffic spike"
     match:
-      alertname: "^(High|Medium)CpuUsage$"
+      alertname: "^(Pod)?(High|Medium)CpuUsage$"
       services: ["*"]
       signal: "metric"
     decision: "DISMISS"
@@ -453,6 +461,7 @@ exemplars:
     # KubePodCrashLooping alternative will activate when a
     # `kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff"}`
     # rule ships.
+    # FORWARD-LOOKING
     archetype: "App boot failure / CrashLoopBackOff from a bad config or migration"
     match:
       alertname: "^(KubePodCrashLooping|TargetDown)$"
@@ -492,6 +501,7 @@ exemplars:
     # HighKongUpstreamErrorRate / HighFrontendErrorRate which are not
     # yet provisioned. HighKongP95Latency and TargetDown are live;
     # the others activate when the missing rules ship.
+    # FORWARD-LOOKING
     archetype: "Connectivity break (security group / firewall / network policy) misattributed to app failure"
     match:
       alertname: "^(HighKongUpstreamErrorRate|HighKongP95Latency|HighFrontendErrorRate|TargetDown)$"
@@ -533,6 +543,7 @@ exemplars:
     # (TLSCertExpiringSoon / CertificateExpiry / ProbeSSL*) that are
     # not yet provisioned anywhere in the platform. Activates when a
     # blackbox-exporter or cert-manager-based expiry rule ships.
+    # FORWARD-LOOKING
     archetype: "Pre-failure TLS / cert expiry caught before user impact"
     match:
       alertname: "^(TLSCertExpiringSoon|CertificateExpiry|ProbeSSL.*)$"
