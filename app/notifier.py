@@ -346,9 +346,12 @@ class EmailNotifier:
         ctx: GatheredContext | None = None,
         correlated: list[dict] | None = None,
     ):
-        severity = (decision.severity or alert.severity or "warning").upper()
-        subject = f"[ALERT] {severity}: {alert.alertname} — {alert.service}"
-        body = self._build_escalation_body(
+        # SF-6 (2026-05-23) — v2 email shape, per the supervisor-approved
+        # Claude Design output. Brief subject + 4-button body. Operator-
+        # cognitive-load doctrine (§12.1 in solution-brief): names not
+        # metrics, brief not verbose, one ACTION not a list.
+        subject = self._v2_subject(alert, decision, record)
+        body = self._build_v2_escalation_body(
             alert, decision, record, history_count, ctx, correlated or []
         )
         await self._send(subject, body)
@@ -578,6 +581,204 @@ Root cause:
   <div class="card"><h2>Quick links</h2><ul>{links_html}</ul></div>
   <div class="footer"><p>Timeout after {settings.pipeline_timeout}s. AI triage service may be overloaded or Ollama unresponsive.</p></div>
 </div></body></html>"""
+
+    # ────────────────────────────────────────────────────────────
+    # SF-6 (2026-05-23) — v2 email shape
+    # ────────────────────────────────────────────────────────────
+
+    def _v2_subject(self, alert: GrafanaAlert, decision: LLMDecision,
+                    record: RCARecord) -> str:
+        """Subject format: [env] [namespace] [VERDICT] alertPlain.
+
+        Capped at ~70 chars; alertPlain truncated if needed. Verdict comes
+        from action_taken (SHELVED) or the LLM verdict (ESCALATE/DISMISS).
+        """
+        from app.v2_mappings import design_shape_for_alert
+        action_taken = getattr(record, "action_taken", "") or ""
+        verdict_lower = decision.decision.value.lower() if hasattr(decision.decision, "value") else str(decision.decision).lower()
+        shape = design_shape_for_alert(
+            alertname=alert.alertname,
+            service=alert.service,
+            verdict_lower=verdict_lower,
+            action_taken=action_taken,
+        )
+        env = shape["env"]
+        ns = shape["namespace"]
+        verdict = shape["verdict"]
+        plain = shape["alertPlain"]
+        # Trim if needed to stay under ~70 chars total
+        prefix = f"[{env}] [{ns}] [{verdict}] "
+        max_plain = max(20, 70 - len(prefix))
+        if len(plain) > max_plain:
+            plain = plain[: max_plain - 1] + "…"
+        return prefix + plain
+
+    def _build_v2_escalation_body(
+        self,
+        alert: GrafanaAlert,
+        decision: LLMDecision,
+        record: RCARecord,
+        history_count: int,
+        ctx: GatheredContext | None,
+        correlated: list[dict],
+    ) -> str:
+        """Brief operator-readable HTML email (per design's email.jsx).
+
+        Structure: banner (verdict + severity + active-for) → identity pills
+        (env/ns/service-type/component) → big WHAT → 3 blocks (Why /
+        Suggested action / Severity) → 4 buttons → footer. Every CSS rule
+        inlined (email clients strip <style> blocks).
+        """
+        import html as _html
+        from datetime import datetime, timezone, timedelta
+        from app.v2_mappings import design_shape_for_alert
+
+        action_taken = getattr(record, "action_taken", "") or ""
+        verdict_lower = decision.decision.value.lower() if hasattr(decision.decision, "value") else str(decision.decision).lower()
+        shape = design_shape_for_alert(
+            alertname=alert.alertname,
+            service=alert.service,
+            verdict_lower=verdict_lower,
+            action_taken=action_taken,
+        )
+        env = shape["env"]
+        ns = shape["namespace"]
+        svc_type = shape["serviceType"]
+        component = shape["component"]
+        plain = shape["alertPlain"]
+        verdict = shape["verdict"]
+        severity = (decision.severity or alert.severity or "warning").lower()
+
+        short_id = (record.id or "")[:8] or "—"
+        full_id = record.id or "—"
+
+        # Tangier-local time for the footer.
+        try:
+            ts_iso = getattr(record, "timestamp", None) or datetime.now(timezone.utc).isoformat()
+            dt = datetime.fromisoformat(ts_iso.replace("Z", "+00:00")) if isinstance(ts_iso, str) else ts_iso
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            tng = dt.astimezone(timezone(timedelta(hours=1)))
+            time_local = tng.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            time_local = "—"
+
+        # The four button URLs.
+        dashboard_url = f"{settings.triage_dashboard_url.rstrip('/')}/dashboard/v2/alert/{short_id}"
+        rate_url = f"{dashboard_url}#rate"  # SF-7 lands the actual rate page on Tue
+        grafana_url = alert.generatorURL or settings.grafana_url
+        loki_url = settings.loki_url
+        # jaeger_url = settings.jaeger_url  # not in the 4-button row per design
+
+        # The 3 mid blocks.
+        reason_html = _html.escape((decision.rca or decision.reason or "No RCA prose recorded.").strip())
+        # Truncate to first sentence + bold the component name inline.
+        end = reason_html.find(". ")
+        reason_short = reason_html[: end + 1] if end > 0 and end < 260 else reason_html[:260]
+        if component and component != "—" and component in reason_short:
+            bold = f'<strong style="color:#e8dca0;font-family:JetBrains Mono,monospace;font-weight:600">{_html.escape(component)}</strong>'
+            reason_short = reason_short.replace(_html.escape(component), bold, 1)
+
+        # First suggested action only — design shows one inline + says "more on detail page".
+        action_cmd = "—"
+        if decision.suggested_actions:
+            first = decision.suggested_actions[0]
+            action_cmd = first if isinstance(first, str) else first.get("cmd", str(first))
+        action_cmd_html = _html.escape(action_cmd)
+
+        # Pill helpers — inline-styled to match the design palette.
+        def _pill(text: str, color: str, bg: str = None) -> str:
+            bg = bg or f"rgba(0,0,0,0)"
+            return (f'<span style="display:inline-block;font-size:11px;font-weight:600;'
+                    f'padding:4px 10px;border-radius:12px;border:1px solid {color};'
+                    f'color:{color};background:{bg};letter-spacing:.2px">{_html.escape(text)}</span>')
+
+        env_colors = {
+            "prod": "#e06070", "preprod": "#f0a050", "stg": "#f0a050",
+            "uat": "#4ea8de", "int": "#4ea8de", "dev": "#8890a0",
+        }
+        verdict_colors = {
+            "ESCALATE": "#e06070", "DISMISS": "#8890a0",
+            "SHELVED": "#f0a050", "PENDING": "#4ea8de",
+        }
+        severity_colors = {"critical": "#e06070", "warning": "#f0a050", "info": "#4ea8de"}
+
+        env_pill = _pill(env, env_colors.get(env, "#8890a0"), bg=f"rgba(224,96,112,.08)" if env == "prod" else "rgba(136,144,160,.06)")
+        ns_pill = _pill(ns, "#8890a0", bg="rgba(136,144,160,.06)")
+        svc_pill = _pill(svc_type, "#8890a0", bg="rgba(136,144,160,.06)")
+        comp_pill = _pill(component, "#8890a0", bg="rgba(136,144,160,.06)")
+        verdict_pill = _pill(verdict, verdict_colors.get(verdict, "#8890a0"), bg=f"rgba(224,96,112,.08)" if verdict == "ESCALATE" else "rgba(136,144,160,.06)")
+        severity_pill = _pill(severity, severity_colors.get(severity, "#8890a0"), bg="rgba(240,160,80,.08)" if severity == "warning" else "rgba(224,96,112,.08)" if severity == "critical" else "rgba(78,168,222,.08)")
+
+        active_for_str = "active fire"  # SF-6 placeholder; real value needs history aggregation
+
+        # Three EmailBlocks — Why / Suggested action / Severity. Use 100% width
+        # tables for email-client layout (grid/flex inconsistent across clients).
+        body_html = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{_html.escape(self._v2_subject(alert, decision, record))}</title>
+</head>
+<body style="margin:0;padding:0;background:#0a0b0f;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#e4e6ee">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#0a0b0f">
+  <tr><td align="center" style="padding:24px 16px">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:680px;background:#0f1117;border-radius:14px;border:1px solid #2a2d3a;overflow:hidden">
+
+    <tr><td style="padding:28px 30px 0">
+      <!-- Banner -->
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:linear-gradient(180deg,rgba(224,96,112,.10),rgba(224,96,112,.02));border:1px solid rgba(224,96,112,.35);border-radius:12px;margin-bottom:22px"><tr><td style="padding:14px 18px">
+        {verdict_pill} &nbsp; {severity_pill} &nbsp; <span style="font-size:12px;color:#8890a0">{active_for_str}</span>
+      </td></tr></table>
+
+      <!-- Identity pills -->
+      <div style="margin-bottom:16px">
+        {env_pill} {ns_pill} {svc_pill} {comp_pill}
+      </div>
+
+      <!-- WHAT -->
+      <h1 style="margin:0 0 4px;font-size:24px;font-weight:600;color:#e4e6ee;line-height:1.3">{_html.escape(plain)}</h1>
+      <div style="font-size:12.5px;color:#8890a0;margin-bottom:20px">
+        Alert <span style="font-family:JetBrains Mono,monospace;color:#c0c5d0">{_html.escape(short_id)}</span> · {_html.escape(time_local)} Tangier
+      </div>
+
+      <!-- Why block -->
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#1a1d27;border:1px solid #2a2d3a;border-radius:10px;margin-bottom:10px"><tr><td style="padding:12px 14px">
+        <div style="font-size:10.5px;font-weight:600;color:#8890a0;text-transform:uppercase;letter-spacing:.1px;margin-bottom:6px">Why</div>
+        <div style="font-size:14px;line-height:1.5;color:#e4e6ee">{reason_short}</div>
+      </td></tr></table>
+
+      <!-- Suggested action block -->
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#1a1d27;border:1px solid #2a2d3a;border-radius:10px;margin-bottom:22px"><tr><td style="padding:12px 14px">
+        <div style="font-size:10.5px;font-weight:600;color:#8890a0;text-transform:uppercase;letter-spacing:.1px;margin-bottom:6px">Suggested action</div>
+        <div style="background:#0a0c11;border:1px solid #2a2d3a;border-radius:6px;padding:8px 10px;font-family:JetBrains Mono,monospace;font-size:12px;color:#e4e6ee;word-break:break-all">
+          <span style="color:#40d0d0">$</span> {action_cmd_html}
+        </div>
+      </td></tr></table>
+
+      <!-- Buttons row -->
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+        <td style="padding-right:8px"><a href="{_html.escape(dashboard_url)}" style="display:inline-block;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:500;background:rgba(78,168,222,.18);border:1px solid rgba(78,168,222,.45);color:#b9dcf2;text-decoration:none">View on dashboard →</a></td>
+        <td style="padding-right:8px"><a href="{_html.escape(grafana_url)}" style="display:inline-block;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:500;background:#1a1d27;border:1px solid #2a2d3a;color:#e4e6ee;text-decoration:none">Open Grafana ↗</a></td>
+        <td style="padding-right:8px"><a href="{_html.escape(loki_url)}" style="display:inline-block;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:500;background:#1a1d27;border:1px solid #2a2d3a;color:#e4e6ee;text-decoration:none">Open Loki ↗</a></td>
+        <td><a href="{_html.escape(rate_url)}" style="display:inline-block;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:500;background:#1a1d27;border:1px solid #2a2d3a;color:#e4e6ee;text-decoration:none">Rate this alert</a></td>
+      </tr></table>
+
+      <!-- Footer -->
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:22px;padding-top:14px;border-top:1px solid #2a2d3a"><tr>
+        <td style="font-size:11.5px;color:#5b6172;line-height:1.6">
+          Alert <span style="font-family:JetBrains Mono,monospace">{_html.escape(full_id)}</span> · {_html.escape(time_local)} Tangier (UTC+01:00)
+        </td>
+        <td align="right" style="font-size:11.5px;color:#5b6172">
+          AI RCA Triage Platform <span style="font-family:JetBrains Mono,monospace">v0.1.0</span>
+        </td>
+      </tr></table>
+
+    </td></tr>
+    <tr><td style="height:24px"></td></tr>
+  </table>
+  </td></tr>
+</table>
+</body></html>"""
+        return body_html
 
     async def _send(self, subject: str, html_body: str):
         if not settings.smtp_user or not settings.smtp_password:

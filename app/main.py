@@ -2344,83 +2344,15 @@ async def dashboard_guide():
 #   • Phase 2 (next session): detail-page route, email template wiring,
 #     feedback page, then swap /dashboard → v2.
 
-# Mapping tables for the transformer. Keep these conservative — when in
-# doubt return a sensible default rather than guessing.
-_V2_VERDICT_MAP = {
-    "escalate": "ESCALATE",
-    "dismiss": "DISMISS",
-    "inconclusive": "PENDING",
-    "shelved": "SHELVED",  # synthetic — derived from action_taken below
-}
-
-_V2_ALERT_NAME_PLAIN = {
-    "HighP95Latency": "High p95 latency",
-    "HighKongP95Latency": "High p95 latency on Kong gateway",
-    "HighCpuUsage": "High CPU usage",
-    "CriticalCpuUsage": "Critical CPU usage",
-    "MediumCpuUsage": "Elevated CPU usage",
-    "HighMemoryUsage": "High memory usage",
-    "CriticalMemoryUsage": "Critical memory usage",
-    "MediumMemoryUsage": "Elevated memory usage",
-    "PodHighMemoryUsage": "Pod memory pressure",
-    "PodHighCpuUsage": "Pod CPU saturation",
-    "TargetDown": "Prometheus target down",
-    "Drain3AnomalyDetected": "Novel log-template anomaly",
-    "HighDiskUsage": "High disk usage",
-    "CriticalDiskUsage": "Critical disk usage",
-    "DiskFillingUp": "Disk filling up",
-    "LokiHighDiskUsage": "Loki disk usage high",
-    "LokiCriticalDiskUsage": "Loki disk usage critical",
-    "LokiIngestionRateLow": "Loki ingestion rate dropped",
-    "LokiDiskFillingUp": "Loki disk filling up",
-    "OTelCollectorDown": "OTel collector down",
-    "OTelCollectorHighSpanDropRate": "OTel collector dropping spans",
-}
-
-_V2_SERVICE_TYPE = {
-    "spring-boot": "backend",
-    "spring-boot-app": "backend",
-    "springboot-app": "backend",
-    "backend": "backend",
-    "rental-backend": "backend",
-    "frontend": "frontend",
-    "rental-frontend": "frontend",
-    "kong": "network",
-    "kong-kong-proxy": "network",
-    "rental-mysql": "db",
-    "mysql": "db",
-    "loki": "infra",
-    "prometheus": "infra",
-    "jaeger": "infra",
-    "grafana": "infra",
-    "cadvisor": "infra",
-    "node-exporter": "infra",
-    "monitoring": "infra",
-    "otel-collector": "infra",
-    "k3s-node": "infra",
-    "drain3": "infra",
-}
-
-_V2_NAMESPACE = {
-    "spring-boot": "app",
-    "spring-boot-app": "app",
-    "springboot-app": "app",
-    "frontend": "frontend",
-    "kong": "network",
-    "kong-kong-proxy": "network",
-    "backend": "rental",
-    "rental-backend": "rental",
-    "rental-frontend": "rental",
-    "rental-mysql": "rental",
-    "loki": "observability",
-    "prometheus": "observability",
-    "jaeger": "observability",
-    "grafana": "observability",
-    "otel-collector": "observability",
-    "drain3": "observability",
-    "k3s-node": "kube-system",
-    "monitoring": "observability",
-}
+# Mapping tables extracted to app/v2_mappings.py (2026-05-23) so the
+# notifier (escalation email) can share the same source-of-truth as the
+# dashboard render. Local aliases keep the existing call-sites unchanged.
+from app.v2_mappings import (
+    VERDICT_MAP as _V2_VERDICT_MAP,
+    ALERT_NAME_PLAIN as _V2_ALERT_NAME_PLAIN,
+    SERVICE_TYPE as _V2_SERVICE_TYPE,
+    NAMESPACE as _V2_NAMESPACE,
+)
 
 
 def _v2_humanize_duration(seconds: float) -> str:

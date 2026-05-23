@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     grafana_url: str = "http://52.202.21.192:3000"
     jaeger_url: str = "http://52.202.21.192:16686"
     loki_url: str = "http://52.202.21.192:3100"
+    # Public URL of the triage's own /dashboard (used by the v2 escalation
+    # email's "View on dashboard" button to deep-link into the alert's
+    # detail page). Override per-deploy via TRIAGE_DASHBOARD_URL env.
+    triage_dashboard_url: str = "http://observability-gpu-uswest2:8090"
 
     # Grafana read API auth, for the startup downtime backfill (see
     # app/startup_backfill.py). Empty defaults disable the backfill.
