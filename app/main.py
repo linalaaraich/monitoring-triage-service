@@ -2629,45 +2629,51 @@ async def dashboard_v2(
     from datetime import datetime, timezone, timedelta
     now_utc = datetime.now(timezone.utc)
 
-    # Page/size → offset for the /decisions slab. Pull a wider slab than
-    # `size` so we can build per-fingerprint history across the window
-    # before slicing to this page. The window is the last 15 days.
-    offset = (page - 1) * size
-    total_in_window = await _store.count_decisions(since_days=15)
-    last_page = max(1, (total_in_window + size - 1) // size)
-    raw_rows = await _store.get_decisions(limit=size, offset=offset, since_days=15)
+    # SF-4 (2026-05-23): same-alert collapsing — one row per fingerprint with
+    # fireCount=N + latest timestamp instead of N separate rows. Pull a wide
+    # slab from /decisions (15-day window, cap 500 rows for perf), group by
+    # fingerprint, keep the LATEST row per group as the representative, then
+    # paginate the unique-fingerprint list. Detail page (/dashboard/v2/alert/
+    # {short_id}) already shows the full fire history per fingerprint.
+    history_slab = await _store.get_decisions(limit=500, offset=0, since_days=15)
 
-    # For fingerprint-history aggregation we need a wider slab than just
-    # this page. Pull additional rows in the same window so the timeline
-    # can show prior fires that didn't make this page.
-    if offset + size < total_in_window:
-        history_slab = await _store.get_decisions(limit=200, offset=0, since_days=15)
-    else:
-        history_slab = raw_rows
-
+    # Group by fingerprint. Rows without a fingerprint (legacy / internal
+    # self-fires) get a synthetic key based on (alertname, service, id) so
+    # they don't all collapse into one bucket.
     by_fp: dict[str, list] = {}
     for r in history_slab:
-        fp = r.get("alert_fingerprint") or ""
-        if fp:
-            by_fp.setdefault(fp, []).append(r)
+        fp = r.get("alert_fingerprint") or f"__no_fp__:{r.get('alert_name','')}:{r.get('affected_service','')}:{r.get('id','')}"
+        by_fp.setdefault(fp, []).append(r)
+    # Sort each group oldest→newest (needed for the transformer's prior-history list)
     for fp in by_fp:
         by_fp[fp].sort(key=lambda x: x.get("timestamp") or "")
+
+    # Collapse: one representative per fingerprint = the LATEST row.
+    representatives = []
+    for fp, rows_in_fp in by_fp.items():
+        latest = rows_in_fp[-1]
+        representatives.append((fp, latest))
+    # Sort representatives by latest-timestamp DESC for the feed
+    representatives.sort(key=lambda t: t[1].get("timestamp") or "", reverse=True)
+
+    # Pagination on the COLLAPSED list (was on raw rows before SF-4)
+    total_in_window = len(representatives)
+    last_page = max(1, (total_in_window + size - 1) // size)
+    offset = (page - 1) * size
+    page_reps = representatives[offset:offset + size]
 
     # Drain3 stats once per request (used for Drain3AnomalyDetected rows)
     drain3_stats = _drain.get_stats() if _drain is not None else {}
 
-    # Transform the page rows
+    # Transform the page representatives. The transformer's fingerprint_history
+    # is the OLDER rows of the same fingerprint — the fireCount + history
+    # timeline come from this.
     alerts = []
-    for r in raw_rows:
-        fp = r.get("alert_fingerprint") or ""
-        history_for_row = []
-        if fp and fp in by_fp:
-            for prev in by_fp[fp]:
-                if (prev.get("timestamp") or "") < (r.get("timestamp") or ""):
-                    history_for_row.append(prev)
+    for fp, rep in page_reps:
+        prior = [r for r in by_fp[fp] if (r.get("timestamp") or "") < (rep.get("timestamp") or "")]
         alerts.append(_v2_transform_row(
-            r,
-            fingerprint_history={fp: history_for_row} if fp else None,
+            rep,
+            fingerprint_history={(rep.get("alert_fingerprint") or fp): prior},
             drain3_stats=drain3_stats,
             now_utc=now_utc,
         ))
