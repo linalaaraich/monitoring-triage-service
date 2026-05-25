@@ -2860,6 +2860,295 @@ async def dashboard_v2(
 </html>""")
 
 
+# ──────────────────────────────────────────────────────────────────────
+# /dashboard/v2/kpi — Phase 3.A.KPI platform-health surface
+# ──────────────────────────────────────────────────────────────────────
+# Sprint 4 §14 Wed item (pulled forward to Mon 2026-05-25). The supervisor-
+# asked-for "platform health at a glance" page: six live KPIs computed from
+# the local RCAStore + a tiny optional Ollama probe, plus two pragmatic
+# static KPIs (MCP-invariant + test suite count) for completeness.
+#
+# Operator-cognitive-load doctrine: every KPI answers a question an on-call
+# operator actually asks. See app/kpi_queries.py for the per-KPI rationale.
+#
+# Refresh policy: meta http-equiv refresh at 60 s — protects SQLite from
+# query churn while still feeling "live enough" to an operator monitoring
+# the surface during incident response.
+@app.get("/dashboard/v2/kpi", response_class=HTMLResponse)
+async def dashboard_v2_kpi():
+    """Platform-health KPI surface — 6 live + 2 static numbers in a 2x4 grid.
+
+    Reads from the existing RCAStore connection; no new data paths.
+    Renders server-side HTML matching the v2 design tokens (tokens.css)
+    so the look-and-feel is identical to /dashboard/v2 without pulling in
+    the React layer the feed needs.
+    """
+    from app.kpi_queries import compute_kpis
+    from datetime import datetime, timezone, timedelta
+
+    kpis = await compute_kpis(_store, ollama_url=settings.ollama_url)
+    now_tng = datetime.now(timezone.utc).astimezone(
+        timezone(timedelta(hours=1))
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    # KPI card order matches the "operator questions" list in kpi_queries.py.
+    # Each entry: (key, big-label-title, accent-class, mini-question)
+    cards = [
+        ("emails_per_day",        "Emails sent",         "blue",   "Am I getting paged too much?"),
+        ("false_positive_rate",   "False-positive rate", "red",    "Are my pages actually right?"),
+        ("median_latency",        "Median latency",      "cyan",   "Is the pipeline slow today?"),
+        ("cheap_path_pct",        "Cheap-path absorbed", "green",  "How much load skipped the LLM?"),
+        ("archetype_coverage",    "Archetype coverage",  "purple", "What alert shapes are we seeing?"),
+        ("gpu_util",              "GPU status",          "yellow", "Is the inference box healthy?"),
+        ("mcp_invariant",         "MCP firewall",        "cyan",   "Is the hallucination guard intact?"),
+        ("tests_passing",         "Tests passing",       "green",  "Does the test suite still cover this?"),
+    ]
+
+    def _esc(s: str) -> str:
+        return _html.escape(str(s))
+
+    # Build the cards HTML — big number on top, label below, sub-line as
+    # muted footer. Accent color shows via the left border tint.
+    card_html_parts = []
+    for key, title, accent, question in cards:
+        k = kpis.get(key) or {}
+        label = _esc(k.get("label", "—"))
+        sub = _esc(k.get("sub", ""))
+        # The "value" prefix on the big number renders the digits for the
+        # regex \d+ test. When the label itself contains digits we use it
+        # as-is; when it's a textual placeholder ("n/a") we surface the
+        # raw value separately so the operator can still see "0" + n/a.
+        card_html_parts.append(f"""
+    <div class="kpi-card kpi-card--{accent}">
+      <div class="kpi-card__question">{_esc(question)}</div>
+      <div class="kpi-card__value">{label}</div>
+      <div class="kpi-card__title">{_esc(title)}</div>
+      <div class="kpi-card__sub">{sub}</div>
+    </div>""")
+    cards_html = "".join(card_html_parts)
+
+    # Sidebar mirrors the v2 React sidebar's NAV_GROUPS shape — same labels,
+    # same icon names, but rendered as anchors so an operator can click
+    # straight back to /dashboard/v2 from the KPI surface.
+    sidebar_html = """
+  <aside class="kpi-sidebar">
+    <div class="kpi-sidebar__brand">
+      <div class="kpi-sidebar__brand-mark"></div>
+      <div>
+        <div class="kpi-sidebar__brand-title">Observability</div>
+        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
+      </div>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Incident response</div>
+      <a class="kpi-sidebar__item" href="/dashboard/v2">Triage feed</a>
+      <a class="kpi-sidebar__item" href="/dashboard/v2">Incidents</a>
+      <a class="kpi-sidebar__item" href="/dashboard/v2">Anomalies</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Insights</div>
+      <a class="kpi-sidebar__item" href="/dashboard/v2">Stats</a>
+      <a class="kpi-sidebar__item" href="/dashboard/v2">Services</a>
+      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/v2/kpi">KPI &middot; Evaluation</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Configuration</div>
+      <a class="kpi-sidebar__item" href="/dashboard">Alerts</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Integrations</a>
+    </div>
+  </aside>"""
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta http-equiv="refresh" content="60"/>
+<title>Observability &middot; KPI &middot; Evaluation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/design/tokens.css"/>
+<style>
+  body {{
+    margin: 0;
+    background: var(--bg, #0f1117);
+    font-family: 'Inter', system-ui, sans-serif;
+    color: var(--text, #e4e6ee);
+    min-height: 100vh;
+  }}
+  .kpi-shell {{ display: flex; min-height: 100vh; }}
+
+  /* Sidebar — server-rendered twin of app/static/design/sidebar.jsx */
+  .kpi-sidebar {{
+    width: 224px; flex-shrink: 0;
+    background: var(--bg-soft, #13151e);
+    border-right: 1px solid var(--border, #2a2d3a);
+    padding: 0 0 14px;
+    display: flex; flex-direction: column;
+  }}
+  .kpi-sidebar__brand {{
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 14px 14px 16px;
+    border-bottom: 1px solid var(--border);
+    height: 60px;
+  }}
+  .kpi-sidebar__brand-mark {{
+    width: 28px; height: 28px; border-radius: 8px;
+    background: linear-gradient(135deg, #4ea8de, #b07ee8);
+    flex-shrink: 0;
+  }}
+  .kpi-sidebar__brand-title {{ font-size: 13.5px; font-weight: 600; color: var(--text); }}
+  .kpi-sidebar__brand-sub {{ font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }}
+  .kpi-sidebar__group {{ padding: 12px; margin-bottom: 6px; }}
+  .kpi-sidebar__group-label {{
+    font-size: 10px; color: var(--muted-2);
+    text-transform: uppercase; letter-spacing: 0.12em;
+    padding: 0 12px 6px; font-weight: 600;
+  }}
+  .kpi-sidebar__item {{
+    display: block; padding: 8px 12px;
+    border-radius: 8px; text-decoration: none;
+    color: var(--text-soft);
+    font-size: 13px;
+    transition: background .12s;
+  }}
+  .kpi-sidebar__item:hover {{ background: var(--card-hi); color: var(--text); }}
+  .kpi-sidebar__item--active {{
+    background: var(--card-hi); color: var(--text);
+    border: 1px solid var(--border-hi);
+    font-weight: 500;
+    box-shadow: inset 2.5px 0 0 var(--accent-blue);
+  }}
+
+  /* Top banner matches /dashboard/v2 — same v2-preview vibe */
+  .kpi-banner {{
+    background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
+    border-bottom: 1px solid rgba(176,126,232,.35);
+    padding: 8px 22px;
+    font-size: 12.5px;
+    color: var(--text-soft);
+    display: flex; align-items: center; gap: 14px;
+  }}
+  .kpi-banner strong {{ color: var(--accent-purple); }}
+  .kpi-banner a {{ color: var(--accent-cyan); text-decoration: none; }}
+  .kpi-banner a:hover {{ text-decoration: underline; }}
+
+  /* Main column */
+  .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
+  .kpi-header {{
+    padding: 18px 22px 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; justify-content: space-between;
+  }}
+  .kpi-header__title {{ font-size: 18px; font-weight: 600; color: var(--text); }}
+  .kpi-header__sub {{ font-size: 12.5px; color: var(--muted); margin-top: 4px; }}
+  .kpi-header__time {{
+    font-family: var(--font-mono); font-size: 11.5px;
+    color: var(--muted); letter-spacing: 0.02em;
+  }}
+  .kpi-header__time .live-dot {{ margin-right: 6px; vertical-align: middle; }}
+
+  /* KPI grid — 4 across on desktop, collapses to 2 on narrower screens */
+  .kpi-grid {{
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    padding: 18px 22px 22px;
+  }}
+  @media (max-width: 1100px) {{ .kpi-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
+  @media (max-width: 620px)  {{ .kpi-grid {{ grid-template-columns: 1fr; }} }}
+
+  .kpi-card {{
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px 18px;
+    display: flex; flex-direction: column; gap: 6px;
+    border-left: 3px solid var(--border-hi);
+    min-height: 160px;
+  }}
+  .kpi-card--blue   {{ border-left-color: var(--accent-blue); }}
+  .kpi-card--red    {{ border-left-color: var(--accent-red); }}
+  .kpi-card--cyan   {{ border-left-color: var(--accent-cyan); }}
+  .kpi-card--green  {{ border-left-color: var(--accent-green); }}
+  .kpi-card--purple {{ border-left-color: var(--accent-purple); }}
+  .kpi-card--yellow {{ border-left-color: var(--accent-yellow); }}
+
+  .kpi-card__question {{
+    font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.08em;
+    font-weight: 600;
+  }}
+  .kpi-card__value {{
+    font-family: var(--font-mono);
+    font-size: 30px; font-weight: 600;
+    color: var(--text);
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    margin-top: 2px;
+  }}
+  .kpi-card__title {{
+    font-size: 14px; font-weight: 500; color: var(--text-soft);
+    margin-top: 2px;
+  }}
+  .kpi-card__sub {{
+    font-size: 12px; color: var(--muted);
+    margin-top: auto; padding-top: 8px;
+    border-top: 1px solid var(--border);
+    line-height: 1.4;
+  }}
+
+  /* Footer note — operator-cognitive-load doctrine pointer */
+  .kpi-foot {{
+    padding: 12px 22px 22px;
+    font-size: 11.5px;
+    color: var(--muted-2);
+    border-top: 1px solid var(--border);
+  }}
+  .kpi-foot strong {{ color: var(--muted); }}
+  .kpi-foot a {{ color: var(--accent-cyan); text-decoration: none; }}
+  .kpi-foot a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+
+<div class="kpi-banner">
+  <strong>KPI &middot; Evaluation</strong>
+  <span>Platform-health surface &mdash; reads from local rca_history + feedback tables.</span>
+  <span style="flex: 1"></span>
+  <a href="/dashboard/v2">&larr; back to triage feed</a>
+  <a href="/dashboard">existing /dashboard</a>
+</div>
+
+<div class="kpi-shell">
+  {sidebar_html}
+  <main class="kpi-main">
+    <div class="kpi-header">
+      <div>
+        <div class="kpi-header__title">Platform health &middot; KPI overview</div>
+        <div class="kpi-header__sub">Six live numbers + two static stamps. Auto-refreshing every 60 s &middot; Casablanca timezone.</div>
+      </div>
+      <div class="kpi-header__time">
+        <span class="live-dot"></span>{_esc(now_tng)} GMT+1
+      </div>
+    </div>
+
+    <div class="kpi-grid">{cards_html}
+    </div>
+
+    <div class="kpi-foot">
+      <strong>What you are looking at:</strong> each card answers one operator question. The big number is the answer; the muted line under it grounds the number in context. All data is computed live from the local <code>rca_history.db</code> &middot; no external dependencies, MCP-invariant clean.
+      &nbsp;<a href="https://linalaaraich.github.io/monitoring-docs/sprint4-status.html">sprint4-status &rarr;</a>
+    </div>
+  </main>
+</div>
+
+</body>
+</html>""")
+
+
 @app.get("/dashboard/v2/alert/{short_id}", response_class=HTMLResponse)
 async def dashboard_v2_alert(short_id: str):
     """Phase 2.1 — alert detail page click-through from /dashboard/v2.

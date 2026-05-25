@@ -22,7 +22,7 @@ const NAV_GROUPS = [
     items: [
       { id: "stats",     label: "Stats",          icon: "stats" },
       { id: "services",  label: "Services",       icon: "services" },
-      { id: "kpi",       label: "KPI · Evaluation", icon: "kpi" },
+      { id: "kpi",       label: "KPI · Evaluation", icon: "kpi", href: "/dashboard/v2/kpi" },
     ],
   },
   {
@@ -54,8 +54,17 @@ function NavIcon({ name, size = 16 }) {
 }
 
 function NavItem({ item, active, collapsed }) {
+  // When the nav item carries an `href`, render an <a> so the operator can
+  // click into the linked v2 surface (e.g. KPI · Evaluation → /dashboard/v2/kpi).
+  // Items without href keep the existing div-only behaviour — no regression
+  // on the triage/incidents/anomalies items that don't have their own routes yet.
+  const Wrapper = item.href ? "a" : "div";
+  const wrapperProps = item.href
+    ? { href: item.href, style: { textDecoration: "none" } }
+    : {};
   return (
-    <div title={collapsed ? item.label : undefined} style={{
+    <Wrapper {...wrapperProps} title={collapsed ? item.label : undefined} style={{
+      ...(item.href ? { textDecoration: "none" } : {}),
       display: "flex", alignItems: "center", gap: 11,
       padding: collapsed ? "9px 0" : "8px 12px",
       justifyContent: collapsed ? "center" : "flex-start",
@@ -89,7 +98,7 @@ function NavItem({ item, active, collapsed }) {
           fontFamily: "var(--font-mono)", fontFeatureSettings: '"tnum"',
         }}>{item.badge}</span>
       )}
-    </div>
+    </Wrapper>
   );
 }
 
