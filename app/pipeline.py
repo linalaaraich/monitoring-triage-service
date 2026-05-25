@@ -524,7 +524,7 @@ class TriagePipeline:
                             "Agency: LLM requested tool %s with args %s",
                             tool_req.name, tool_req.args,
                         )
-                        tool_result = await execute_tool(tool_req, self.context_gatherer, self.store)
+                        tool_result = await execute_tool(tool_req, self.context, self.store)
                         tool_block = tool_result_to_prompt_block(tool_result)
                         retry_decision, rd_ms = await self.llm.investigate(
                             alert, ctx, anomaly_summary, history_context,
