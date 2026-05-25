@@ -382,7 +382,7 @@ async def compute_kpis(store, *, ollama_url: str | None = None) -> dict:
             "sub": _STATIC_MCP_INVARIANT_SUB,
         },
         "tests_passing": {
-            "value": 313,
+            "value": 333,
             "label": _STATIC_TESTS_LABEL,
             "sub": _STATIC_TESTS_SUB,
         },
@@ -410,7 +410,7 @@ def _empty_kpis() -> dict:
             "sub": _STATIC_MCP_INVARIANT_SUB,
         },
         "tests_passing": {
-            "value": 313,
+            "value": 333,
             "label": _STATIC_TESTS_LABEL,
             "sub": _STATIC_TESTS_SUB,
         },
