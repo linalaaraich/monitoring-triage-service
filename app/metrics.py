@@ -118,6 +118,19 @@ triage_validator_retries_total = Counter(
     ["reason"],
 )
 
+unsafe_actions_stripped_total = Counter(
+    # DA-2 — clamp-independent unsafe-action strip. Increments once per
+    # alert whose suggested_actions contained a state-changing verb
+    # (systemctl restart / kubectl rollout / ssh / reboot / ...) that
+    # was removed because the RCA prose named no specific cause. The
+    # label values are the actions stripped (truncated to first 60
+    # chars) so we can spot recurring bad-action shapes without
+    # blowing up the metric cardinality.
+    "unsafe_actions_stripped_total",
+    "DA-2 strips (clamp-independent unsafe-action removal)",
+    ["action_kind"],
+)
+
 triage_bounded_agency_invocations_total = Counter(
     # Counts data-starved retries that triggered the bounded-agency loop in
     # pipeline.py. Outcome values: "tool_called" (LLM asked for one MCP tool

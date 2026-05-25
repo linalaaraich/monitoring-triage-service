@@ -740,6 +740,35 @@ class TriagePipeline:
                     actions_source=suggested_actions_source,
                 )
 
+        # DA-2 — clamp-independent unsafe-action strip. Fires when
+        # quality=actionable AND the RCA prose names no cause-of-cause.
+        # Independent of the F-4 confidence clamp above: catches the
+        # case where confidence is high + validator passes + quality
+        # classifier says "actionable", but the LLM still emits a
+        # state-changing verb (systemctl restart / kubectl rollout / ssh)
+        # without grounding it. The 2026-05-21 §7c.4 audit caught
+        # `systemctl restart k3s-node.service` shipping in exactly this
+        # shape for CriticalCpuUsage with no named cause.
+        if quality == "actionable" and decision.suggested_actions:
+            from app.unsafe_actions import strip_unsafe_actions
+            from app.metrics import unsafe_actions_stripped_total
+            kept, stripped = strip_unsafe_actions(
+                decision.suggested_actions, decision.rca or "",
+            )
+            if stripped:
+                logger.info(
+                    "DA-2: stripping %d unsafe action(s) (quality=actionable, "
+                    "no named cause in RCA): %r",
+                    len(stripped), stripped[:3],
+                )
+                decision.suggested_actions = kept
+                for action in stripped:
+                    # Cardinality-safe label: first verb token only
+                    # (systemctl / kubectl / ssh / reboot / docker / ...)
+                    head = (action or "").strip().split()[:1]
+                    kind = (head[0] if head else "unknown").lower()[:24]
+                    unsafe_actions_stripped_total.labels(action_kind=kind).inc()
+
         logger.info(
             "LLM verdict for %s: %s (quality=%s, %dms total%s%s)",
             alert.alertname,
