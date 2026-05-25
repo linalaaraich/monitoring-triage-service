@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from app.config import settings
 from app.context import ContextGatherer
-from app.dedup import DedupManager
+from app.dedup import DedupManager, drain3_fingerprint, family_dedup_key
 from app.drain_analyzer import DrainAnalyzer
 from app.llm_client import LLMClient
 from app.metrics import (
@@ -122,7 +122,12 @@ class TriagePipeline:
                 "description": rich_description,
             },
             startsAt=webhook.timestamp or datetime.now(UTC).replace(tzinfo=None).isoformat(),
-            fingerprint=f"drain3-{webhook.service}",
+            # DA-4 — content-hash the top novel templates so unrelated
+            # drain3 batches on the same service don't collapse into one
+            # dedup window.
+            fingerprint=drain3_fingerprint(
+                webhook.service, webhook.new_templates, webhook.anomalous_lines,
+            ),
         )
         try:
             await self._process_alert(alert, source="drain3")
@@ -137,12 +142,16 @@ class TriagePipeline:
         # a short-path `suppressed_duplicate` record linking to the prior
         # RCA instead of silent drop. Operators see the flap as a compact
         # row, not a gap.
-        is_dup, prior_decision_id = await self.dedup.check(alert.fingerprint, alert.status)
+        # DA-5 — collapse severity-tier alerts on the same scope under a
+        # synthetic family key. Falls back to the Grafana fingerprint for
+        # alertnames not in ALERT_FAMILIES.
+        dedup_key = family_dedup_key(alert)
+        is_dup, prior_decision_id = await self.dedup.check(dedup_key, alert.status)
         if is_dup:
             alerts_deduplicated.inc()
             logger.info(
-                "Alert %s deduplicated (fingerprint=%s, prior_rca=%s) — persisting short-path record",
-                alert.alertname, alert.fingerprint[:12] if alert.fingerprint else "-",
+                "Alert %s deduplicated (dedup_key=%s, prior_rca=%s) — persisting short-path record",
+                alert.alertname, dedup_key[:24] if dedup_key else "-",
                 prior_decision_id or "pending",
             )
             # Short-path record so the dashboard shows it
@@ -839,8 +848,10 @@ class TriagePipeline:
         # Step 9: Save to RCA history (always — even on notifier failure)
         await self.store.save_decision(record)
 
-        # P1.6 — tell dedup which decision_id covers this fingerprint, so
-        # subsequent duplicates within the window persist short-path records
-        # pointing at this RCA.
-        if alert.fingerprint:
-            await self.dedup.record_first_decision(alert.fingerprint, record.id)
+        # P1.6 — tell dedup which decision_id covers this dedup window,
+        # so subsequent duplicates persist short-path records pointing at
+        # this RCA. Uses the same family-aware key as the entry check so
+        # severity-tier siblings link back correctly (DA-5).
+        dedup_key = family_dedup_key(alert)
+        if dedup_key:
+            await self.dedup.record_first_decision(dedup_key, record.id)

@@ -1,9 +1,73 @@
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+# DA-5 — alertname families. Severity-tier alerts on the same resource
+# share a dedup window so Medium/High/Critical for the same condition
+# collapse into one operator row instead of three. Surfaced by the
+# 2026-05-21 dashboard-output audit (HighCpuUsage + CriticalCpuUsage on
+# the same node within ~1 min produced two RCAs).
+#
+# Pod-level rules (PodHighCpuUsage, PodHighMemoryUsage) are intentionally
+# omitted — they have no severity tiers and they target a different scope
+# (pod, not host), so collapsing them with host alerts would hide a real
+# distinction.
+ALERT_FAMILIES: dict[str, str] = {
+    "MediumCpuUsage": "cpu",
+    "HighCpuUsage": "cpu",
+    "CriticalCpuUsage": "cpu",
+    "MediumMemoryUsage": "memory",
+    "HighMemoryUsage": "memory",
+    "CriticalMemoryUsage": "memory",
+    "HighDiskUsage": "disk",
+    "CriticalDiskUsage": "disk",
+    "LokiHighDiskUsage": "loki-disk",
+    "LokiCriticalDiskUsage": "loki-disk",
+}
+
+
+def drain3_fingerprint(
+    service: str,
+    new_templates: list[str] | None,
+    anomalous_lines: list[str] | None,
+) -> str:
+    """DA-4 — content-aware fingerprint for Drain3 self-fires. The legacy
+    `drain3-{service}` collapsed every anomaly batch on the same service
+    into one dedup window, which the 10 min sliding window then merged
+    silently regardless of whether the underlying templates were the same
+    (OOM-pattern vs connection-storm both hashed to one row).
+
+    Top-3 novel templates dominate the digest; if none are present we fall
+    back to the first three anomalous lines so each visually-distinct
+    batch still gets its own key.
+    """
+    templates = [t for t in (new_templates or [])[:3] if t and t.strip()]
+    if not templates:
+        templates = [l for l in (anomalous_lines or [])[:3] if l and l.strip()]
+    if not templates:
+        return f"drain3-{service}"
+    normalized = "\n".join(t.strip() for t in templates)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"drain3-{service}-{digest}"
+
+
+def family_dedup_key(alert) -> str:
+    """Dedup key for `alert`. For severity-tier families returns
+    `family:{name}:{instance|service}` so tier alerts collapse on the
+    same scope; for unknown alertnames returns the Grafana fingerprint
+    unchanged. Only the dedup table uses this — `alert.fingerprint` is
+    still what gets persisted on the RCA record.
+    """
+    family = ALERT_FAMILIES.get(alert.alertname)
+    if family is None:
+        return alert.fingerprint
+    scope = alert.instance if alert.instance != "unknown" else alert.service
+    return f"family:{family}:{scope}"
 
 
 @dataclass
