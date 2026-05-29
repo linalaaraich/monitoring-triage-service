@@ -426,10 +426,44 @@ class TriagePipeline:
             except (asyncio.TimeoutError, Exception) as exc:
                 logger.debug("Baseline fetch failed (non-fatal): %s", exc)
                 # metric_facts.baseline remains None; prompt skips the line
+        # DA-3 — cross-row verdict coherence. When this NON-duplicate fire
+        # (it already passed the dedup → suppression → recurrence-gate
+        # checks above) belongs to a fingerprint that had a prior LLM
+        # decision within the coherence window, fetch that prior cause and
+        # inject it into the prompt. Consecutive fires of a flapping alert
+        # then either reuse the prior cause, explicitly revise it ("changed
+        # my mind because…"), or declare "condition resolved" — instead of
+        # the LLM emitting a fresh, contradictory RCA each time. The lookup
+        # goes through the RCA store (the MCP-sanctioned read path), not a
+        # new direct DB query, so the MCP-only invariant holds. Best-effort:
+        # a store error must not block the investigation.
+        prior_decision = None
+        if settings.da3_verdict_coherence_enabled and alert.fingerprint:
+            try:
+                prior_decision = await self.store.get_recent_decision_for_fingerprint(
+                    fingerprint=alert.fingerprint,
+                    window_minutes=settings.da3_verdict_coherence_window_minutes,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "DA-3 prior-decision lookup failed (non-fatal — continuing without coherence anchor): %s",
+                    exc,
+                )
+            if prior_decision is not None:
+                logger.info(
+                    "DA-3: prior decision %s (verdict=%s) found within %dm for fingerprint %s — "
+                    "injecting prior cause into LLM context for coherence",
+                    prior_decision.get("id", "?"),
+                    (prior_decision.get("llm_verdict") or "?"),
+                    settings.da3_verdict_coherence_window_minutes,
+                    (alert.fingerprint or "")[:12],
+                )
+
         decision, llm_ms = await self.llm.investigate(
             alert, ctx, anomaly_summary, history_context,
             correlated=correlated,
             metric_facts=metric_facts,
+            prior_decision=prior_decision,
         )
         llm_duration.observe(llm_ms / 1000)
 
@@ -512,6 +546,7 @@ class TriagePipeline:
                 parsed, agency_ms = await self.llm.request_tool_or_decide(
                     alert, ctx, anomaly_summary, history_context,
                     correlated=correlated, metric_facts=metric_facts,
+                    prior_decision=prior_decision,
                 )
                 llm_ms += agency_ms
                 llm_duration.observe(agency_ms / 1000)
@@ -530,6 +565,7 @@ class TriagePipeline:
                             alert, ctx, anomaly_summary, history_context,
                             correlated=correlated, metric_facts=metric_facts,
                             tool_result_block=tool_block,
+                            prior_decision=prior_decision,
                         )
                         llm_duration.observe(rd_ms / 1000)
                         llm_ms += rd_ms
@@ -567,6 +603,7 @@ class TriagePipeline:
                 retry_decision, fallback_ms = await self.llm.investigate(
                     alert, ctx, anomaly_summary, retry_history,
                     correlated=correlated, metric_facts=metric_facts,
+                    prior_decision=prior_decision,
                 )
                 llm_duration.observe(fallback_ms / 1000)
                 llm_ms += fallback_ms

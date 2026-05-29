@@ -55,6 +55,19 @@ class Settings(BaseSettings):
     # within a 15-minute window. 10 minutes caps the cascade at ~3 fires.
     triage_history_lookback_minutes: int = 10
 
+    # DA-3 — cross-row verdict coherence. When a NON-duplicate fire happens
+    # for a fingerprint that had a prior decision within this window, the
+    # pipeline fetches that prior decision's cause + RCA and injects it into
+    # the LLM prompt with a coherence instruction (reuse the prior cause if
+    # the situation is unchanged, frame any genuine change as "changed my
+    # mind because…", or say "condition resolved" if the alert is now
+    # recovering). Prevents the platform emitting contradictory RCAs on
+    # consecutive fires of the same flapping alert. Window is wider than the
+    # dedup window (so post-dedup flaps still see the prior verdict) but
+    # bounded so a stale week-old cause doesn't leak into a fresh incident.
+    da3_verdict_coherence_enabled: bool = True
+    da3_verdict_coherence_window_minutes: int = 30
+
     # If the first LLM pass produces a data-starved RCA (hedges like "insufficient
     # data" without naming a cause), retry once with an explicit anti-hedge prompt.
     # Adds up to ~25 s to the pipeline on cold inferences; disable if latency

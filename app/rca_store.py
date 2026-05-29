@@ -367,6 +367,44 @@ class RCAStore:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def get_recent_decision_for_fingerprint(
+        self, fingerprint: str, window_minutes: int
+    ) -> dict | None:
+        """Most-recent LLM decision for a fingerprint within the window (DA-3).
+
+        Cross-row verdict coherence needs the PRIOR cause for the exact same
+        fingerprint — not the (alert_name, service) match used by Layer-2
+        suppression — so consecutive fires of one flapping rule reuse (or
+        explicitly revise) the same diagnosis instead of contradicting it.
+
+        Returns the prior decision's verdict + RCA + reasoning + quality so
+        the pipeline can decide whether to inject it (and the prompt builder
+        can quote the prior cause back to the model). Only rows that carry a
+        real LLM verdict are considered — short-path dedup / suppression /
+        gate rows have llm_verdict NULL and have no cause to be coherent with.
+
+        Synthetic-test fires (audit-live cron, chaos harness) are excluded so
+        their decisions don't seed a coherence anchor for real fires — mirrors
+        the same exclusion in get_recent_decision_for_alert.
+        """
+        if not fingerprint:
+            return None
+        since = (_utc_now() - timedelta(minutes=window_minutes)).isoformat()
+        cursor = await self._db.execute(
+            """SELECT id, timestamp, alert_name, affected_service,
+                      triage_decision, llm_verdict, rca_report, llm_reasoning,
+                      rca_quality
+               FROM rca_history
+               WHERE alert_fingerprint = ? AND timestamp > ?
+                 AND llm_verdict IS NOT NULL
+                 AND alert_fingerprint NOT LIKE 'audit-live-%'
+                 AND alert_fingerprint NOT LIKE 'chaos-%'
+               ORDER BY timestamp DESC LIMIT 1""",
+            (fingerprint, since),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
     async def get_alert_frequency(self, alert_name: str, days: int = 7) -> dict:
         since = (_utc_now() - timedelta(days=days)).isoformat()
         cursor = await self._db.execute(

@@ -313,6 +313,59 @@ def _format_observed_value(values: dict) -> str:
     return " ".join(out)
 
 
+def build_prior_decision_block(prior_decision: dict | None) -> str:
+    """DA-3 — render the cross-row verdict-coherence prompt section.
+
+    `prior_decision` is the most-recent prior LLM decision for THIS exact
+    fingerprint within the coherence window (see
+    RCAStore.get_recent_decision_for_fingerprint). Returns "" when there's
+    no prior decision so the caller can skip the section entirely.
+
+    Why this exists: a flapping alert fires repeatedly. Each fire is a fresh
+    LLM call with no memory of the last one, so the model can — and in the
+    2026-05 audits did — emit a different, contradictory cause each time
+    ("JVM heap exhausted" on fire 1, "network blip" on fire 2). The operator
+    then can't trust any single RCA. By quoting the prior cause back to the
+    model with an explicit coherence rule, we force one of three coherent
+    outcomes: reuse the prior cause (situation unchanged), explicitly revise
+    it ("changed my mind because…"), or declare recovery ("condition
+    resolved"). The model still owns the verdict — we only forbid silent
+    contradiction.
+    """
+    if not prior_decision:
+        return ""
+    prior_verdict = (prior_decision.get("llm_verdict") or "unknown").upper()
+    prior_when = (prior_decision.get("timestamp") or "")[:19] or "recently"
+    # The prior cause is the RCA prose; fall back to the reasoning line if the
+    # RCA was empty (older / thin rows). Trim so a long prior RCA doesn't blow
+    # the prompt budget — the lede sentence carries the named cause.
+    prior_cause = (prior_decision.get("rca_report") or prior_decision.get("llm_reasoning") or "").strip()
+    prior_cause = prior_cause.replace("\n", " ")
+    if len(prior_cause) > 600:
+        prior_cause = prior_cause[:600].rstrip() + " …"
+    if not prior_cause:
+        prior_cause = "(no cause text recorded on the prior decision)"
+
+    return (
+        "\n## Prior decision on THIS fingerprint (cross-row coherence — DA-3)\n"
+        f"This exact alert fingerprint already produced a decision at {prior_when} "
+        f"(verdict: {prior_verdict}). The cause named then was:\n"
+        f'  "{prior_cause}"\n\n'
+        "COHERENCE RULE — you MUST do exactly one of the following, and state which:\n"
+        "  (a) If the situation is UNCHANGED (same underlying problem still firing), "
+        "REUSE that prior cause as your RCA. Do NOT invent a new, contradictory cause "
+        "for the same flapping alert.\n"
+        "  (b) If the evidence now genuinely points to a DIFFERENT cause, you may revise — "
+        "but you MUST frame it explicitly as 'changed my mind because …' and say what new "
+        "evidence overturned the prior diagnosis.\n"
+        "  (c) If the alert is now RECOVERING / the breach has cleared, say 'condition "
+        "resolved' in your RCA and DISMISS (the earlier cause may simply have been "
+        "transient).\n"
+        "Silent contradiction — a brand-new unrelated cause with no '(a)/(b)/(c)' framing — "
+        "is the failure mode this rule exists to prevent.\n"
+    )
+
+
 def _build_fallback_decision() -> LLMDecision:
     """Return a safe NEEDS_HUMAN_REVIEW fallback when the LLM is unavailable."""
     return LLMDecision(
@@ -358,13 +411,21 @@ class LLMClient:
         correlated: list[dict] | None = None,
         metric_facts=None,  # app.metric_interpreter.MetricFacts, but avoid import cycle
         tool_result_block: str | None = None,
+        prior_decision: dict | None = None,  # DA-3 cross-row coherence anchor
     ) -> tuple[LLMDecision, int]:
         """Run LLM investigation. Returns (decision, duration_ms).
 
         If tool_result_block is given, it's appended to the user_content as
         additional evidence from a bounded-agency retry (see app.bounded_agency).
+
+        If prior_decision is given (DA-3), the prior cause for this exact
+        fingerprint is injected with a coherence instruction so consecutive
+        fires of a flapping alert don't produce contradictory RCAs.
         """
-        messages = self._build_prompt(alert, context, drain_summary, history_context, correlated, metric_facts)
+        messages = self._build_prompt(
+            alert, context, drain_summary, history_context, correlated,
+            metric_facts, prior_decision=prior_decision,
+        )
         if tool_result_block:
             # Append to the final user message so the tool result is read
             # together with the original evidence.
@@ -426,6 +487,7 @@ class LLMClient:
         history_context: str,
         correlated: list[dict] | None,
         metric_facts,
+        prior_decision: dict | None = None,  # DA-3 cross-row coherence anchor
     ) -> tuple[dict | None, int]:
         """Bounded-agency first half: ask the LLM to either request ONE
         tool call from the whitelist OR emit a final decision.
@@ -439,7 +501,10 @@ class LLMClient:
         so we use format=json and parse leniently.
         """
         from app.bounded_agency import TOOLS_DESCRIPTION
-        messages = self._build_prompt(alert, context, drain_summary, history_context, correlated, metric_facts)
+        messages = self._build_prompt(
+            alert, context, drain_summary, history_context, correlated,
+            metric_facts, prior_decision=prior_decision,
+        )
         messages[-1]["content"] += (
             "\n\n## YOUR FIRST PASS WAS DATA-STARVED\n\n"
             "Your first response hedged with 'insufficient data' or similar. You now have "
@@ -497,6 +562,7 @@ class LLMClient:
         history_context: str,
         correlated: list[dict] | None = None,
         metric_facts=None,
+        prior_decision: dict | None = None,
     ) -> list[dict]:
         rule_expr = alert.annotations.get("expr", "") or "(rule expression not provided — ask the alert owner to add annotations.expr)"
         observed_value = _format_observed_value(alert.values)
@@ -595,6 +661,10 @@ class LLMClient:
                 )
             correlated_block = "\n".join(lines) + "\n"
 
+        # DA-3 — cross-row verdict-coherence block. Empty string when there's
+        # no recent prior decision for this exact fingerprint.
+        prior_decision_block = build_prior_decision_block(prior_decision)
+
         # Loki block: precomputed in plain Python so the long literal with
         # `\n\n` lives outside the f-string expression. Python 3.12 (PEP 701)
         # allows backslashes inside f-string expressions; 3.11 does not. Audit
@@ -641,6 +711,7 @@ class LLMClient:
 {interpreter_block}
 {drain3_playbook_block}
 {correlated_block}
+{prior_decision_block}
 The observed value above is ground-truth signal from Prometheus at the moment the rule's threshold was crossed. Cite this value explicitly in your RCA — do not say "insufficient data" if the alert itself carries a value.
 {exemplar_block}
 ## Pre-Gathered Context
