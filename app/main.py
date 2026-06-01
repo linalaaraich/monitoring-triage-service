@@ -3423,6 +3423,385 @@ async def dashboard_v2_kpi():
 </html>""")
 
 
+# ──────────────────────────────────────────────────────────────────────
+# /dashboard/v2/services — per-service read-only summary
+# ──────────────────────────────────────────────────────────────────────
+# Fills out a previously-dead sidebar item. One row per distinct
+# affected_service over the last 7 days, with the counts an operator
+# wants when triaging "which service has been noisy lately": total
+# decisions, breakdown by action_taken / llm_verdict / severity, last
+# fire timestamp, and the dominant alertname.
+#
+# Server-rendered HTML in the same chrome as /dashboard/v2/kpi
+# (sidebar twin, dark theme, 60s meta-refresh). Service names link
+# back to the filtered triage feed via the existing ?q= URL filter.
+# Read-only — no writes, no Grafana API, all data via RCAStore (which
+# is itself the canonical writer; the MCP-only invariant is preserved).
+@app.get("/dashboard/v2/services", response_class=HTMLResponse)
+async def dashboard_v2_services():
+    """Per-service rollup surface — one row per affected_service in the last 7d."""
+    import urllib.parse as _urllib
+    from datetime import datetime, timezone, timedelta
+
+    services: list[dict] = []
+    if _store is not None:
+        try:
+            services = await _store.get_service_summary(days=7)
+        except Exception as exc:
+            logger.warning("services summary query failed (non-fatal): %s", exc)
+            services = []
+
+    now_tng = datetime.now(timezone.utc).astimezone(
+        timezone(timedelta(hours=1))
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _esc(s) -> str:
+        return _html.escape(str(s)) if s is not None else ""
+
+    # ── Summary chips: aggregate the per-service rollup into a few headline
+    # numbers that match the KPI page's "one-line headline" aesthetic.
+    n_services = len(services)
+    total_decisions = sum(s["total"] for s in services)
+    total_emails = sum(s["actions"].get("emailed", 0) for s in services)
+    # "K emails / day avg" — divide by the 7-day window so the number
+    # answers the operator question "how many pages per day is this
+    # platform generating" rather than "in the last week, total".
+    emails_per_day = round(total_emails / 7.0, 1) if total_emails else 0
+
+    chips_html = f"""
+    <div class="svc-chips">
+      <div class="svc-chip"><span class="svc-chip__n">{n_services}</span><span class="svc-chip__l">services seen</span></div>
+      <div class="svc-chip"><span class="svc-chip__n">{total_decisions}</span><span class="svc-chip__l">decisions</span></div>
+      <div class="svc-chip"><span class="svc-chip__n">{emails_per_day}</span><span class="svc-chip__l">emails / day avg</span></div>
+    </div>"""
+
+    # ── Table body: one row per service. Service name is an anchor back
+    # to the filtered triage feed (the ?q= URL filter already exists).
+    if services:
+        row_html_parts = []
+        for s in services:
+            svc = s["service"] or ""
+            q_param = _urllib.quote_plus(svc)
+            actions = s["actions"]
+            verdicts = s["verdicts"]
+            severities = s["severities"]
+            # Compact breakdown rendering: "emailed 3 · suppressed 2"
+            def _fmt(d: dict) -> str:
+                if not d:
+                    return "<span class='svc-muted'>—</span>"
+                items = sorted(d.items(), key=lambda kv: kv[1], reverse=True)
+                return " &middot; ".join(
+                    f"<span class='svc-pair'>{_esc(k)} <b>{v}</b></span>" for k, v in items
+                )
+            last_fire_display = s["last_fire"] or "—"
+            # Trim the timestamp to YYYY-MM-DD HH:MM (drop microseconds + tz)
+            if last_fire_display and last_fire_display != "—":
+                last_fire_display = last_fire_display[:16].replace("T", " ")
+            top_alert = s["top_alertname"] or "—"
+            row_html_parts.append(f"""
+        <tr>
+          <td class="svc-cell-name"><a href="/dashboard/v2?q={q_param}">{_esc(svc)}</a></td>
+          <td class="svc-cell-num">{s["total"]}</td>
+          <td>{_fmt(actions)}</td>
+          <td>{_fmt(verdicts)}</td>
+          <td>{_fmt(severities)}</td>
+          <td class="svc-cell-mono">{_esc(last_fire_display)}</td>
+          <td class="svc-cell-alert">{_esc(top_alert)}</td>
+        </tr>""")
+        table_body_html = "".join(row_html_parts)
+        table_html = f"""
+    <table class="svc-table">
+      <thead>
+        <tr>
+          <th>Service</th>
+          <th>Total</th>
+          <th>By action</th>
+          <th>By verdict</th>
+          <th>By severity</th>
+          <th>Last fire</th>
+          <th>Top alert</th>
+        </tr>
+      </thead>
+      <tbody>{table_body_html}
+      </tbody>
+    </table>"""
+    else:
+        # Empty-DB affordance — don't 500, don't render an empty table header.
+        table_html = """
+    <div class="svc-empty">
+      <div class="svc-empty__title">No services yet</div>
+      <div class="svc-empty__sub">No decisions in the last 7 days carry an <code>affected_service</code> label. As alerts flow through the pipeline, this page will populate.</div>
+    </div>"""
+
+    # Sidebar mirrors /dashboard/v2/kpi exactly so the chrome is consistent;
+    # the "Services" item is the active one here.
+    sidebar_html = """
+  <aside class="kpi-sidebar">
+    <div class="kpi-sidebar__brand">
+      <div class="kpi-sidebar__brand-mark"></div>
+      <div>
+        <div class="kpi-sidebar__brand-title">Observability</div>
+        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
+      </div>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Incident response</div>
+      <a class="kpi-sidebar__item" href="/dashboard/v2">Triage feed</a>
+      <a class="kpi-sidebar__item" href="/dashboard/v2">Incidents</a>
+      <a class="kpi-sidebar__item" href="/dashboard/v2">Anomalies</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Insights</div>
+      <a class="kpi-sidebar__item" href="/dashboard/v2">Stats</a>
+      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/v2/services">Services</a>
+      <a class="kpi-sidebar__item" href="/dashboard/v2/kpi">KPI &middot; Evaluation</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Configuration</div>
+      <a class="kpi-sidebar__item" href="/dashboard">Alerts</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Integrations</a>
+    </div>
+  </aside>"""
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta http-equiv="refresh" content="60"/>
+<title>Observability &middot; Services</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/design/tokens.css"/>
+<style>
+  body {{
+    margin: 0;
+    background: var(--bg, #0f1117);
+    font-family: 'Inter', system-ui, sans-serif;
+    color: var(--text, #e4e6ee);
+    min-height: 100vh;
+  }}
+  .kpi-shell {{ display: flex; min-height: 100vh; }}
+
+  /* Sidebar — twin of /dashboard/v2/kpi's sidebar so chrome stays uniform */
+  .kpi-sidebar {{
+    width: 224px; flex-shrink: 0;
+    background: var(--bg-soft, #13151e);
+    border-right: 1px solid var(--border, #2a2d3a);
+    padding: 0 0 14px;
+    display: flex; flex-direction: column;
+  }}
+  .kpi-sidebar__brand {{
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 14px 14px 16px;
+    border-bottom: 1px solid var(--border);
+    height: 60px;
+  }}
+  .kpi-sidebar__brand-mark {{
+    width: 28px; height: 28px; border-radius: 8px;
+    background: linear-gradient(135deg, #4ea8de, #b07ee8);
+    flex-shrink: 0;
+  }}
+  .kpi-sidebar__brand-title {{ font-size: 13.5px; font-weight: 600; color: var(--text); }}
+  .kpi-sidebar__brand-sub {{ font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }}
+  .kpi-sidebar__group {{ padding: 12px; margin-bottom: 6px; }}
+  .kpi-sidebar__group-label {{
+    font-size: 10px; color: var(--muted-2);
+    text-transform: uppercase; letter-spacing: 0.12em;
+    padding: 0 12px 6px; font-weight: 600;
+  }}
+  .kpi-sidebar__item {{
+    display: block; padding: 8px 12px;
+    border-radius: 8px; text-decoration: none;
+    color: var(--text-soft);
+    font-size: 13px;
+    transition: background .12s;
+  }}
+  .kpi-sidebar__item:hover {{ background: var(--card-hi); color: var(--text); }}
+  .kpi-sidebar__item--active {{
+    background: var(--card-hi); color: var(--text);
+    border: 1px solid var(--border-hi);
+    font-weight: 500;
+    box-shadow: inset 2.5px 0 0 var(--accent-blue);
+  }}
+
+  /* Top banner matches the KPI page */
+  .kpi-banner {{
+    background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
+    border-bottom: 1px solid rgba(176,126,232,.35);
+    padding: 8px 22px;
+    font-size: 12.5px;
+    color: var(--text-soft);
+    display: flex; align-items: center; gap: 14px;
+  }}
+  .kpi-banner strong {{ color: var(--accent-purple); }}
+  .kpi-banner a {{ color: var(--accent-cyan); text-decoration: none; }}
+  .kpi-banner a:hover {{ text-decoration: underline; }}
+
+  .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
+  .kpi-header {{
+    padding: 18px 22px 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; justify-content: space-between;
+  }}
+  .kpi-header__title {{ font-size: 18px; font-weight: 600; color: var(--text); }}
+  .kpi-header__sub {{ font-size: 12.5px; color: var(--muted); margin-top: 4px; }}
+  .kpi-header__time {{
+    font-family: var(--font-mono); font-size: 11.5px;
+    color: var(--muted); letter-spacing: 0.02em;
+  }}
+
+  /* Summary chips — top-of-page headline numbers */
+  .svc-chips {{
+    display: flex; gap: 14px;
+    padding: 18px 22px 6px;
+    flex-wrap: wrap;
+  }}
+  .svc-chip {{
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent-cyan);
+    border-radius: 10px;
+    padding: 10px 16px;
+    display: flex; flex-direction: column; gap: 2px;
+    min-width: 140px;
+  }}
+  .svc-chip__n {{
+    font-family: var(--font-mono);
+    font-size: 22px; font-weight: 600; color: var(--text);
+    line-height: 1.1;
+  }}
+  .svc-chip__l {{
+    font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
+  }}
+
+  /* Services table — one row per affected_service */
+  .svc-table-wrap {{ padding: 14px 22px 22px; }}
+  .svc-table {{
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    font-size: 13px;
+  }}
+  .svc-table thead th {{
+    text-align: left;
+    padding: 10px 14px;
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px; color: var(--muted-2);
+    text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
+  }}
+  .svc-table tbody td {{
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-soft);
+    vertical-align: top;
+  }}
+  .svc-table tbody tr:last-child td {{ border-bottom: none; }}
+  .svc-table tbody tr:hover td {{ background: var(--card-hi); }}
+  .svc-cell-name a {{
+    color: var(--accent-cyan);
+    text-decoration: none;
+    font-weight: 500;
+  }}
+  .svc-cell-name a:hover {{ text-decoration: underline; }}
+  .svc-cell-num {{
+    font-family: var(--font-mono);
+    color: var(--text);
+    font-weight: 600;
+  }}
+  .svc-cell-mono {{
+    font-family: var(--font-mono);
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+  }}
+  .svc-cell-alert {{ color: var(--text-soft); font-size: 12.5px; }}
+  .svc-pair {{
+    display: inline-block;
+    color: var(--muted);
+  }}
+  .svc-pair b {{ color: var(--text); font-weight: 600; }}
+  .svc-muted {{ color: var(--muted-2); }}
+
+  /* Empty-DB affordance */
+  .svc-empty {{
+    margin: 18px 22px;
+    padding: 36px 28px;
+    background: var(--card);
+    border: 1px dashed var(--border);
+    border-radius: 12px;
+    text-align: center;
+    color: var(--muted);
+  }}
+  .svc-empty__title {{
+    font-size: 15px; font-weight: 600;
+    color: var(--text-soft);
+    margin-bottom: 6px;
+  }}
+  .svc-empty__sub {{ font-size: 12.5px; }}
+  .svc-empty code {{
+    font-family: var(--font-mono);
+    background: var(--bg-soft);
+    padding: 1px 5px; border-radius: 4px;
+    font-size: 11.5px;
+  }}
+
+  .kpi-foot {{
+    padding: 12px 22px 22px;
+    font-size: 11.5px;
+    color: var(--muted-2);
+    border-top: 1px solid var(--border);
+  }}
+  .kpi-foot strong {{ color: var(--muted); }}
+  .kpi-foot a {{ color: var(--accent-cyan); text-decoration: none; }}
+  .kpi-foot a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+
+<div class="kpi-banner">
+  <strong>Services</strong>
+  <span>Per-service rollup &mdash; last 7 days, reads from local rca_history.</span>
+  <span style="flex: 1"></span>
+  <a href="/dashboard/v2">&larr; back to triage feed</a>
+  <a href="/dashboard/v2/kpi">KPI overview</a>
+</div>
+
+<div class="kpi-shell">
+  {sidebar_html}
+  <main class="kpi-main">
+    <div class="kpi-header">
+      <div>
+        <div class="kpi-header__title">Services &middot; per-service summary</div>
+        <div class="kpi-header__sub">One row per <code>affected_service</code> seen in the last 7 days &middot; auto-refreshing every 60 s &middot; Casablanca timezone.</div>
+      </div>
+      <div class="kpi-header__time">
+        <span class="live-dot"></span>{_esc(now_tng)} GMT+1
+      </div>
+    </div>
+
+    {chips_html}
+
+    <div class="svc-table-wrap">{table_html}
+    </div>
+
+    <div class="kpi-foot">
+      <strong>How to read this:</strong> click a service name to drop into the triage feed filtered to that service. Breakdown columns rank counts high-to-low. All data is live from <code>rca_history.db</code> &middot; MCP-invariant clean.
+    </div>
+  </main>
+</div>
+
+</body>
+</html>""")
+
+
 @app.get("/dashboard/v2/alert/{short_id}", response_class=HTMLResponse)
 async def dashboard_v2_alert(short_id: str):
     """Phase 2.1 — alert detail page click-through from /dashboard/v2.

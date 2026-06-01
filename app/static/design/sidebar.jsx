@@ -21,14 +21,14 @@ const NAV_GROUPS = [
     label: "Insights",
     items: [
       { id: "stats",     label: "Stats",          icon: "stats" },
-      { id: "services",  label: "Services",       icon: "services" },
+      { id: "services",  label: "Services",       icon: "services", href: "/dashboard/v2/services" },
       { id: "kpi",       label: "KPI · Evaluation", icon: "kpi", href: "/dashboard/v2/kpi" },
     ],
   },
   {
     label: "Configuration",
     items: [
-      { id: "alerts-cfg", label: "Alerts",         icon: "alerts" },
+      { id: "alerts-cfg", label: "Alerts",         icon: "alerts", href: "/dashboard/v2/alerts" },
       { id: "drain3",     label: "Drain3 engine",  icon: "drain3" },
       { id: "integrations", label: "Integrations", icon: "integrations" },
     ],

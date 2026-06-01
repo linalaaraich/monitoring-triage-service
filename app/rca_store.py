@@ -610,6 +610,87 @@ class RCAStore:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def get_service_summary(self, days: int = 7) -> list[dict]:
+        """Per-service rollup over the last `days` for the /dashboard/v2/services page.
+
+        Returns one dict per distinct `affected_service` (non-empty), sorted by
+        total decisions DESC. Each dict carries the counts the services page
+        renders directly — no further aggregation needed at render time.
+
+        Shape per row:
+            {
+              "service": str,                       # affected_service
+              "total": int,                         # all decisions in window
+              "actions":  {action_taken: int, ...}, # emailed / suppressed / shelved / suppressed_duplicate / spike_shelved
+              "verdicts": {llm_verdict: int, ...},  # escalate / dismiss / inconclusive (NULL skipped)
+              "severities": {severity: int, ...},   # critical / warning / etc (NULL skipped)
+              "last_fire": str | None,              # ISO timestamp of most recent decision
+              "top_alertname": str | None,          # dominant alert_name for this service
+            }
+
+        Single pass over the windowed slice — buckets the counts in Python so
+        we don't have to issue 4 separate GROUP BY queries per service. The
+        rca_history table tops out around a few thousand rows in the 7-day
+        window the page covers, so the pass is cheap (≤ low-millisecond).
+        """
+        since = (_utc_now() - timedelta(days=days)).isoformat()
+        cursor = await self._db.execute(
+            """SELECT affected_service, action_taken, llm_verdict, severity,
+                      timestamp, alert_name
+               FROM rca_history
+               WHERE timestamp >= ?
+                 AND affected_service IS NOT NULL
+                 AND affected_service != ''""",
+            (since,),
+        )
+        rows = await cursor.fetchall()
+
+        buckets: dict[str, dict] = {}
+        # Track per-(service, alert_name) frequency so we can pick the dominant
+        # alertname after the single pass.
+        alertname_counts: dict[str, dict[str, int]] = {}
+        for row in rows:
+            svc = row["affected_service"]
+            b = buckets.get(svc)
+            if b is None:
+                b = {
+                    "service": svc,
+                    "total": 0,
+                    "actions": {},
+                    "verdicts": {},
+                    "severities": {},
+                    "last_fire": None,
+                    "top_alertname": None,
+                }
+                buckets[svc] = b
+                alertname_counts[svc] = {}
+
+            b["total"] += 1
+            action = row["action_taken"] or ""
+            if action:
+                b["actions"][action] = b["actions"].get(action, 0) + 1
+            verdict = row["llm_verdict"]
+            if verdict:
+                b["verdicts"][verdict] = b["verdicts"].get(verdict, 0) + 1
+            sev = row["severity"]
+            if sev:
+                b["severities"][sev] = b["severities"].get(sev, 0) + 1
+            ts = row["timestamp"]
+            if ts and (b["last_fire"] is None or ts > b["last_fire"]):
+                b["last_fire"] = ts
+            aname = row["alert_name"] or ""
+            if aname:
+                alertname_counts[svc][aname] = alertname_counts[svc].get(aname, 0) + 1
+
+        # Resolve dominant alertname per service (top 1 by frequency).
+        for svc, counts in alertname_counts.items():
+            if counts:
+                buckets[svc]["top_alertname"] = max(counts.items(), key=lambda kv: kv[1])[0]
+
+        out = list(buckets.values())
+        out.sort(key=lambda d: d["total"], reverse=True)
+        return out
+
     # ------------------------------------------------------------------
     # US-5.3 closed-loop feedback
     # ------------------------------------------------------------------
@@ -843,6 +924,98 @@ class RCAStore:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def get_alert_summary(self, days: int = 7) -> list[dict]:
+        """Per-alertname rollup for the v2 Alerts sidebar page.
+
+        Returns one dict per distinct `alert_name` seen in the last `days`,
+        sorted by total fires DESC. Each row carries:
+
+          - alert_name:        the rule name
+          - fires:             total rca_history rows in the window
+          - emails:            count of rows with action_taken='emailed'
+          - dominant_verdict:  most-frequent non-null llm_verdict (lowercased),
+                               or "(none)" if every row was a cheap-path
+                               short-circuit (suppressed / pre-LLM gated).
+          - dominant_severity: most-frequent severity (lowercased)
+          - last_fire:         max(timestamp) — bare ISO string as stored
+          - email_ratio:       emails / fires (float, 0.0 if no fires)
+          - was_gated:         True if any row in the window had
+                               triage_decision='recurrence_gated_pre_llm' —
+                               proves the rule currently carries a
+                               recurrence_gate annotation in Grafana.
+
+        Annotation values themselves are NOT stored on rca_history rows
+        (annotations exist only at fire-time on the Grafana payload), so
+        the caller must render "(annotation not persisted — check Grafana
+        rule)" when surfacing per-rule gate parameters. `was_gated`
+        truthiness is the closest honest answer the store can give without
+        widening the schema.
+
+        Pure SQL over the existing rca_history table — no new data path,
+        MCP-invariant clean.
+        """
+        since = (_utc_now() - timedelta(days=days)).isoformat()
+        # One scan, grouped by alert_name. SQLite SUM(CASE WHEN ...) gives us
+        # the per-bucket counts without firing 3 queries per alertname.
+        cursor = await self._db.execute(
+            """SELECT alert_name,
+                      COUNT(*) AS fires,
+                      SUM(CASE WHEN action_taken = 'emailed' THEN 1 ELSE 0 END) AS emails,
+                      SUM(CASE WHEN triage_decision = 'recurrence_gated_pre_llm' THEN 1 ELSE 0 END) AS gated,
+                      MAX(timestamp) AS last_fire
+               FROM rca_history
+               WHERE timestamp > ?
+               GROUP BY alert_name
+               ORDER BY fires DESC""",
+            (since,),
+        )
+        groups = await cursor.fetchall()
+
+        out: list[dict] = []
+        for grp in groups:
+            name = grp["alert_name"] or "(unknown)"
+            fires = int(grp["fires"] or 0)
+            emails = int(grp["emails"] or 0)
+            gated = int(grp["gated"] or 0)
+            last_fire = grp["last_fire"] or ""
+
+            # Pull the verdict + severity distributions in two tiny follow-ups
+            # — bounded by the alert_name we already know, so the index covers
+            # the read. Python-side argmax keeps the SQL trivial.
+            v_cursor = await self._db.execute(
+                """SELECT LOWER(COALESCE(llm_verdict, '')) AS v, COUNT(*) AS n
+                   FROM rca_history
+                   WHERE alert_name = ? AND timestamp > ?
+                     AND llm_verdict IS NOT NULL AND llm_verdict != ''
+                   GROUP BY v ORDER BY n DESC LIMIT 1""",
+                (name, since),
+            )
+            v_row = await v_cursor.fetchone()
+            dominant_verdict = (v_row["v"] if v_row else "") or "(none)"
+
+            s_cursor = await self._db.execute(
+                """SELECT LOWER(COALESCE(severity, '')) AS s, COUNT(*) AS n
+                   FROM rca_history
+                   WHERE alert_name = ? AND timestamp > ?
+                     AND severity IS NOT NULL AND severity != ''
+                   GROUP BY s ORDER BY n DESC LIMIT 1""",
+                (name, since),
+            )
+            s_row = await s_cursor.fetchone()
+            dominant_severity = (s_row["s"] if s_row else "") or "(unknown)"
+
+            out.append({
+                "alert_name": name,
+                "fires": fires,
+                "emails": emails,
+                "dominant_verdict": dominant_verdict,
+                "dominant_severity": dominant_severity,
+                "last_fire": last_fire,
+                "email_ratio": (emails / fires) if fires > 0 else 0.0,
+                "was_gated": gated > 0,
+            })
+        return out
 
     # ------------------------------------------------------------------
     # US-5.8 recurrence gate support
