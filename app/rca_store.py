@@ -273,16 +273,53 @@ class RCAStore:
         alert_name: str | None = None,
         offset: int = 0,
         since_days: int | None = None,
+        since_hours: float | None = None,
+        verdict: str | None = None,
+        severity: str | None = None,
+        alert_name_like: str | None = None,
     ) -> list[dict]:
+        """Fetch decisions with optional column filters.
+
+        New (2026-05-27 — Sprint 4 §14 W2 Wed) filter kwargs back the
+        /dashboard/v2 URL-filter persistence work. Each translates to an
+        additional WHERE clause on the same existing query — no new data
+        path, no second connection. The MCP-only invariant lint stays
+        clean (this file is the canonical writer / the rca-history-mcp
+        already reads through here).
+
+        - ``since_hours`` is the finer-grained sibling of ``since_days``.
+          Use it for sub-day windows (1h / 6h). If both are given,
+          ``since_hours`` wins (it's strictly more specific).
+        - ``verdict`` matches ``llm_verdict`` case-insensitively. None
+          means "no filter".
+        - ``severity`` matches ``severity`` case-insensitively.
+        - ``alert_name_like`` is a substring match on ``alert_name``
+          (case-insensitive). Used by the v2 dashboard's "family" filter
+          (e.g. ``Cpu`` matches HighCPUUsage / CpuSpike / KongCPUSpike).
+        """
         clauses: list[str] = []
         params: list = []
         if alert_name:
             clauses.append("alert_name = ?")
             params.append(alert_name)
-        if since_days is not None:
+        # since_hours takes precedence over since_days when both are set.
+        if since_hours is not None:
+            since = (_utc_now() - timedelta(hours=since_hours)).isoformat()
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        elif since_days is not None:
             since = (_utc_now() - timedelta(days=since_days)).isoformat()
             clauses.append("timestamp >= ?")
             params.append(since)
+        if verdict:
+            clauses.append("LOWER(COALESCE(llm_verdict, '')) = LOWER(?)")
+            params.append(verdict)
+        if severity:
+            clauses.append("LOWER(COALESCE(severity, '')) = LOWER(?)")
+            params.append(severity)
+        if alert_name_like:
+            clauses.append("LOWER(COALESCE(alert_name, '')) LIKE LOWER(?)")
+            params.append(f"%{alert_name_like}%")
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.extend([limit, offset])
         cursor = await self._db.execute(
@@ -321,16 +358,38 @@ class RCAStore:
         self,
         alert_name: str | None = None,
         since_days: int | None = None,
+        since_hours: float | None = None,
+        verdict: str | None = None,
+        severity: str | None = None,
+        alert_name_like: str | None = None,
     ) -> int:
+        """Count decisions matching the same filter set as get_decisions().
+
+        Kept in lockstep with get_decisions() so the v2 dashboard's
+        "X alerts in window" footer matches the filtered table.
+        """
         clauses: list[str] = []
         params: list = []
         if alert_name:
             clauses.append("alert_name = ?")
             params.append(alert_name)
-        if since_days is not None:
+        if since_hours is not None:
+            since = (_utc_now() - timedelta(hours=since_hours)).isoformat()
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        elif since_days is not None:
             since = (_utc_now() - timedelta(days=since_days)).isoformat()
             clauses.append("timestamp >= ?")
             params.append(since)
+        if verdict:
+            clauses.append("LOWER(COALESCE(llm_verdict, '')) = LOWER(?)")
+            params.append(verdict)
+        if severity:
+            clauses.append("LOWER(COALESCE(severity, '')) = LOWER(?)")
+            params.append(severity)
+        if alert_name_like:
+            clauses.append("LOWER(COALESCE(alert_name, '')) LIKE LOWER(?)")
+            params.append(f"%{alert_name_like}%")
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         cursor = await self._db.execute(
             f"SELECT COUNT(*) AS n FROM rca_history {where_sql}",

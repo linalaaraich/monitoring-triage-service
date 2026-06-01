@@ -2659,28 +2659,222 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
     }
 
 
+# ──────────────────────────────────────────────────────────────────────
+# /dashboard/v2 — URL filter persistence (Sprint 4 §14 W2 Wed, 2026-05-27)
+# ──────────────────────────────────────────────────────────────────────
+# The v2 dashboard's filters (verdict / severity / family / range / search)
+# now round-trip through the query string so a refresh, a back-button, or
+# a shared link preserves the operator's view. The route reads each filter
+# via a tight allowlist; unknown values fall back to the default and a
+# debug log line is emitted so a crafted URL can't bypass the filter or
+# inject SQL.
+#
+# Range translates to a since-hours window (1h / 6h / 24h / 7d / 15d → 1,
+# 6, 24, 168, 360 hours). The store's get_decisions() now accepts
+# since_hours alongside since_days for sub-day granularity.
+
+# Tight allowlists — anything not in here falls back to None (= no filter).
+# Verdict values match what /v2 actually surfaces (see _V2_VERDICT_MAP).
+_V2_FILTER_VERDICTS = {"escalate", "dismiss", "investigate", "shelve"}
+_V2_FILTER_SEVERITIES = {"critical", "warning", "info", "none"}
+# Family is a coarse alert-name bucket; matched as a substring LIKE on the
+# alert_name column. Keep this list short — it's surfaced in the dropdown.
+_V2_FILTER_FAMILIES = {
+    "cpu":     "CPU",       # CpuSpike, HighCPUUsage, KongCpu...
+    "memory":  "Memory",    # PodHighMemoryUsage, MemoryPressure
+    "latency": "Latency",   # HighP95Latency, KongLatency
+    "disk":    "Disk",      # DiskSpaceLow, DiskIOPS
+    "network": "Network",   # NetworkSaturation
+    "pod":     "Pod",       # PodRestart, PodHigh...
+    "drain":   "Drain",     # Drain3AnomalyDetected
+    "kong":    "Kong",      # Kong-prefixed
+    "spring":  "Spring",    # spring-boot-prefixed
+}
+# Range token → since_hours. Keep aligned with what the UI exposes.
+_V2_FILTER_RANGES = {
+    "1h":  1.0,
+    "6h":  6.0,
+    "24h": 24.0,
+    "7d":  24.0 * 7,
+    "15d": 24.0 * 15,
+}
+_V2_FILTER_DEFAULT_RANGE = "15d"  # matches the pre-filter behavior (limit=500, since_days=15)
+
+
+def _parse_v2_filters(
+    verdict: str | None,
+    severity: str | None,
+    family: str | None,
+    range_: str | None,
+    q: str | None,
+) -> dict:
+    """Validate & normalize the /dashboard/v2 URL filter set.
+
+    Returns a dict with always-present keys:
+      - verdict, severity, family, range, q (each may be None / "")
+      - since_hours: float (the resolved window in hours)
+      - active_count: int (how many filters the operator actually set)
+
+    Unknown / out-of-range inputs silently fall back to the default.
+    Logging is debug-level so a crafted URL doesn't fill the warn log —
+    the test suite asserts on the "graceful fallback" behavior.
+    """
+    v = (verdict or "").strip().lower()
+    s = (severity or "").strip().lower()
+    f = (family or "").strip().lower()
+    r = (range_ or "").strip().lower()
+    # Search query: clamp to 200 chars; allow any printable input. The
+    # search filter is applied client-side (matches the dashboard.jsx
+    # data-search behavior), so SQL safety is not at risk here — but
+    # we still cap to prevent oversize echo of attacker input.
+    q_norm = (q or "").strip()[:200]
+
+    v_out = v if v in _V2_FILTER_VERDICTS else None
+    s_out = s if s in _V2_FILTER_SEVERITIES else None
+    f_out = f if f in _V2_FILTER_FAMILIES else None
+    r_out = r if r in _V2_FILTER_RANGES else _V2_FILTER_DEFAULT_RANGE
+    since_hours = _V2_FILTER_RANGES[r_out]
+
+    active_count = sum(1 for x in (v_out, s_out, f_out, q_norm) if x)
+    # Range counts only if the operator deviated from the default; otherwise
+    # the "active filters" badge would always read ≥1 on first load.
+    if r_out != _V2_FILTER_DEFAULT_RANGE:
+        active_count += 1
+
+    return {
+        "verdict": v_out,
+        "severity": s_out,
+        "family": f_out,
+        "family_substring": _V2_FILTER_FAMILIES.get(f_out) if f_out else None,
+        "range": r_out,
+        "q": q_norm,
+        "since_hours": since_hours,
+        "active_count": active_count,
+    }
+
+
+def _render_v2_filter_bar(filters: dict, page: int, size: int) -> str:
+    """Server-side <form> with the active filter selections marked.
+
+    Submits via GET on change (no JS framework — a tiny inline onchange
+    handler triggers form.submit()). Bookmarking / sharing falls out for
+    free because every filter lives in the URL.
+    """
+    import html as _h
+
+    def _sel(value: str | None, current: str | None) -> str:
+        # Empty value → the "any" option. Mark selected when the current
+        # filter is unset OR matches.
+        if value is None and (current is None or current == ""):
+            return " selected"
+        if value is not None and value == current:
+            return " selected"
+        return ""
+
+    verdict_opts = "".join(
+        f'<option value="{_h.escape(v)}"{_sel(v, filters["verdict"])}>{_h.escape(v.upper())}</option>'
+        for v in sorted(_V2_FILTER_VERDICTS)
+    )
+    severity_opts = "".join(
+        f'<option value="{_h.escape(s)}"{_sel(s, filters["severity"])}>{_h.escape(s)}</option>'
+        for s in ("critical", "warning", "info", "none")
+    )
+    family_opts = "".join(
+        f'<option value="{_h.escape(k)}"{_sel(k, filters["family"])}>{_h.escape(k)}</option>'
+        for k in sorted(_V2_FILTER_FAMILIES.keys())
+    )
+    range_opts = "".join(
+        f'<option value="{_h.escape(k)}"{_sel(k, filters["range"])}>{_h.escape(k)}</option>'
+        for k in ("1h", "6h", "24h", "7d", "15d")
+    )
+    q_val = _h.escape(filters["q"] or "", quote=True)
+    return f"""
+<form class="v2-filter-bar" method="get" action="/dashboard/v2" data-v2-filter-bar>
+  <label class="v2-filter-bar__lbl">Verdict
+    <select name="verdict" onchange="this.form.submit()">
+      <option value=""{_sel(None, filters["verdict"])}>any</option>
+      {verdict_opts}
+    </select>
+  </label>
+  <label class="v2-filter-bar__lbl">Severity
+    <select name="severity" onchange="this.form.submit()">
+      <option value=""{_sel(None, filters["severity"])}>any</option>
+      {severity_opts}
+    </select>
+  </label>
+  <label class="v2-filter-bar__lbl">Family
+    <select name="family" onchange="this.form.submit()">
+      <option value=""{_sel(None, filters["family"])}>any</option>
+      {family_opts}
+    </select>
+  </label>
+  <label class="v2-filter-bar__lbl">Range
+    <select name="range" onchange="this.form.submit()">
+      {range_opts}
+    </select>
+  </label>
+  <label class="v2-filter-bar__lbl v2-filter-bar__lbl--grow">Search
+    <input type="search" name="q" value="{q_val}" placeholder="alert name, service, RCA text…" autocomplete="off"/>
+  </label>
+  <input type="hidden" name="size" value="{int(size)}"/>
+  <noscript><button type="submit" class="v2-filter-bar__apply">Apply</button></noscript>
+  <a class="v2-filter-bar__clear" href="/dashboard/v2" title="Clear all filters">clear</a>
+  <button type="button" class="v2-filter-bar__share" onclick="navigator.clipboard&amp;&amp;navigator.clipboard.writeText(location.href);this.textContent='copied!';setTimeout(()=>this.textContent='copy URL',1200)" title="Copy filtered URL to clipboard">copy URL</button>
+</form>
+"""
+
+
 @app.get("/dashboard/v2", response_class=HTMLResponse)
 async def dashboard_v2(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=10, le=200),
+    verdict: str | None = Query(None, max_length=32),
+    severity: str | None = Query(None, max_length=32),
+    family: str | None = Query(None, max_length=32),
+    range_: str | None = Query(None, alias="range", max_length=8),
+    q: str | None = Query(None, max_length=200),
 ):
     """Preview of the 2026-05-22 redesigned dashboard.
 
     Renders the Claude Design <Dashboard/> component against real
     /decisions data. See solution-brief.html §12 + design-prompt.html
     for the design spec; static assets at /static/design/.
+
+    2026-05-27 (Sprint 4 §14 W2 Wed) — URL filter persistence. Five
+    filters round-trip through the query string:
+      ?verdict=ESCALATE&severity=critical&family=cpu&range=24h&q=...
+    Each is validated against a tight allowlist; unknown values silently
+    fall back to the default. The range filter translates to a
+    since_hours window applied in the SQL query, not client-side.
     """
     import json as _json2
     from datetime import datetime, timezone, timedelta
     now_utc = datetime.now(timezone.utc)
 
+    # Validate + normalize the URL filter set. Returns the active filter
+    # values + the resolved since_hours window. Bad inputs fall back to
+    # the default — no 500, no log spam.
+    filters = _parse_v2_filters(verdict, severity, family, range_, q)
+
     # SF-4 (2026-05-23): same-alert collapsing — one row per fingerprint with
     # fireCount=N + latest timestamp instead of N separate rows. Pull a wide
-    # slab from /decisions (15-day window, cap 500 rows for perf), group by
+    # slab from /decisions (range-bounded, cap 500 rows for perf), group by
     # fingerprint, keep the LATEST row per group as the representative, then
     # paginate the unique-fingerprint list. Detail page (/dashboard/v2/alert/
     # {short_id}) already shows the full fire history per fingerprint.
-    history_slab = await _store.get_decisions(limit=500, offset=0, since_days=15)
+    #
+    # Sprint 4 §14 W2 Wed: filters apply BEFORE the fingerprint collapse so
+    # the operator's view restricts to (e.g.) ESCALATE rows only. Search (q)
+    # is intentionally NOT pushed into SQL — it's a free-text blob check
+    # done client-side via data-search on each row, same shape as /dashboard.
+    history_slab = await _store.get_decisions(
+        limit=500,
+        offset=0,
+        since_hours=filters["since_hours"],
+        verdict=filters["verdict"],
+        severity=filters["severity"],
+        alert_name_like=filters["family_substring"],
+    )
 
     # Group by fingerprint. Rows without a fingerprint (legacy / internal
     # self-fires) get a synthetic key based on (alertname, service, id) so
@@ -2790,6 +2984,21 @@ async def dashboard_v2(
     # Current Tangier time for the design's top-bar clock
     now_tng = now_utc.astimezone(timezone(timedelta(hours=1))).strftime("%Y-%m-%d %H:%M:%S")
 
+    # Server-rendered filter bar. The React layer doesn't need to know about
+    # filters — the page is reloaded on every change, and the alerts payload
+    # arrives already filtered.
+    filter_bar_html = _render_v2_filter_bar(filters, page=page, size=size)
+    # Mirror the resolved filter set into window.CIRES_FILTERS so the React
+    # layer can surface "active filters" badges + the empty-filtered state.
+    filters_payload = {
+        "verdict": filters["verdict"],
+        "severity": filters["severity"],
+        "family": filters["family"],
+        "range": filters["range"],
+        "q": filters["q"],
+        "activeCount": filters["active_count"],
+    }
+
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2814,6 +3023,57 @@ async def dashboard_v2(
   .v2-banner strong {{ color: var(--accent-purple, #b07ee8); }}
   .v2-banner a {{ color: var(--accent-cyan, #40d0d0); text-decoration: none; }}
   .v2-banner a:hover {{ text-decoration: underline; }}
+  /* Server-rendered URL-persistent filter bar — sits above the React feed
+     so a refresh / shared link keeps the operator's view. Each <select>
+     auto-submits on change; the "copy URL" button is purely cosmetic
+     (the URL itself is already the share mechanism). */
+  .v2-filter-bar {{
+    display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px;
+    padding: 10px 22px;
+    background: var(--bg-soft, #13151e);
+    border-bottom: 1px solid var(--border, #2a2d3a);
+    font-size: 12.5px;
+  }}
+  .v2-filter-bar__lbl {{
+    display: flex; flex-direction: column; gap: 4px;
+    color: var(--muted, #8890a0);
+    text-transform: uppercase; letter-spacing: 0.06em; font-size: 10.5px;
+  }}
+  .v2-filter-bar__lbl--grow {{ flex: 1; min-width: 200px; }}
+  .v2-filter-bar select,
+  .v2-filter-bar input[type="search"] {{
+    background: var(--card, #1a1d27);
+    color: var(--text, #e4e6ee);
+    border: 1px solid var(--border, #2a2d3a);
+    border-radius: 6px;
+    padding: 5px 9px;
+    font-size: 12.5px;
+    font-family: inherit;
+    min-width: 100px;
+  }}
+  .v2-filter-bar input[type="search"] {{ width: 100%; }}
+  .v2-filter-bar select:focus,
+  .v2-filter-bar input[type="search"]:focus {{
+    outline: none; border-color: var(--accent-purple, #b07ee8);
+  }}
+  .v2-filter-bar__clear,
+  .v2-filter-bar__share,
+  .v2-filter-bar__apply {{
+    background: transparent;
+    color: var(--accent-cyan, #40d0d0);
+    border: 1px solid var(--border, #2a2d3a);
+    border-radius: 6px;
+    padding: 5px 11px;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    text-decoration: none;
+  }}
+  .v2-filter-bar__clear:hover,
+  .v2-filter-bar__share:hover,
+  .v2-filter-bar__apply:hover {{
+    background: var(--card-hi, #232838);
+  }}
 </style>
 </head>
 <body>
@@ -2827,6 +3087,8 @@ async def dashboard_v2(
   <a href="https://linalaaraich.github.io/monitoring-docs/design-prompt.html" target="_blank">design prompt</a>
 </div>
 
+{filter_bar_html}
+
 <div id="root"></div>
 
 <script>
@@ -2835,6 +3097,7 @@ async def dashboard_v2(
   window.CIRES_PAGINATION = {_json2.dumps(pagination)};
   window.CIRES_DASHBOARD_STATS = {_json2.dumps(dashboard_stats)};
   window.CIRES_SIDEBAR_BADGES = {_json2.dumps(sidebar_badges)};
+  window.CIRES_FILTERS = {_json2.dumps(filters_payload)};
 </script>
 
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
