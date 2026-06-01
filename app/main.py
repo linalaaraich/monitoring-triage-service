@@ -3802,6 +3802,483 @@ async def dashboard_v2_services():
 </html>""")
 
 
+# ──────────────────────────────────────────────────────────────────────
+# /dashboard/v2/alerts — read-only per-alertname rollup
+# ──────────────────────────────────────────────────────────────────────
+# Wires up the previously-dead "Alerts" sidebar item in the Configuration
+# group. Read-only by design — the operator path for tuning is "edit the
+# Ansible template + re-provision," not an in-app Grafana API write.
+# Annotation writes (auto-tuning the recurrence_gate per rule) are
+# EPIC15 / Sprint-5 territory; this page surfaces the read-side picture
+# the operator needs to choose which rule to tune.
+#
+# Highlight policy: rows where emails/fires > 0.50 get the "noisy" tint —
+# these are the alerts that mostly get through to the inbox, i.e. the
+# noise candidates. Reference is commit db79ee7 (raised MediumCpuUsage's
+# llm_dismiss 2→10 after this same ratio surfaced it as the top emailer).
+@app.get("/dashboard/v2/alerts", response_class=HTMLResponse)
+async def dashboard_v2_alerts():
+    """Per-alertname summary for the last 7 days.
+
+    Pulls from RCAStore.get_alert_summary() — pure SQL aggregation over
+    the same rca_history rows the rest of the v2 surface reads from.
+    No Grafana API call, no annotation write, no MCP-new path.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    now_tng = datetime.now(timezone.utc).astimezone(
+        timezone(timedelta(hours=1))
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Empty-store path (lifespan-not-run / fresh DB) — render the
+    # "no alerts seen yet" affordance instead of a bare table.
+    rows: list[dict]
+    if _store is None:
+        rows = []
+    else:
+        try:
+            rows = await _store.get_alert_summary(days=7)
+        except Exception as exc:  # never 500 the sidebar page
+            logger.warning("get_alert_summary failed: %s", exc)
+            rows = []
+
+    def _esc(s) -> str:
+        return _html.escape(str(s))
+
+    # Verdict colour mapping — same palette the triage feed uses so
+    # operators carry the colour grammar from page to page.
+    _VERDICT_ACCENT = {
+        "escalate":     "var(--accent-red)",
+        "dismiss":      "var(--accent-green)",
+        "inconclusive": "var(--accent-yellow)",
+    }
+    _SEVERITY_ACCENT = {
+        "critical":     "var(--accent-red)",
+        "page":         "var(--accent-red)",
+        "warning":      "var(--accent-yellow)",
+        "info":         "var(--accent-cyan)",
+    }
+
+    # Build the table rows. Noisy rows (ratio > 0.5) get the row--noisy
+    # class so the highlight class actually applies — tested below.
+    body_parts = []
+    for r in rows:
+        name = _esc(r.get("alert_name", "(unknown)"))
+        fires = int(r.get("fires", 0))
+        emails = int(r.get("emails", 0))
+        ratio = float(r.get("email_ratio", 0.0))
+        verdict = _esc(r.get("dominant_verdict", "(none)"))
+        severity = _esc(r.get("dominant_severity", "(unknown)"))
+        was_gated = bool(r.get("was_gated", False))
+        last_fire_local = _esc(_to_local_time(r.get("last_fire") or ""))
+
+        is_noisy = ratio > 0.5 and fires > 0
+        row_class = "alerts-row alerts-row--noisy" if is_noisy else "alerts-row"
+
+        v_color = _VERDICT_ACCENT.get(r.get("dominant_verdict", ""), "var(--muted)")
+        s_color = _SEVERITY_ACCENT.get(r.get("dominant_severity", ""), "var(--muted)")
+
+        # Gate column: be honest about what we don't store. If the alert
+        # was gated at least once we KNOW the rule carries a
+        # recurrence_gate annotation in Grafana; but the parsed values
+        # (pre_llm=N, llm_dismiss=M, window=2h) are not on the rca_history
+        # row, so we render the "check Grafana rule" pointer rather than
+        # fabricate the numbers.
+        if was_gated:
+            gate_cell = (
+                '<span class="alerts-pill alerts-pill--gated" '
+                'title="At least one fire of this rule was absorbed by the pre-LLM recurrence gate. '
+                'Per-rule thresholds live on the Grafana rule and are not persisted on triage rows — '
+                'see annotation in monitoring-project/roles/grafana/templates/alertrules.yml.j2.">'
+                'gated &middot; (annotation not persisted — check Grafana rule)'
+                '</span>'
+            )
+        else:
+            gate_cell = (
+                '<span class="alerts-pill alerts-pill--ungated" '
+                'title="No fire of this rule was absorbed by the pre-LLM recurrence gate in the window. '
+                'The rule may not carry a recurrence_gate annotation, or the gate has not tripped yet.">'
+                'no gate seen'
+                '</span>'
+            )
+
+        ratio_pct = f"{ratio * 100:.0f}%" if fires > 0 else "—"
+
+        body_parts.append(f"""
+      <tr class="{row_class}">
+        <td class="alerts-cell alerts-cell--name">{name}</td>
+        <td class="alerts-cell alerts-cell--num">{fires}</td>
+        <td class="alerts-cell alerts-cell--num">{emails}</td>
+        <td class="alerts-cell alerts-cell--num alerts-cell--ratio">{ratio_pct}</td>
+        <td class="alerts-cell">
+          <span class="alerts-pill" style="color:{v_color};border-color:color-mix(in oklab, {v_color} 35%, transparent);">{verdict}</span>
+        </td>
+        <td class="alerts-cell">
+          <span class="alerts-pill" style="color:{s_color};border-color:color-mix(in oklab, {s_color} 35%, transparent);">{severity}</span>
+        </td>
+        <td class="alerts-cell alerts-cell--mono">{last_fire_local or "—"}</td>
+        <td class="alerts-cell">{gate_cell}</td>
+      </tr>""")
+
+    if rows:
+        table_body_html = "".join(body_parts)
+        empty_html = ""
+    else:
+        # "no alerts seen yet" affordance — exercised by the empty-DB test.
+        table_body_html = ""
+        empty_html = """
+      <div class="alerts-empty">
+        <div class="alerts-empty__title">no alerts seen yet</div>
+        <div class="alerts-empty__sub">
+          The triage service has not processed any alerts in the last 7 days.
+          New fires from Grafana will appear here as soon as they're persisted to
+          <code>rca_history</code>.
+        </div>
+      </div>"""
+
+    # Sidebar — server-rendered twin of the React sidebar. The Alerts item
+    # is the active one on this page.
+    sidebar_html = """
+  <aside class="kpi-sidebar">
+    <div class="kpi-sidebar__brand">
+      <div class="kpi-sidebar__brand-mark"></div>
+      <div>
+        <div class="kpi-sidebar__brand-title">Observability</div>
+        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
+      </div>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Incident response</div>
+      <a class="kpi-sidebar__item" href="/dashboard/v2">Triage feed</a>
+      <a class="kpi-sidebar__item" href="/dashboard/v2">Incidents</a>
+      <a class="kpi-sidebar__item" href="/dashboard/v2">Anomalies</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Insights</div>
+      <a class="kpi-sidebar__item" href="/dashboard/v2">Stats</a>
+      <a class="kpi-sidebar__item" href="/dashboard/v2/services">Services</a>
+      <a class="kpi-sidebar__item" href="/dashboard/v2/kpi">KPI &middot; Evaluation</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Configuration</div>
+      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/v2/alerts">Alerts</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Integrations</a>
+    </div>
+  </aside>"""
+
+    # Counts for the header — gives the operator a quick read on how many
+    # distinct rules we're surfacing without making them count rows.
+    n_alerts = len(rows)
+    n_noisy = sum(1 for r in rows if r.get("email_ratio", 0.0) > 0.5 and r.get("fires", 0) > 0)
+    n_gated = sum(1 for r in rows if r.get("was_gated"))
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta http-equiv="refresh" content="60"/>
+<title>Observability &middot; Alerts &middot; per-rule summary</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/design/tokens.css"/>
+<style>
+  body {{
+    margin: 0;
+    background: var(--bg, #0f1117);
+    font-family: 'Inter', system-ui, sans-serif;
+    color: var(--text, #e4e6ee);
+    min-height: 100vh;
+  }}
+  .kpi-shell {{ display: flex; min-height: 100vh; }}
+
+  /* Sidebar — twin of app/static/design/sidebar.jsx */
+  .kpi-sidebar {{
+    width: 224px; flex-shrink: 0;
+    background: var(--bg-soft, #13151e);
+    border-right: 1px solid var(--border, #2a2d3a);
+    padding: 0 0 14px;
+    display: flex; flex-direction: column;
+  }}
+  .kpi-sidebar__brand {{
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 14px 14px 16px;
+    border-bottom: 1px solid var(--border);
+    height: 60px;
+  }}
+  .kpi-sidebar__brand-mark {{
+    width: 28px; height: 28px; border-radius: 8px;
+    background: linear-gradient(135deg, #4ea8de, #b07ee8);
+    flex-shrink: 0;
+  }}
+  .kpi-sidebar__brand-title {{ font-size: 13.5px; font-weight: 600; color: var(--text); }}
+  .kpi-sidebar__brand-sub {{ font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }}
+  .kpi-sidebar__group {{ padding: 12px; margin-bottom: 6px; }}
+  .kpi-sidebar__group-label {{
+    font-size: 10px; color: var(--muted-2);
+    text-transform: uppercase; letter-spacing: 0.12em;
+    padding: 0 12px 6px; font-weight: 600;
+  }}
+  .kpi-sidebar__item {{
+    display: block; padding: 8px 12px;
+    border-radius: 8px; text-decoration: none;
+    color: var(--text-soft);
+    font-size: 13px;
+    transition: background .12s;
+  }}
+  .kpi-sidebar__item:hover {{ background: var(--card-hi); color: var(--text); }}
+  .kpi-sidebar__item--active {{
+    background: var(--card-hi); color: var(--text);
+    border: 1px solid var(--border-hi);
+    font-weight: 500;
+    box-shadow: inset 2.5px 0 0 var(--accent-blue);
+  }}
+
+  /* Banner */
+  .kpi-banner {{
+    background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
+    border-bottom: 1px solid rgba(176,126,232,.35);
+    padding: 8px 22px;
+    font-size: 12.5px;
+    color: var(--text-soft);
+    display: flex; align-items: center; gap: 14px;
+  }}
+  .kpi-banner strong {{ color: var(--accent-purple); }}
+  .kpi-banner a {{ color: var(--accent-cyan); text-decoration: none; }}
+  .kpi-banner a:hover {{ text-decoration: underline; }}
+
+  /* Main column */
+  .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
+  .kpi-header {{
+    padding: 18px 22px 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; justify-content: space-between;
+  }}
+  .kpi-header__title {{ font-size: 18px; font-weight: 600; color: var(--text); }}
+  .kpi-header__sub {{ font-size: 12.5px; color: var(--muted); margin-top: 4px; }}
+  .kpi-header__time {{
+    font-family: var(--font-mono); font-size: 11.5px;
+    color: var(--muted); letter-spacing: 0.02em;
+  }}
+
+  /* Explainer block — tells operators how to tune a noisy alert without
+     making them hunt through Ansible. The page itself never writes to
+     Grafana; this is the procedural pointer. */
+  .alerts-explainer {{
+    margin: 16px 22px 0;
+    padding: 14px 16px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent-cyan);
+    border-radius: 10px;
+    font-size: 12.5px;
+    color: var(--text-soft);
+    line-height: 1.55;
+  }}
+  .alerts-explainer h2 {{
+    margin: 0 0 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }}
+  .alerts-explainer code {{
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    background: var(--bg);
+    color: var(--accent-cyan);
+    padding: 1px 6px; border-radius: 4px;
+    border: 1px solid var(--border);
+  }}
+  .alerts-explainer .alerts-explainer__ref {{
+    margin-top: 6px;
+    font-size: 11.5px;
+    color: var(--muted);
+  }}
+
+  /* Counts strip */
+  .alerts-counts {{
+    display: flex; gap: 18px;
+    padding: 12px 22px 4px;
+    font-size: 12px; color: var(--muted);
+  }}
+  .alerts-counts strong {{
+    color: var(--text); font-family: var(--font-mono);
+    font-weight: 600;
+  }}
+
+  /* Table */
+  .alerts-table-wrap {{
+    padding: 12px 22px 22px;
+    overflow-x: auto;
+  }}
+  table.alerts-table {{
+    width: 100%; border-collapse: separate; border-spacing: 0;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    font-size: 12.5px;
+  }}
+  .alerts-table thead th {{
+    text-align: left;
+    padding: 10px 12px;
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--border);
+    font-weight: 600; color: var(--muted);
+    text-transform: uppercase; font-size: 10.5px;
+    letter-spacing: 0.08em;
+  }}
+  .alerts-cell {{
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-soft);
+    vertical-align: middle;
+  }}
+  .alerts-cell--name {{ color: var(--text); font-weight: 500; }}
+  .alerts-cell--num  {{ font-family: var(--font-mono); text-align: right; font-feature-settings: "tnum"; }}
+  .alerts-cell--mono {{ font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }}
+  .alerts-cell--ratio {{ color: var(--muted); }}
+  .alerts-row:hover {{ background: var(--card-hi); }}
+
+  /* Noisy-row highlight — rows where emails/fires > 0.50. Tinted bg +
+     a brighter ratio cell so the eye lands on the noise candidates. */
+  .alerts-row--noisy {{
+    background: color-mix(in oklab, var(--accent-red) 8%, transparent);
+  }}
+  .alerts-row--noisy .alerts-cell--ratio {{
+    color: var(--accent-red); font-weight: 600;
+  }}
+  .alerts-row--noisy .alerts-cell--name::after {{
+    content: " · noisy";
+    font-size: 10px; font-weight: 500;
+    color: var(--accent-red);
+    margin-left: 6px;
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }}
+
+  .alerts-pill {{
+    display: inline-block;
+    padding: 1.5px 7px; border-radius: 999px;
+    border: 1px solid var(--border);
+    font-size: 11px; font-weight: 500;
+    font-family: var(--font-mono);
+    background: transparent;
+  }}
+  .alerts-pill--gated {{
+    color: var(--accent-purple);
+    border-color: color-mix(in oklab, var(--accent-purple) 35%, transparent);
+  }}
+  .alerts-pill--ungated {{ color: var(--muted-2); }}
+
+  .alerts-empty {{
+    margin: 18px 22px 22px;
+    padding: 28px 22px;
+    background: var(--card);
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    text-align: center;
+  }}
+  .alerts-empty__title {{
+    font-size: 14px; color: var(--text); font-weight: 600;
+    margin-bottom: 4px;
+  }}
+  .alerts-empty__sub {{ font-size: 12px; color: var(--muted); }}
+  .alerts-empty__sub code {{
+    font-family: var(--font-mono); font-size: 11.5px;
+    background: var(--bg); padding: 1px 5px; border-radius: 4px;
+    border: 1px solid var(--border); color: var(--text-soft);
+  }}
+
+  .alerts-foot {{
+    padding: 12px 22px 22px;
+    font-size: 11.5px;
+    color: var(--muted-2);
+    border-top: 1px solid var(--border);
+  }}
+  .alerts-foot strong {{ color: var(--muted); }}
+  .alerts-foot code {{
+    font-family: var(--font-mono);
+    background: var(--bg); padding: 1px 5px; border-radius: 4px;
+    border: 1px solid var(--border); color: var(--text-soft);
+  }}
+</style>
+</head>
+<body>
+
+<div class="kpi-banner">
+  <strong>Alerts &middot; per-rule summary</strong>
+  <span>Read-only roll-up of the last 7 days from <code>rca_history</code>.</span>
+  <span style="flex: 1"></span>
+  <a href="/dashboard/v2">&larr; back to triage feed</a>
+  <a href="/dashboard/v2/kpi">KPI &middot; Evaluation</a>
+</div>
+
+<div class="kpi-shell">
+  {sidebar_html}
+  <main class="kpi-main">
+    <div class="kpi-header">
+      <div>
+        <div class="kpi-header__title">Alerts &middot; per-rule view (7d)</div>
+        <div class="kpi-header__sub">One row per <code>alert_name</code> &middot; sorted by total fires &middot; auto-refresh 60 s &middot; Casablanca timezone.</div>
+      </div>
+      <div class="kpi-header__time">{_esc(now_tng)} GMT+1</div>
+    </div>
+
+    <div class="alerts-explainer">
+      <h2>Tuning a noisy alert (recurrence gate)</h2>
+      To tune the recurrence gate for a noisy alert, edit <code>monitoring-project/roles/grafana/templates/alertrules.yml.j2</code>
+      and add or adjust <code>recurrence_gate: "pre_llm=N,llm_dismiss=M,window=2h"</code> on the rule.
+      Re-provision via ansible (<code>monitoring.yml --tags monitoring</code>). The gate parameters live on the
+      Grafana rule itself; they are not persisted on triage rows, so the table below shows only whether
+      the gate has tripped, not its current thresholds.
+      <div class="alerts-explainer__ref">
+        Reference: commit <code>db79ee7</code> raised <code>MediumCpuUsage</code>'s <code>llm_dismiss</code>
+        from 2 to 10 after this same emails-to-fires ratio surfaced it as the top emailer. Annotation writes
+        from the app are EPIC15 / Sprint-5 work &mdash; this page is read-only by design.
+      </div>
+    </div>
+
+    <div class="alerts-counts">
+      <span><strong>{n_alerts}</strong> distinct alert rules seen</span>
+      <span><strong>{n_noisy}</strong> with emails/fires &gt; 50% (noise candidates)</span>
+      <span><strong>{n_gated}</strong> with a recurrence-gate trip in the window</span>
+    </div>
+
+    {empty_html}
+
+    <div class="alerts-table-wrap">
+      <table class="alerts-table">
+        <thead>
+          <tr>
+            <th>Alert name</th>
+            <th style="text-align:right">Fires</th>
+            <th style="text-align:right">Emails</th>
+            <th style="text-align:right">Email ratio</th>
+            <th>Dominant verdict</th>
+            <th>Dominant severity</th>
+            <th>Last fire</th>
+            <th>Recurrence gate</th>
+          </tr>
+        </thead>
+        <tbody>{table_body_html}</tbody>
+      </table>
+    </div>
+
+    <div class="alerts-foot">
+      <strong>READ-ONLY surface.</strong> No Grafana API call, no annotation write &mdash; the gate-tuning
+      path is "edit the Ansible template + re-provision," per the explainer above. Auto-tuning the gate
+      from the triage service is EPIC15 / Sprint-5. MCP-invariant clean &middot; pulls from the local
+      <code>rca_history.db</code> via the canonical RCAStore reader.
+    </div>
+  </main>
+</div>
+
+</body>
+</html>""")
+
+
 @app.get("/dashboard/v2/alert/{short_id}", response_class=HTMLResponse)
 async def dashboard_v2_alert(short_id: str):
     """Phase 2.1 — alert detail page click-through from /dashboard/v2.
