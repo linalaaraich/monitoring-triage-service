@@ -68,6 +68,27 @@ class Settings(BaseSettings):
     da3_verdict_coherence_enabled: bool = True
     da3_verdict_coherence_window_minutes: int = 30
 
+    # SF-5 — sustained-vs-spike verdict modifier. When a fingerprint (or
+    # family-scope: cpu/memory/disk/loki-disk/latency-p95 on the same
+    # host/service) refires within sf5_transient_spike_window_seconds of a
+    # prior decision, classify as transient_spike + shelve without the LLM
+    # call. Direct response to the "too many useless emails" feedback
+    # (2026-05-31): a 90 s CPU blip that resolves on its own shouldn't page
+    # the operator; a sustained 10-min stress still escalates normally.
+    # Composes with DA-5 family dedup + reuses DA-3's prior-decision lookup
+    # so the MCP-only invariant holds. False-negative bias is intentional —
+    # a real sustained breach that accidentally gets shelved just re-fires
+    # in 5 min, but a false-positive shelving would hide a real incident.
+    sf5_transient_spike_enabled: bool = True
+    sf5_transient_spike_window_seconds: int = 120
+    # Families that opt into transient-spike classification. Restricted to
+    # archetypes where "duration above threshold" is a meaningful signal
+    # (CPU/memory/disk utilisation, p95 latency). Binary alerts like
+    # TargetDown / DeadMansSwitch are intentionally excluded.
+    sf5_transient_spike_families: list[str] = [
+        "cpu", "memory", "disk", "loki-disk", "latency-p95",
+    ]
+
     # If the first LLM pass produces a data-starved RCA (hedges like "insufficient
     # data" without naming a cause), retry once with an explicit anti-hedge prompt.
     # Adds up to ~25 s to the pipeline on cold inferences; disable if latency

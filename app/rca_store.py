@@ -464,6 +464,66 @@ class RCAStore:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def get_recent_decision_for_family_scope(
+        self,
+        alertnames: list[str] | tuple[str, ...],
+        affected_service: str | None,
+        alert_instance: str | None,
+        window_seconds: int,
+    ) -> dict | None:
+        """SF-5 — most-recent decision for any alert in `alertnames` on the
+        same scope within `window_seconds`.
+
+        Used by the sustained-vs-spike modifier so a tier-bump within the
+        SF-5 window (e.g. MediumCpuUsage at T+0 → HighCpuUsage at T+90s on
+        host-1) is correctly identified as the same flapping condition,
+        not a fresh alert. `get_recent_decision_for_fingerprint` can't do
+        this because tier siblings have different Grafana fingerprints.
+
+        Scope match prefers `alert_instance` (the most precise scope —
+        a single host:port) but falls back to `affected_service` when the
+        instance is unknown or labels were sparse. The same fallback
+        order the dedup's `family_dedup_key` uses, so the two stay
+        consistent across the platform.
+
+        Synthetic fires (audit-live / chaos) are excluded for the same
+        reason as the DA-3 lookup — their decisions must not seed an
+        SF-5 shelving for real fires.
+        """
+        if not alertnames:
+            return None
+        # Pick the scope column with the same precedence as family_dedup_key.
+        scope_col = None
+        scope_val = None
+        if alert_instance and alert_instance != "unknown":
+            scope_col = "alert_instance"
+            scope_val = alert_instance
+        elif affected_service:
+            scope_col = "affected_service"
+            scope_val = affected_service
+        if scope_val is None:
+            return None
+
+        since = (_utc_now() - timedelta(seconds=window_seconds)).isoformat()
+        placeholders = ",".join("?" * len(alertnames))
+        params: list = [*alertnames, scope_val, since]
+        cursor = await self._db.execute(
+            f"""SELECT id, timestamp, alert_name, affected_service,
+                       alert_instance, alert_fingerprint, triage_decision,
+                       llm_verdict, rca_report, llm_reasoning, rca_quality
+                FROM rca_history
+                WHERE alert_name IN ({placeholders})
+                  AND {scope_col} = ?
+                  AND timestamp > ?
+                  AND (alert_fingerprint IS NULL
+                       OR (alert_fingerprint NOT LIKE 'audit-live-%'
+                           AND alert_fingerprint NOT LIKE 'chaos-%'))
+                ORDER BY timestamp DESC LIMIT 1""",
+            tuple(params),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
     async def get_alert_frequency(self, alert_name: str, days: int = 7) -> dict:
         since = (_utc_now() - timedelta(days=days)).isoformat()
         cursor = await self._db.execute(

@@ -329,6 +329,9 @@ async def test_pipeline_injects_prior_within_window(store, monkeypatch):
     # Disable Layer-2 suppression so the second fire reaches the LLM path
     # (otherwise the prior escalate is fine, but a prior dismiss would suppress).
     monkeypatch.setattr(settings, "triage_suppression_enabled", False)
+    # SF-5 also fetches prior decisions on latency-p95 alerts; disable here
+    # so these DA-3 tests isolate the DA-3 coherence-anchor behaviour.
+    monkeypatch.setattr(settings, "sf5_transient_spike_enabled", False)
 
     fp = "fp-pipeline-within"
     await _save_prior(store, fp, minutes_ago=10, rca="JVM heap exhausted — full GC every 4s.")
@@ -349,6 +352,9 @@ async def test_pipeline_no_injection_outside_window(store, monkeypatch):
     monkeypatch.setattr(settings, "da3_verdict_coherence_enabled", True)
     monkeypatch.setattr(settings, "da3_verdict_coherence_window_minutes", 30)
     monkeypatch.setattr(settings, "triage_suppression_enabled", False)
+    # SF-5 also fetches prior decisions on latency-p95 alerts; disable here
+    # so these DA-3 tests isolate the DA-3 coherence-anchor behaviour.
+    monkeypatch.setattr(settings, "sf5_transient_spike_enabled", False)
 
     fp = "fp-pipeline-outside"
     await _save_prior(store, fp, minutes_ago=90)
@@ -366,6 +372,9 @@ async def test_pipeline_no_injection_when_no_prior(store, monkeypatch):
     """No prior decision → normal flow, no injection."""
     monkeypatch.setattr(settings, "da3_verdict_coherence_enabled", True)
     monkeypatch.setattr(settings, "triage_suppression_enabled", False)
+    # SF-5 also fetches prior decisions on latency-p95 alerts; disable here
+    # so these DA-3 tests isolate the DA-3 coherence-anchor behaviour.
+    monkeypatch.setattr(settings, "sf5_transient_spike_enabled", False)
 
     pipeline, llm = _make_pipeline(store)
     alert = _make_alert(fingerprint="fp-pipeline-fresh")
@@ -382,6 +391,9 @@ async def test_pipeline_respects_disable_flag(store, monkeypatch):
     monkeypatch.setattr(settings, "da3_verdict_coherence_enabled", False)
     monkeypatch.setattr(settings, "da3_verdict_coherence_window_minutes", 30)
     monkeypatch.setattr(settings, "triage_suppression_enabled", False)
+    # SF-5 also fetches prior decisions on latency-p95 alerts; disable here
+    # so these DA-3 tests isolate the DA-3 coherence-anchor behaviour.
+    monkeypatch.setattr(settings, "sf5_transient_spike_enabled", False)
 
     fp = "fp-pipeline-disabled"
     await _save_prior(store, fp, minutes_ago=5)
@@ -400,6 +412,9 @@ async def test_pipeline_window_knob_respected(store, monkeypatch):
     10-min window — confirming the config knob is honored, not hard-coded."""
     monkeypatch.setattr(settings, "da3_verdict_coherence_enabled", True)
     monkeypatch.setattr(settings, "triage_suppression_enabled", False)
+    # SF-5 also fetches prior decisions on latency-p95 alerts; disable here
+    # so these DA-3 tests isolate the DA-3 coherence-anchor behaviour.
+    monkeypatch.setattr(settings, "sf5_transient_spike_enabled", False)
 
     # Distinct fingerprints per sub-run so the row each run PERSISTS (a fresh
     # "now"-stamped decision) doesn't itself become the prior the next lookup

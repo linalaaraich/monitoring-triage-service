@@ -118,6 +118,19 @@ triage_validator_retries_total = Counter(
     ["reason"],
 )
 
+transient_spikes_shelved_total = Counter(
+    # SF-5 — sustained-vs-spike verdict modifier. Increments once per
+    # alert shelved as a transient spike (refired within the configured
+    # sustained-threshold window of a prior fire on the same fingerprint
+    # or family-scope). Labelled by family (cpu / memory / disk /
+    # loki-disk / latency-p95) so the Grafana panel can show which alert
+    # archetype is producing the most noise — direct feedback signal for
+    # tuning alert rule thresholds.
+    "transient_spikes_shelved_total",
+    "SF-5 transient-spike shelvings (refires under sustained-threshold window)",
+    ["family"],
+)
+
 unsafe_actions_stripped_total = Counter(
     # DA-2 — clamp-independent unsafe-action strip. Increments once per
     # alert whose suggested_actions contained a state-changing verb

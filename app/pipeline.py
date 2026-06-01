@@ -303,6 +303,108 @@ class TriagePipeline:
     async def _investigate_and_act(
         self, alert: GrafanaAlert, source: str, pipeline_start: float
     ):
+        # Step 2.5 (SF-5): sustained-vs-spike modifier. If this fingerprint
+        # (or family-scope sibling — MediumCpu→HighCpu on the same host)
+        # already fired within sf5_transient_spike_window_seconds, classify
+        # the current fire as a transient spike, shelve it, and skip both
+        # the context gather AND the LLM call. A real sustained breach
+        # would have stayed above threshold continuously — anything that
+        # resolved + re-fired inside 2 min is operationally noise.
+        #
+        # Runs AFTER the dedup / Layer-2 suppression / recurrence-gate
+        # checks above (those caught textual duplicates / known dismisses /
+        # opted-in flappers), and BEFORE context-gather so the cheap path
+        # really IS cheap. Composes with DA-5 via the family-scope lookup
+        # and reuses DA-3's prior-decision-lookup pattern (canonical
+        # rca_store reads — MCP-only invariant holds).
+        if settings.sf5_transient_spike_enabled:
+            from app.transient_spike import classify_family, is_transient_spike
+            from app.metrics import transient_spikes_shelved_total
+            family = classify_family(alert)
+            if family is not None and family in settings.sf5_transient_spike_families:
+                # Two-step lookup so DA-5 family-tier bumps are caught: try
+                # the family-scope query first (covers MediumCpu→HighCpu on
+                # the same host even though the Grafana fingerprints
+                # differ); fall back to the exact-fingerprint lookup for
+                # alerts outside ALERT_FAMILIES (e.g. HighP95Latency, which
+                # has no tier siblings in the dedup map).
+                prior_spike = None
+                try:
+                    # SF-5 family member list — fetch from the SF-5 map
+                    # rather than ALERT_FAMILIES because latency-p95 isn't
+                    # in the dedup family map.
+                    from app.transient_spike import _SF5_ALERT_FAMILY_MAP
+                    family_members = [
+                        name for name, fam in _SF5_ALERT_FAMILY_MAP.items()
+                        if fam == family
+                    ]
+                    prior_spike = await self.store.get_recent_decision_for_family_scope(
+                        alertnames=family_members,
+                        affected_service=alert.service,
+                        alert_instance=alert.instance,
+                        window_seconds=settings.sf5_transient_spike_window_seconds,
+                    )
+                    if prior_spike is None and alert.fingerprint:
+                        prior_spike = await self.store.get_recent_decision_for_fingerprint(
+                            fingerprint=alert.fingerprint,
+                            # Convert window seconds → minutes for the DA-3
+                            # signature (ceil so a 90 s window still passes
+                            # one prior minute of history).
+                            window_minutes=max(
+                                1,
+                                (settings.sf5_transient_spike_window_seconds + 59) // 60,
+                            ),
+                        )
+                except Exception as exc:
+                    # Lookup failure must NOT shelve the alert — fall
+                    # through to the normal investigate path. Logged but
+                    # non-fatal: SF-5 is a noise-reducer, not a safety gate.
+                    logger.warning(
+                        "SF-5 prior-fire lookup failed (non-fatal — continuing to LLM): %s",
+                        exc,
+                    )
+
+                verdict = is_transient_spike(
+                    alert,
+                    prior_decision=prior_spike,
+                    window_seconds=settings.sf5_transient_spike_window_seconds,
+                    enabled_families=settings.sf5_transient_spike_families,
+                )
+                if verdict.is_transient:
+                    elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
+                    transient_spikes_shelved_total.labels(family=verdict.family or "unknown").inc()
+                    alerts_processed.labels(decision="shelved").inc()
+                    logger.info(
+                        "SF-5 SHELVED %s as transient_spike (family=%s, %dms) — no LLM, no email",
+                        alert.alertname, verdict.family, elapsed_ms,
+                    )
+                    record = RCARecord(
+                        alert_source=source,
+                        alert_name=alert.alertname,
+                        alert_fingerprint=alert.fingerprint,
+                        affected_service=alert.service,
+                        severity=alert.severity,
+                        triage_decision="spike_shelved",
+                        llm_verdict=None,
+                        rca_report=verdict.reason,
+                        llm_reasoning=None,
+                        action_taken="shelved",
+                        investigation_duration_ms=elapsed_ms,
+                        rca_quality="transient_spike",
+                        alert_instance=alert.instance,
+                        alert_component=alert.labels.get("component"),
+                        alert_signal=alert.labels.get("signal"),
+                    )
+                    await self.store.save_decision(record)
+                    # Link the dedup window to this shelved row so
+                    # subsequent fires within the dedup window persist
+                    # short-path records pointing at this RCA, same as
+                    # the normal investigate path does at Step 9.
+                    sf5_dedup_key = family_dedup_key(alert)
+                    if sf5_dedup_key:
+                        await self.dedup.record_first_decision(sf5_dedup_key, record.id)
+                    return
+
         # Step 3: Gather context from all three pillars
         ctx = await self.context.gather(alert)
 
