@@ -73,7 +73,7 @@ def _build_dashboard_search_blob(r: dict, local_ts: str) -> str:
     ]).lower()
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from app.config import settings
 from app.context import ContextGatherer
@@ -1623,8 +1623,18 @@ def _render_detail_panel(r: dict) -> str:
     )
 
 
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(
+@app.get("/dashboard")
+async def dashboard_root_redirect():
+    """Production cutover 2026-06-01 — v2 is now the production surface.
+    The legacy v1 view stays reachable at /dashboard/v1 for anyone with
+    deep bookmarks; this root path 302s to v2. Query strings (if any)
+    are not preserved — v2's filter shape is different from v1's
+    pagination shape, so there's no meaningful translation."""
+    return RedirectResponse(url="/dashboard/v2", status_code=302)
+
+
+@app.get("/dashboard/v1", response_class=HTMLResponse)
+async def dashboard_v1(
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=10, le=200),
     since_days: int = Query(15, ge=1, le=365),
@@ -3004,7 +3014,8 @@ async def dashboard_v2(
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Observability · AI RCA — v2 Dashboard Preview</title>
+<meta http-equiv="refresh" content="60"/>
+<title>Observability · AI RCA — Dashboard</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -3579,11 +3590,16 @@ async def dashboard_v2_alert(short_id: str):
 <body>
 
 <div class="v2-banner">
-  <strong>v2 preview · detail page</strong>
-  <span>Alert <code style="color:var(--accent-yellow)">{short_id}</code></span>
+  <strong>detail page</strong>
+  <span title="Click to copy full UUID"
+        onclick="navigator.clipboard.writeText('{target.get('id') or ''}').then(()=>{{const e=this.querySelector('em');if(e){{e.textContent='✓ copied';setTimeout(()=>e.textContent='📋 copy full',1800)}}}});"
+        style="cursor:pointer; padding:2px 8px; border:1px solid rgba(176,126,232,.3); border-radius:4px; user-select:none;">
+    Alert <code style="color:var(--accent-yellow)">{short_id}</code>
+    <em style="font-size:11px; opacity:.65; margin-left:6px; font-style:normal;">📋 copy full</em>
+  </span>
   <span style="flex: 1"></span>
   <a href="/dashboard/v2">← back to feed</a>
-  <a href="/dashboard">↩ existing /dashboard</a>
+  <a href="/dashboard/v1">↩ legacy v1</a>
 </div>
 
 <div id="root"></div>
