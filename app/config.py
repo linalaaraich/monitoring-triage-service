@@ -239,7 +239,6 @@ class Settings(BaseSettings):
         "3000": "grafana",
         "3100": "loki",
         "9090": "prometheus",
-        "9093": "alertmanager",
         "16686": "jaeger-ui",
         "8888": "otel-collector",
         "4317": "otel-otlp-grpc",

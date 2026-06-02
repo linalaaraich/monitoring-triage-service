@@ -321,7 +321,7 @@ exemplars:
     # Grafana alertrule — the drain3 background thread self-fires by POSTing
     # directly to `/webhook/drain3` (see `config.drain3_self_webhook_url` and
     # the drain3 worker loop in `app/drain3_runner.py`). The alert bypasses
-    # Grafana's alertmanager entirely (no alert history, no silences), so
+    # Grafana's alert routing entirely (no alert history, no silences), so
     # audit Grafana-rule cross-references should SKIP this exemplar — its
     # lack of a matching `alertrules.yml.j2` entry is by design, not drift.
     archetype: "Drain3 self-fired on a brand-new error template post-deploy"
