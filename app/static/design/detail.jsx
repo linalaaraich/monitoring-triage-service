@@ -47,10 +47,15 @@ function DetailHeader({ a }) {
           <span>Fingerprint <span className="mono" style={{ color: "var(--text-soft)" }}>{a.fingerprint}</span></span>
         </div>
       </div>
+      {/* 2026-06-02 — wire real hrefs from the server-injected URLs.
+          window.CIRES_LINKS is populated by the /dashboard/alert/{id}
+          route handler with grafana_url / loki_url / jaeger_url out of
+          app.config.settings. Falls back to "#" if not injected so the
+          design canvas still renders standalone. */}
       <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
-        <a className="btn">Grafana <Icon.ext/></a>
-        <a className="btn">Loki <Icon.ext/></a>
-        <a className="btn">Jaeger <Icon.ext/></a>
+        <a className="btn" href={(window.CIRES_LINKS && window.CIRES_LINKS.grafana) || "#"} target="_blank" rel="noopener noreferrer">Grafana <Icon.ext/></a>
+        <a className="btn" href={(window.CIRES_LINKS && window.CIRES_LINKS.loki) || "#"} target="_blank" rel="noopener noreferrer">Loki <Icon.ext/></a>
+        <a className="btn" href={(window.CIRES_LINKS && window.CIRES_LINKS.jaeger) || "#"} target="_blank" rel="noopener noreferrer">Jaeger <Icon.ext/></a>
       </div>
     </div>
   );
@@ -362,11 +367,15 @@ function RelatedSidebar({ a }) {
       <div>
         <div className="section-label">Related alerts</div>
         <div className="card" style={{ overflow: "hidden" }}>
+          {/* 2026-06-02 — wire real hrefs so each related alert is
+              clickable. The {r.id} is the 8-char short id the
+              /dashboard/alert/{short_id} route resolves. */}
           {(a.related || []).map((r, i) => (
-            <a key={r.id} style={{
+            <a key={r.id} href={`/dashboard/alert/${r.id}`} style={{
               display: "block", padding: "12px 14px",
               borderBottom: i < a.related.length - 1 ? "1px solid var(--border)" : "none",
               textDecoration: "none", cursor: "pointer",
+              color: "inherit",
             }} className="lift">
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
                 <VerdictPill v={r.verdict}/>

@@ -426,6 +426,19 @@ function Dashboard({ mode = "default" }) {
   const [filters, setFilters] = useDashState({
     env: new Set(), namespace: new Set(), service_type: new Set(), verdict: new Set(),
   });
+  // 2026-06-02 — alerts as state so partial-refresh swaps the rows
+  // without remounting Dashboard (which would lose expandedId / filters).
+  // Seeded from the server-injected window.CIRES_ALERTS, then updated by
+  // the cires:refreshed event listener wired below.
+  const [rows, setRows] = useDashState(window.CIRES_ALERTS || []);
+  React.useEffect(() => {
+    const onRefresh = (e) => {
+      const next = (e && e.detail && e.detail.alerts) || window.CIRES_ALERTS || [];
+      setRows(next);
+    };
+    window.addEventListener("cires:refreshed", onRefresh);
+    return () => window.removeEventListener("cires:refreshed", onRefresh);
+  }, []);
 
   function toggleFilter(key, value) {
     setFilters(prev => {
@@ -438,8 +451,6 @@ function Dashboard({ mode = "default" }) {
     setFilters({ env: new Set(), namespace: new Set(), service_type: new Set(), verdict: new Set() });
     setSearchQuery("");
   }
-
-  const rows = window.CIRES_ALERTS;
 
   if (mode === "empty") {
     return (

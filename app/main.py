@@ -2727,6 +2727,7 @@ async def dashboard_v2(
     range_: str | None = Query(None, alias="range", max_length=8),
     q: str | None = Query(None, max_length=200),
     env: str | None = Query(None, max_length=16),
+    _partial: int | None = Query(None, ge=0, le=1),
 ):
     """Preview of the 2026-05-22 redesigned dashboard.
 
@@ -2880,7 +2881,7 @@ async def dashboard_v2(
     now_tng = now_utc.astimezone(timezone(timedelta(hours=1))).strftime("%Y-%m-%d %H:%M:%S")
 
     # Server-rendered filter bar. The React layer doesn't need to know about
-    # filters — the page is reloaded on every change, and the alerts payload
+    # filters - the page is reloaded on every change, and the alerts payload
     # arrives already filtered.
     filter_bar_html = _render_v2_filter_bar(filters, page=page, size=size)
     # Mirror the resolved filter set into window.CIRES_FILTERS so the React
@@ -2895,13 +2896,28 @@ async def dashboard_v2(
         "activeCount": filters["active_count"],
     }
 
+    # 2026-06-02 - partial-refresh JSON branch. The browser polls
+    # /dashboard?_partial=1 every 60 seconds (see the inline poll script
+    # below) and the React layer swaps window.CIRES_ALERTS + top-bar stats
+    # in place without remounting the Dashboard component. Returns a
+    # JSON envelope; on any error the client falls back to full reload.
+    if _partial == 1:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({
+            "alerts": alerts,
+            "dashboard_stats": dashboard_stats,
+            "sidebar_badges": sidebar_badges,
+            "pagination": pagination,
+            "filters": filters_payload,
+            "now_local": now_tng,
+        })
+
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<meta http-equiv="refresh" content="60"/>
-<title>Observability · AI RCA — Dashboard</title>
+<title>Observability AI RCA - Dashboard</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -2960,6 +2976,41 @@ async def dashboard_v2(
   .v2-filter-bar__apply:hover {{
     background: var(--card-hi, #232838);
   }}
+  /* 2026-06-02 - top-bar partial-refresh pip. Rendered by TopBar in
+     atoms.jsx when window.cires_partial_refresh is wired. Tiny dot +
+     label; the dot pulses while a fetch is in flight. */
+  .cires-refresh-pip {{
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 9px; border-radius: 999px;
+    background: var(--card, #1a1d27);
+    border: 1px solid var(--border, #2a2d3a);
+    font-size: 11px; color: var(--muted, #8890a0);
+    user-select: none;
+  }}
+  .cires-refresh-pip .dot {{
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent-green, #6bcf7f);
+    transition: background 200ms;
+  }}
+  .cires-refresh-pip[data-state="loading"] .dot {{
+    background: var(--accent-yellow, #e0d060);
+    animation: cires-pip-pulse 800ms ease-in-out infinite;
+  }}
+  .cires-refresh-pip[data-state="error"] .dot {{
+    background: var(--accent-red, #e06070);
+  }}
+  @keyframes cires-pip-pulse {{
+    0%, 100% {{ opacity: 1; }}
+    50% {{ opacity: 0.4; }}
+  }}
+  /* Responsive baseline for the filter bar - wrap to one column under
+     768px so the dropdowns stay tappable. */
+  @media (max-width: 768px) {{
+    .v2-filter-bar {{ flex-direction: column; align-items: stretch; gap: 8px; padding: 10px 14px; }}
+    .v2-filter-bar__lbl {{ width: 100%; }}
+    .v2-filter-bar select,
+    .v2-filter-bar input[type="search"] {{ width: 100%; }}
+  }}
 </style>
 </head>
 <body>
@@ -2975,6 +3026,56 @@ async def dashboard_v2(
   window.CIRES_DASHBOARD_STATS = {_json2.dumps(dashboard_stats)};
   window.CIRES_SIDEBAR_BADGES = {_json2.dumps(sidebar_badges)};
   window.CIRES_FILTERS = {_json2.dumps(filters_payload)};
+
+  // 2026-06-02 - partial-refresh poll. Replaces the previous
+  // meta-refresh full-page reload so the operator's expanded-row +
+  // scroll position + filter focus survive a refresh.
+  // Re-fetches /dashboard?_partial=1 every 60 s, mutates window.CIRES_*
+  // in place, and dispatches "cires:refreshed" so the React tree picks
+  // up the change via its event listeners (Dashboard + TopBar).
+  //
+  // 3-consecutive-failure fallback: if the partial endpoint errors out
+  // three times in a row, do a full reload so the operator still sees
+  // a refreshed page. The fail counter resets on success.
+  (function() {{
+    var failCount = 0;
+    var pip = null;
+    function setPipState(s) {{
+      if (!pip) pip = document.getElementById("cires-refresh-pip");
+      if (pip) pip.setAttribute("data-state", s);
+    }}
+    function buildPartialUrl() {{
+      var u = new URL(window.location.href);
+      u.searchParams.set("_partial", "1");
+      return u.toString();
+    }}
+    async function refresh() {{
+      setPipState("loading");
+      try {{
+        var r = await fetch(buildPartialUrl(), {{ headers: {{ "Accept": "application/json" }} }});
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        var data = await r.json();
+        window.CIRES_ALERTS          = data.alerts          || window.CIRES_ALERTS;
+        window.CIRES_DASHBOARD_STATS = data.dashboard_stats || window.CIRES_DASHBOARD_STATS;
+        window.CIRES_SIDEBAR_BADGES  = data.sidebar_badges  || window.CIRES_SIDEBAR_BADGES;
+        window.CIRES_PAGINATION      = data.pagination      || window.CIRES_PAGINATION;
+        window.CIRES_FILTERS         = data.filters         || window.CIRES_FILTERS;
+        window.CIRES_NOW_LOCAL       = data.now_local       || window.CIRES_NOW_LOCAL;
+        failCount = 0;
+        setPipState("idle");
+        window.dispatchEvent(new CustomEvent("cires:refreshed", {{ detail: data }}));
+      }} catch (e) {{
+        failCount += 1;
+        setPipState("error");
+        if (failCount >= 3) {{
+          console.warn("[CIRES] partial refresh failed 3x, falling back to full reload");
+          window.location.reload();
+        }}
+      }}
+    }}
+    window.cires_partial_refresh = refresh;
+    setInterval(refresh, 60000);
+  }})();
 </script>
 
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
@@ -4313,13 +4414,13 @@ async def dashboard_v2_alert(short_id: str):
 <div class="page-banner">
   <strong>detail page</strong>
   <span title="Click to copy full UUID"
-        onclick="navigator.clipboard.writeText('{target.get('id') or ''}').then(()=>{{const e=this.querySelector('em');if(e){{e.textContent='✓ copied';setTimeout(()=>e.textContent='📋 copy full',1800)}}}});"
+        onclick="navigator.clipboard.writeText('{target.get('id') or ''}').then(()=>{{const e=this.querySelector('em');if(e){{e.textContent='copied';setTimeout(()=>e.textContent='copy full',1800)}}}});"
         style="cursor:pointer; padding:2px 8px; border:1px solid rgba(176,126,232,.3); border-radius:4px; user-select:none;">
     Alert <code style="color:var(--accent-yellow)">{short_id}</code>
-    <em style="font-size:11px; opacity:.65; margin-left:6px; font-style:normal;">📋 copy full</em>
+    <em style="font-size:11px; opacity:.65; margin-left:6px; font-style:normal;">copy full</em>
   </span>
   <span style="flex: 1"></span>
-  <a href="/dashboard">← back to feed</a>
+  <a href="/dashboard">back to feed</a>
 </div>
 
 <div id="root"></div>
@@ -4329,6 +4430,14 @@ async def dashboard_v2_alert(short_id: str):
   window.CIRES_NOW_LOCAL = "{now_tng}";
   window.CIRES_DASHBOARD_STATS = {_json2.dumps(dashboard_stats)};
   window.CIRES_SIDEBAR_BADGES = {_json2.dumps(sidebar_badges)};
+  // 2026-06-02 - real Grafana/Loki/Jaeger hrefs for DetailHeader buttons.
+  // detail.jsx reads window.CIRES_LINKS.{{grafana,loki,jaeger}} with a
+  // "#" fallback so the design canvas page still renders standalone.
+  window.CIRES_LINKS = {_json2.dumps({
+      "grafana": settings.grafana_url,
+      "loki":    settings.loki_url,
+      "jaeger":  settings.jaeger_url,
+  })};
 </script>
 
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
@@ -4471,6 +4580,172 @@ async def dashboard_v2_root_legacy_redirect():
 async def dashboard_v2_legacy_redirect(path: str):
     target = f"/dashboard/{path}" if path else "/dashboard"
     return RedirectResponse(url=target, status_code=301)
+
+
+# ----------------------------------------------------------------------
+# 2026-06-02 - Sprint 5 placeholder pages
+# ----------------------------------------------------------------------
+# The React sidebar (sidebar.jsx) surfaces 9 nav items. Pre-overhaul,
+# five of them ("Incidents", "Anomalies", "Stats", "Drain3 engine",
+# "Integrations") had no href - clicking them was a no-op or, worse, a
+# 404. The frontend overhaul wires real hrefs and lands them on this
+# shared placeholder so the operator never sees a dead click.
+#
+# Each route resolves to one of EPIC13 / EPIC14 / EPIC15 (Sprint 5
+# scope). The placeholder keeps the sidebar visible so the operator
+# can navigate back without a back-button hunt; "back to triage feed"
+# CTA points at /dashboard.
+_SPRINT5_PLACEHOLDER_SURFACES = {
+    "incidents": {
+        "title": "Incidents",
+        "epic":  "EPIC13",
+        "why":   "Long-running multi-alert incident timeline. Today the feed "
+                 "shows alerts; Sprint 5 stitches them into incidents with "
+                 "open/close lifecycle.",
+    },
+    "anomalies": {
+        "title": "Anomalies",
+        "epic":  "EPIC14",
+        "why":   "Drain3 anomaly surface. Today anomalies fire as alerts; "
+                 "Sprint 5 gives them a dedicated trending view.",
+    },
+    "stats": {
+        "title": "Stats",
+        "epic":  "EPIC15",
+        "why":   "Aggregated trends across services / time. Today /dashboard/kpi "
+                 "covers platform-health KPIs; Sprint 5 adds business-level stats.",
+    },
+    "drain3": {
+        "title": "Drain3 engine",
+        "epic":  "EPIC14",
+        "why":   "Live drain3 template explorer. Today /drain3/stats returns "
+                 "JSON; Sprint 5 wraps it in an operator-readable surface.",
+    },
+    "integrations": {
+        "title": "Integrations",
+        "epic":  "EPIC15",
+        "why":   "External integration health (Grafana, Loki, Prometheus, "
+                 "Jaeger, MCP bridges). Today /health returns one line; "
+                 "Sprint 5 breaks it down per integration.",
+    },
+}
+
+
+def _render_sprint5_placeholder(slug: str) -> HTMLResponse:
+    """Single shared template for the five Sprint-5 placeholder routes.
+
+    Renders a minimal page with the design tokens.css applied (so the
+    look matches the rest of the dashboard) plus a clear "coming Sprint 5"
+    message and a CTA back to /dashboard. The sidebar isn't shown here
+    intentionally - it's a React component that needs the alerts payload
+    to render badges, and we don't want to spin up the full Dashboard
+    chrome just to show a 4-line placeholder.
+    """
+    meta = _SPRINT5_PLACEHOLDER_SURFACES[slug]
+    title = _html.escape(meta["title"])
+    epic  = _html.escape(meta["epic"])
+    why   = _html.escape(meta["why"])
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>{title} - coming Sprint 5</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/design/tokens.css"/>
+<style>
+  body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); }}
+  .sprint5-wrap {{
+    min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    padding: 40px 24px;
+  }}
+  .sprint5-card {{
+    max-width: 560px; width: 100%;
+    background: var(--card, #1a1d27);
+    border: 1px solid var(--border, #2a2d3a);
+    border-radius: 12px;
+    padding: 36px 32px;
+    box-shadow: var(--shadow-md, 0 12px 28px rgba(0,0,0,.45));
+  }}
+  .sprint5-eyebrow {{
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em;
+    color: var(--accent-purple, #b07ee8);
+    margin-bottom: 10px;
+  }}
+  .sprint5-title {{
+    font-size: 26px; font-weight: 600;
+    color: var(--text, #e4e6ee);
+    margin: 0 0 18px 0;
+  }}
+  .sprint5-msg {{
+    font-size: 14px; line-height: 1.55;
+    color: var(--text-soft, #c0c5d0);
+    margin-bottom: 22px;
+  }}
+  .sprint5-why {{
+    font-size: 13px; line-height: 1.5;
+    color: var(--muted, #8890a0);
+    border-left: 3px solid var(--border-hi, #3a3f52);
+    padding: 8px 0 8px 14px;
+    margin-bottom: 26px;
+  }}
+  .sprint5-cta {{
+    display: inline-block;
+    background: var(--accent-cyan, #40d0d0);
+    color: var(--bg, #0f1117);
+    text-decoration: none; font-weight: 600; font-size: 13px;
+    padding: 9px 16px; border-radius: 7px;
+  }}
+  .sprint5-cta:hover {{ filter: brightness(1.1); }}
+  .sprint5-back {{
+    display: inline-block; margin-left: 14px;
+    color: var(--muted, #8890a0); font-size: 12.5px;
+    text-decoration: none;
+  }}
+  .sprint5-back:hover {{ color: var(--text-soft, #c0c5d0); }}
+</style>
+</head>
+<body>
+<div class="sprint5-wrap">
+  <div class="sprint5-card">
+    <div class="sprint5-eyebrow">{epic} - planned Sprint 5</div>
+    <h1 class="sprint5-title">{title}</h1>
+    <p class="sprint5-msg">This surface is planned for Sprint 5. It is not built yet.</p>
+    <div class="sprint5-why">{why}</div>
+    <a class="sprint5-cta" href="/dashboard">Back to triage feed</a>
+    <a class="sprint5-back" href="/dashboard/kpi">View platform KPIs</a>
+  </div>
+</div>
+</body>
+</html>""")
+
+
+@app.get("/dashboard/incidents", response_class=HTMLResponse)
+async def dashboard_sprint5_incidents():
+    return _render_sprint5_placeholder("incidents")
+
+
+@app.get("/dashboard/anomalies", response_class=HTMLResponse)
+async def dashboard_sprint5_anomalies():
+    return _render_sprint5_placeholder("anomalies")
+
+
+@app.get("/dashboard/stats", response_class=HTMLResponse)
+async def dashboard_sprint5_stats():
+    return _render_sprint5_placeholder("stats")
+
+
+@app.get("/dashboard/drain3", response_class=HTMLResponse)
+async def dashboard_sprint5_drain3():
+    return _render_sprint5_placeholder("drain3")
+
+
+@app.get("/dashboard/integrations", response_class=HTMLResponse)
+async def dashboard_sprint5_integrations():
+    return _render_sprint5_placeholder("integrations")
 
 
 @app.get("/metrics")

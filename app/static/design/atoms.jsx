@@ -29,9 +29,22 @@ function useTheme() {
 }
 
 // Sidebar collapsed-state hook (persists across artboards/refreshes via localStorage)
+// 2026-06-02 — auto-collapse on narrow viewports (<= 900px). The
+// operator's manual choice still wins on wide screens; narrow screens
+// always start collapsed because the 224px sidebar would steal too
+// much of the table on a phone. resize listener flips the state when
+// the viewport crosses the threshold.
 const SIDEBAR_COLLAPSED_KEY = "obs-rca-sidebar-collapsed";
+const NARROW_VIEWPORT_PX = 900;
+function _isNarrow() {
+  if (typeof window === "undefined") return false;
+  return window.innerWidth <= NARROW_VIEWPORT_PX;
+}
 function useSidebarCollapsed() {
   const [c, setC] = useState(() => {
+    // Narrow viewport overrides the saved preference on first paint —
+    // the operator can still manually expand once loaded.
+    if (_isNarrow()) return true;
     try { return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1"; } catch (e) { return false; }
   });
   useEffect(() => {
@@ -41,7 +54,17 @@ function useSidebarCollapsed() {
         if (v !== c) setC(v);
       } catch (e) {}
     }, 400);
-    return () => clearInterval(t);
+    // Auto-collapse on resize across the narrow-viewport threshold.
+    let lastNarrow = _isNarrow();
+    const onResize = () => {
+      const nowNarrow = _isNarrow();
+      if (nowNarrow !== lastNarrow) {
+        lastNarrow = nowNarrow;
+        if (nowNarrow) setC(true);
+      }
+    };
+    window.addEventListener("resize", onResize);
+    return () => { clearInterval(t); window.removeEventListener("resize", onResize); };
   }, [c]);
   const apply = (next) => {
     try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0"); } catch (e) {}
@@ -224,6 +247,17 @@ function useLiveClock() {
 // falls back to the previous hardcoded props so the design canvas page still
 // renders standalone.
 function TopBar({ uptimeSec, openAlerts, emailed24h, shelved24h, medianLatency, page = "dashboard", onBack }) {
+  // Pull fresh stats each render so partial-refresh updates (which mutate
+  // window.CIRES_DASHBOARD_STATS in place) show up without a full reload.
+  // The Dashboard component already triggers a re-render via the
+  // cires:refreshed event listener; we just need to re-read here.
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const onRefresh = () => forceTick(t => t + 1);
+    window.addEventListener("cires:refreshed", onRefresh);
+    return () => window.removeEventListener("cires:refreshed", onRefresh);
+  }, []);
+
   const stats = (typeof window !== "undefined" ? window.CIRES_DASHBOARD_STATS : null) || {};
   const _uptimeSec      = uptimeSec      ?? stats.uptimeSec      ?? 47812;
   const _openAlerts     = openAlerts     ?? stats.openAlerts     ?? 7;
@@ -270,6 +304,19 @@ function TopBar({ uptimeSec, openAlerts, emailed24h, shelved24h, medianLatency, 
       <Stat label="Emailed 24h" value={_emailed24h} accent="var(--accent-orange)"/>
       <Stat label="Shelved 24h" value={_shelved24h} accent="var(--accent-yellow)"/>
       <Stat label="LLM p50" value={`${_medianLatency}s`} accent="var(--accent-purple)"/>
+
+      {/* Partial-refresh indicator. Hidden on pages that don't have the
+          /dashboard JSON poll wired up — the pip element is only present
+          when cires_partial_refresh exists on window. */}
+      {typeof window !== "undefined" && window.cires_partial_refresh && (
+        <span id="cires-refresh-pip" className="cires-refresh-pip" data-state="idle"
+              title="Auto-refresh every 60 seconds — click to refresh now"
+              onClick={() => window.cires_partial_refresh && window.cires_partial_refresh()}
+              style={{ cursor: "pointer" }}>
+          <span className="dot"/>
+          <span className="cires-refresh-pip__label">live</span>
+        </span>
+      )}
 
       <ThemeToggle/>
     </div>

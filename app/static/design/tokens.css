@@ -1,4 +1,22 @@
 /* Observability · AI RCA — design tokens */
+
+/* 2026-06-02 frontend overhaul — viewport baseline. Without these,
+   tall monitors left a white gap under the React content because
+   html/body inherited document height instead of viewport height.
+   These rules belong here (not the per-page <style> block) so they
+   apply uniformly to /dashboard + /dashboard/kpi + /dashboard/services
+   + /dashboard/alerts + /dashboard/alert/* and the new Sprint-5 stubs. */
+html, body {
+  min-height: 100vh;
+  margin: 0;
+}
+body {
+  background: #0f1117;   /* matches --bg dark default; light mode overridden via .cires data-theme */
+  font-family: 'Inter', system-ui, sans-serif;
+  color: #e4e6ee;
+  overflow-x: hidden;    /* prevents accidental horizontal scroll on narrow viewports */
+}
+
 :root {
   --bg:           #0f1117;
   --bg-soft:      #13151e;
@@ -132,7 +150,18 @@
 .input::placeholder { color: var(--muted-2); }
 
 /* Table */
-.tbl { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+/* 2026-06-02 — give .tbl a horizontal scroll affordance via its parent.
+   The Dashboard table sits inside a .card wrapper that we now mark as
+   scrollable on the X axis so narrow viewports don't break the layout. */
+.card { overflow-x: auto; }
+.tbl { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; min-width: 720px; }
+@media (max-width: 1100px) {
+  .tbl { font-size: 12px; min-width: 600px; }
+  .tbl td, .tbl th { padding: 8px 9px; }
+}
+@media (max-width: 768px) {
+  .tbl { min-width: 540px; }
+}
 .tbl th {
   text-align: left;
   font-size: 11px; font-weight: 600;

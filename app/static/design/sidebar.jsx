@@ -8,29 +8,35 @@ const SIDEBAR_W_COLLAPSED = 64;
 // server-injected (i.e. design canvas viewed directly).
 const NAV_BADGE_FALLBACKS = { triage: 7, incidents: 3, anomalies: "12" };
 
+// 2026-06-02 — every nav item now has a real href. Five of them
+// (incidents, anomalies, stats, drain3, integrations) point at
+// "Coming in Sprint 5" landing pages rather than dead <div>s so
+// the operator never gets a no-op click. The triage item links back
+// to /dashboard which is fine — clicking the active item is a refresh
+// affordance.
 const NAV_GROUPS = [
   {
     label: "Incident response",
     items: [
-      { id: "triage",    label: "Triage feed",   icon: "triage",    accent: "var(--accent-red)" },
-      { id: "incidents", label: "Incidents",     icon: "incidents", accent: "var(--accent-orange)" },
-      { id: "anomalies", label: "Anomalies",     icon: "anomalies" },
+      { id: "triage",    label: "Triage feed",   icon: "triage",    accent: "var(--accent-red)",    href: "/dashboard" },
+      { id: "incidents", label: "Incidents",     icon: "incidents", accent: "var(--accent-orange)", href: "/dashboard/incidents" },
+      { id: "anomalies", label: "Anomalies",     icon: "anomalies",                                  href: "/dashboard/anomalies" },
     ],
   },
   {
     label: "Insights",
     items: [
-      { id: "stats",     label: "Stats",          icon: "stats" },
-      { id: "services",  label: "Services",       icon: "services", href: "/dashboard/services" },
-      { id: "kpi",       label: "KPI · Evaluation", icon: "kpi", href: "/dashboard/kpi" },
+      { id: "stats",     label: "Stats",            icon: "stats",    href: "/dashboard/stats" },
+      { id: "services",  label: "Services",         icon: "services", href: "/dashboard/services" },
+      { id: "kpi",       label: "KPI · Evaluation", icon: "kpi",      href: "/dashboard/kpi" },
     ],
   },
   {
     label: "Configuration",
     items: [
-      { id: "alerts-cfg", label: "Alerts",         icon: "alerts", href: "/dashboard/alerts" },
-      { id: "drain3",     label: "Drain3 engine",  icon: "drain3" },
-      { id: "integrations", label: "Integrations", icon: "integrations" },
+      { id: "alerts-cfg",   label: "Alerts",        icon: "alerts",       href: "/dashboard/alerts" },
+      { id: "drain3",       label: "Drain3 engine", icon: "drain3",       href: "/dashboard/drain3" },
+      { id: "integrations", label: "Integrations",  icon: "integrations", href: "/dashboard/integrations" },
     ],
   },
 ];
