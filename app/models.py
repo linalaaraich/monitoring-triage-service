@@ -214,6 +214,13 @@ class RCARecord(BaseModel):
     alert_signal: Optional[str] = None         # "metric" / "log" / "trace"
     observed_value: Optional[str] = None       # rendered value from alert.values
     promql_expr: Optional[str] = None          # from alert.annotations.expr
+    # Environment - resolved at pipeline-write time via
+    # app.v2_mappings.env_resolver against the alert's labels +
+    # commonLabels + namespace + service token. First-class field so the
+    # dashboard / email / filter bar all read one persisted value instead
+    # of re-deriving the heuristic per surface. "unknown" is the explicit
+    # gap value; "prod"/"stg"/"dev"/"preprod"/"uat"/"int" are live tokens.
+    env: Optional[str] = None
     # LLM-produced rich fields that previously only lived in the email.
     suggested_actions: Optional[str] = None    # JSON list of strings
     evidence: Optional[str] = None             # JSON list of strings

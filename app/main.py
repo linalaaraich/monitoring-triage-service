@@ -2545,8 +2545,14 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
 # Verdict values match what /v2 actually surfaces (see _V2_VERDICT_MAP).
 _V2_FILTER_VERDICTS = {"escalate", "dismiss", "investigate", "shelve"}
 _V2_FILTER_SEVERITIES = {"critical", "warning", "info", "none"}
+# Env allowlist - the same canonical-form set the resolver emits. "unknown"
+# is included so the operator can filter to the gap explicitly. Kept short
+# on purpose: any token outside this set silently falls back to "no filter"
+# rather than letting a typo through.
+_V2_FILTER_ENVS = {"prod", "stg", "preprod", "uat", "int", "dev", "qa",
+                   "test", "sandbox", "canary", "unknown"}
 # Family is a coarse alert-name bucket; matched as a substring LIKE on the
-# alert_name column. Keep this list short — it's surfaced in the dropdown.
+# alert_name column. Keep this list short - it's surfaced in the dropdown.
 _V2_FILTER_FAMILIES = {
     "cpu":     "CPU",       # CpuSpike, HighCPUUsage, KongCpu...
     "memory":  "Memory",    # PodHighMemoryUsage, MemoryPressure
@@ -2575,25 +2581,27 @@ def _parse_v2_filters(
     family: str | None,
     range_: str | None,
     q: str | None,
+    env: str | None = None,
 ) -> dict:
     """Validate & normalize the /dashboard URL filter set.
 
     Returns a dict with always-present keys:
-      - verdict, severity, family, range, q (each may be None / "")
+      - verdict, severity, family, range, q, env (each may be None / "")
       - since_hours: float (the resolved window in hours)
       - active_count: int (how many filters the operator actually set)
 
     Unknown / out-of-range inputs silently fall back to the default.
-    Logging is debug-level so a crafted URL doesn't fill the warn log —
+    Logging is debug-level so a crafted URL doesn't fill the warn log -
     the test suite asserts on the "graceful fallback" behavior.
     """
     v = (verdict or "").strip().lower()
     s = (severity or "").strip().lower()
     f = (family or "").strip().lower()
     r = (range_ or "").strip().lower()
+    e = (env or "").strip().lower()
     # Search query: clamp to 200 chars; allow any printable input. The
     # search filter is applied client-side (matches the dashboard.jsx
-    # data-search behavior), so SQL safety is not at risk here — but
+    # data-search behavior), so SQL safety is not at risk here - but
     # we still cap to prevent oversize echo of attacker input.
     q_norm = (q or "").strip()[:200]
 
@@ -2601,11 +2609,12 @@ def _parse_v2_filters(
     s_out = s if s in _V2_FILTER_SEVERITIES else None
     f_out = f if f in _V2_FILTER_FAMILIES else None
     r_out = r if r in _V2_FILTER_RANGES else _V2_FILTER_DEFAULT_RANGE
+    e_out = e if e in _V2_FILTER_ENVS else None
     since_hours = _V2_FILTER_RANGES[r_out]
 
-    active_count = sum(1 for x in (v_out, s_out, f_out, q_norm) if x)
+    active_count = sum(1 for x in (v_out, s_out, f_out, e_out, q_norm) if x)
     # Range counts only if the operator deviated from the default; otherwise
-    # the "active filters" badge would always read ≥1 on first load.
+    # the "active filters" badge would always read >=1 on first load.
     if r_out != _V2_FILTER_DEFAULT_RANGE:
         active_count += 1
 
@@ -2616,6 +2625,7 @@ def _parse_v2_filters(
         "family_substring": _V2_FILTER_FAMILIES.get(f_out) if f_out else None,
         "range": r_out,
         "q": q_norm,
+        "env": e_out,
         "since_hours": since_hours,
         "active_count": active_count,
     }
@@ -2651,6 +2661,15 @@ def _render_v2_filter_bar(filters: dict, page: int, size: int) -> str:
         f'<option value="{_h.escape(k)}"{_sel(k, filters["family"])}>{_h.escape(k)}</option>'
         for k in sorted(_V2_FILTER_FAMILIES.keys())
     )
+    # Env dropdown - canonical order (operational tiers first, then the
+    # explicit "unknown" gap). Matches the env_resolver / _V2_FILTER_ENVS
+    # allowlist.
+    env_order = ("prod", "stg", "preprod", "uat", "int", "dev", "qa",
+                 "test", "sandbox", "canary", "unknown")
+    env_opts = "".join(
+        f'<option value="{_h.escape(k)}"{_sel(k, filters.get("env"))}>{_h.escape(k)}</option>'
+        for k in env_order
+    )
     range_opts = "".join(
         f'<option value="{_h.escape(k)}"{_sel(k, filters["range"])}>{_h.escape(k)}</option>'
         for k in ("1h", "6h", "24h", "7d", "15d")
@@ -2674,6 +2693,12 @@ def _render_v2_filter_bar(filters: dict, page: int, size: int) -> str:
     <select name="family" onchange="this.form.submit()">
       <option value=""{_sel(None, filters["family"])}>any</option>
       {family_opts}
+    </select>
+  </label>
+  <label class="v2-filter-bar__lbl">Env
+    <select name="env" onchange="this.form.submit()">
+      <option value=""{_sel(None, filters.get("env"))}>any</option>
+      {env_opts}
     </select>
   </label>
   <label class="v2-filter-bar__lbl">Range
@@ -2701,6 +2726,7 @@ async def dashboard_v2(
     family: str | None = Query(None, max_length=32),
     range_: str | None = Query(None, alias="range", max_length=8),
     q: str | None = Query(None, max_length=200),
+    env: str | None = Query(None, max_length=16),
 ):
     """Preview of the 2026-05-22 redesigned dashboard.
 
@@ -2722,7 +2748,7 @@ async def dashboard_v2(
     # Validate + normalize the URL filter set. Returns the active filter
     # values + the resolved since_hours window. Bad inputs fall back to
     # the default — no 500, no log spam.
-    filters = _parse_v2_filters(verdict, severity, family, range_, q)
+    filters = _parse_v2_filters(verdict, severity, family, range_, q, env)
 
     # SF-4 (2026-05-23): same-alert collapsing — one row per fingerprint with
     # fireCount=N + latest timestamp instead of N separate rows. Pull a wide
@@ -2742,6 +2768,7 @@ async def dashboard_v2(
         verdict=filters["verdict"],
         severity=filters["severity"],
         alert_name_like=filters["family_substring"],
+        env=filters["env"],
     )
 
     # Group by fingerprint. Rows without a fingerprint (legacy / internal
@@ -2864,6 +2891,7 @@ async def dashboard_v2(
         "family": filters["family"],
         "range": filters["range"],
         "q": filters["q"],
+        "env": filters["env"],
         "activeCount": filters["active_count"],
     }
 

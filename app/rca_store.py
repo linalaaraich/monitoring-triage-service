@@ -111,7 +111,21 @@ def _classify_rca_quality(
     teaches the LLM to avoid the right phrases — err on NOT flagging.
     """
     import re
-    combined = " ".join(filter(None, [rca_report or "", reasoning or ""])).lower()
+    # 2026-06-02 — rca_report may now be a JSON envelope (human-first reason
+    # refactor: {"human_cause": "...", "rca": "...", "schema": "v2"}). Decode
+    # to scan both fields for hedge phrases; legacy raw-text rows fall
+    # through the try/except and get scanned as-is.
+    rca_text_for_scan = rca_report or ""
+    if rca_text_for_scan.startswith("{"):
+        try:
+            envelope = json.loads(rca_text_for_scan)
+            if isinstance(envelope, dict) and ("rca" in envelope or "human_cause" in envelope):
+                rca_text_for_scan = " ".join(
+                    filter(None, [envelope.get("human_cause", ""), envelope.get("rca", "")])
+                )
+        except (ValueError, TypeError):
+            pass
+    combined = " ".join(filter(None, [rca_text_for_scan, reasoning or ""])).lower()
     if not combined.strip():
         return "data_starved"
 
@@ -165,6 +179,10 @@ class RCAStore:
             ("diagnostic_steps",  "TEXT"),  # JSON list (US-3.9 / Tier 0)
             ("anomaly_summary",   "TEXT"),
             ("correlated_alerts", "TEXT"),  # JSON list
+            # 2026-06-02 - first-class env column. Resolved by env_resolver
+            # at pipeline write time so dashboard / email / filter all read
+            # one persisted value. "unknown" is the explicit gap value.
+            ("env",               "TEXT"),
         ]
         for name, sql_type in new_columns:
             if name not in cols:
@@ -221,6 +239,15 @@ class RCAStore:
                 record.evidence,
             )
 
+        # 2026-06-02 - auto-fill env via the resolver when the caller didn't
+        # set one. Pipeline writes typically pre-resolve env (with full alert
+        # context), but short-path / legacy writers may not - in that case
+        # we infer from the service token alone so the persisted row still
+        # carries a value the dashboard / email can read.
+        if not record.env:
+            from app.v2_mappings import env_resolver
+            record.env = env_resolver(service=record.affected_service)
+
         await self._db.execute(
             """INSERT INTO rca_history
                (id, timestamp, alert_source, alert_name, alert_fingerprint,
@@ -229,9 +256,9 @@ class RCAStore:
                 related_alerts, investigation_duration_ms, rca_quality,
                 alert_instance, alert_component, alert_signal, observed_value,
                 promql_expr, suggested_actions, evidence, diagnostic_steps,
-                anomaly_summary, correlated_alerts)
+                anomaly_summary, correlated_alerts, env)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.id,
                 record.timestamp.isoformat(),
@@ -259,6 +286,7 @@ class RCAStore:
                 record.diagnostic_steps,
                 record.anomaly_summary,
                 record.correlated_alerts,
+                record.env,
             ),
         )
         await self._db.commit()
@@ -277,6 +305,7 @@ class RCAStore:
         verdict: str | None = None,
         severity: str | None = None,
         alert_name_like: str | None = None,
+        env: str | None = None,
     ) -> list[dict]:
         """Fetch decisions with optional column filters.
 
@@ -320,6 +349,9 @@ class RCAStore:
         if alert_name_like:
             clauses.append("LOWER(COALESCE(alert_name, '')) LIKE LOWER(?)")
             params.append(f"%{alert_name_like}%")
+        if env:
+            clauses.append("LOWER(COALESCE(env, '')) = LOWER(?)")
+            params.append(env)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.extend([limit, offset])
         cursor = await self._db.execute(
@@ -362,6 +394,7 @@ class RCAStore:
         verdict: str | None = None,
         severity: str | None = None,
         alert_name_like: str | None = None,
+        env: str | None = None,
     ) -> int:
         """Count decisions matching the same filter set as get_decisions().
 
@@ -390,6 +423,9 @@ class RCAStore:
         if alert_name_like:
             clauses.append("LOWER(COALESCE(alert_name, '')) LIKE LOWER(?)")
             params.append(f"%{alert_name_like}%")
+        if env:
+            clauses.append("LOWER(COALESCE(env, '')) = LOWER(?)")
+            params.append(env)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         cursor = await self._db.execute(
             f"SELECT COUNT(*) AS n FROM rca_history {where_sql}",
@@ -397,6 +433,37 @@ class RCAStore:
         )
         row = await cursor.fetchone()
         return int(row["n"]) if row else 0
+
+    async def backfill_env_from_service(self) -> int:
+        """One-off SQL migration helper - resolve env for rows where it is
+        NULL or empty, using env_resolver(service=affected_service).
+
+        Returns the number of rows updated. Idempotent: a second run touches
+        zero rows (the first run filled them all). Called manually after the
+        2026-06-02 env-column migration to back-fill historical rows; the
+        live pipeline writes env at save_decision time so new rows never
+        need this path.
+        """
+        from app.v2_mappings import env_resolver
+
+        cursor = await self._db.execute(
+            """SELECT id, affected_service FROM rca_history
+               WHERE env IS NULL OR env = ''"""
+        )
+        rows = await cursor.fetchall()
+        updated = 0
+        for row in rows:
+            svc = row["affected_service"] or ""
+            env = env_resolver(service=svc)
+            await self._db.execute(
+                "UPDATE rca_history SET env = ? WHERE id = ?",
+                (env, row["id"]),
+            )
+            updated += 1
+        if updated:
+            await self._db.commit()
+        logger.info("backfill_env_from_service: updated %d rows", updated)
+        return updated
 
     async def get_recent_decision_for_alert(
         self, alert_name: str, affected_service: str, lookback_minutes: int
