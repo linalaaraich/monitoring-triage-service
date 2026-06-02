@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 # spec's "optional bonus, don't overrun the budget" guidance.
 _STATIC_MCP_INVARIANT_LABEL = "0 leaks"
 _STATIC_MCP_INVARIANT_SUB = "lint enforced in CI — scripts/check_mcp_invariant.py (5 rules)"
-_STATIC_TESTS_LABEL = "333 / 333"
-_STATIC_TESTS_SUB = "stamped 2026-05-25 (313 + 20 new KPI tests)"
+_STATIC_TESTS_LABEL = "428 / 428"
+_STATIC_TESTS_SUB = "stamped 2026-06-01 (333 + 95 new tests across Sprint 4 §14 closeout)"
 
 
 def _utc_now() -> datetime:
@@ -382,7 +382,7 @@ async def compute_kpis(store, *, ollama_url: str | None = None) -> dict:
             "sub": _STATIC_MCP_INVARIANT_SUB,
         },
         "tests_passing": {
-            "value": 333,
+            "value": 428,
             "label": _STATIC_TESTS_LABEL,
             "sub": _STATIC_TESTS_SUB,
         },
@@ -410,7 +410,7 @@ def _empty_kpis() -> dict:
             "sub": _STATIC_MCP_INVARIANT_SUB,
         },
         "tests_passing": {
-            "value": 333,
+            "value": 428,
             "label": _STATIC_TESTS_LABEL,
             "sub": _STATIC_TESTS_SUB,
         },
