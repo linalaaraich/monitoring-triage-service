@@ -3023,17 +3023,6 @@ async def dashboard_v2(
 <style>
   body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); }}
   #root {{ min-height: 100vh; }}
-  .v2-banner {{
-    background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
-    border-bottom: 1px solid rgba(176,126,232,.35);
-    padding: 8px 22px;
-    font-size: 12.5px;
-    color: var(--text-soft, #c0c5d0);
-    display: flex; align-items: center; gap: 14px;
-  }}
-  .v2-banner strong {{ color: var(--accent-purple, #b07ee8); }}
-  .v2-banner a {{ color: var(--accent-cyan, #40d0d0); text-decoration: none; }}
-  .v2-banner a:hover {{ text-decoration: underline; }}
   /* Server-rendered URL-persistent filter bar — sits above the React feed
      so a refresh / shared link keeps the operator's view. Each <select>
      auto-submits on change; the "copy URL" button is purely cosmetic
@@ -3088,15 +3077,6 @@ async def dashboard_v2(
 </style>
 </head>
 <body>
-
-<div class="v2-banner">
-  <strong>v2 preview</strong>
-  <span>2026-05-22 Claude Design redesign rendered against live /decisions data.</span>
-  <span style="flex: 1"></span>
-  <a href="/dashboard">↩ existing /dashboard</a>
-  <a href="https://linalaaraich.github.io/monitoring-docs/solution-brief.html#supervisor-feedback" target="_blank">§12 feedback</a>
-  <a href="https://linalaaraich.github.io/monitoring-docs/design-prompt.html" target="_blank">design prompt</a>
-</div>
 
 {filter_bar_html}
 
@@ -3414,7 +3394,6 @@ async def dashboard_v2_kpi():
 
     <div class="kpi-foot">
       <strong>What you are looking at:</strong> each card answers one operator question. The big number is the answer; the muted line under it grounds the number in context. All data is computed live from the local <code>rca_history.db</code> &middot; no external dependencies, MCP-invariant clean.
-      &nbsp;<a href="https://linalaaraich.github.io/monitoring-docs/sprint4-status.html">sprint4-status &rarr;</a>
     </div>
   </main>
 </div>
