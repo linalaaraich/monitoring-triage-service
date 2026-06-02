@@ -1,11 +1,11 @@
-"""Tests for /dashboard/v2/services + RCAStore.get_service_summary.
+"""Tests for /dashboard/services + RCAStore.get_service_summary.
 
 Covers:
   * get_service_summary() returns the expected shape from a populated DB
   * Route 200s with a non-empty HTML body
   * Empty-DB: route still 200s, shows the "no services yet" affordance,
     does not surface a Python traceback
-  * Service names render as <a href="/dashboard/v2?q=<svc>"> anchors
+  * Service names render as <a href="/dashboard?q=<svc>"> anchors
     back to the filtered triage feed
   * Top-of-page summary chips ("services seen", "decisions", "emails / day")
     render in the body
@@ -231,12 +231,12 @@ async def test_service_summary_sorted_by_total_desc(populated_store):
 
 
 # ---------------------------------------------------------------------------
-# /dashboard/v2/services — route integration tests
+# /dashboard/services — route integration tests
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_services_route_returns_200_with_body(services_app_client):
-    resp = await services_app_client.get("/dashboard/v2/services")
+    resp = await services_app_client.get("/dashboard/services")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     assert len(resp.text) > 500
@@ -244,17 +244,17 @@ async def test_services_route_returns_200_with_body(services_app_client):
 
 @pytest.mark.asyncio
 async def test_services_route_renders_each_service_as_anchor_with_q_param(services_app_client):
-    """Service names must be clickable anchors that drop into /dashboard/v2?q=<svc>."""
-    resp = await services_app_client.get("/dashboard/v2/services")
+    """Service names must be clickable anchors that drop into /dashboard?q=<svc>."""
+    resp = await services_app_client.get("/dashboard/services")
     body = resp.text
-    # Each fixture service should appear inside an href="/dashboard/v2?q=…" anchor.
+    # Each fixture service should appear inside an href="/dashboard?q=…" anchor.
     for svc in ("spring-boot", "kong", "nginx"):
-        assert f'href="/dashboard/v2?q={svc}"' in body, f"Anchor for {svc!r} missing"
+        assert f'href="/dashboard?q={svc}"' in body, f"Anchor for {svc!r} missing"
 
 
 @pytest.mark.asyncio
 async def test_services_route_renders_summary_chips(services_app_client):
-    resp = await services_app_client.get("/dashboard/v2/services")
+    resp = await services_app_client.get("/dashboard/services")
     body = resp.text
     # The three top-of-page chip labels per spec.
     assert "services seen" in body
@@ -269,15 +269,15 @@ async def test_services_route_renders_summary_chips(services_app_client):
 @pytest.mark.asyncio
 async def test_services_route_renders_top_alertname(services_app_client):
     """The dominant alertname column must surface HighP95Latency for spring-boot."""
-    resp = await services_app_client.get("/dashboard/v2/services")
+    resp = await services_app_client.get("/dashboard/services")
     assert "HighP95Latency" in resp.text
     assert "CPUSpike" in resp.text
 
 
 @pytest.mark.asyncio
 async def test_services_route_has_auto_refresh_meta(services_app_client):
-    """60s meta-refresh per spec — same cadence as /dashboard/v2/kpi."""
-    resp = await services_app_client.get("/dashboard/v2/services")
+    """60s meta-refresh per spec — same cadence as /dashboard/kpi."""
+    resp = await services_app_client.get("/dashboard/services")
     body = resp.text
     assert 'http-equiv="refresh"' in body
     assert 'content="60"' in body
@@ -286,7 +286,7 @@ async def test_services_route_has_auto_refresh_meta(services_app_client):
 @pytest.mark.asyncio
 async def test_services_route_empty_db_still_200s_with_affordance(empty_app_client):
     """Regression — empty DB must not 500 the route + must show the affordance."""
-    resp = await empty_app_client.get("/dashboard/v2/services")
+    resp = await empty_app_client.get("/dashboard/services")
     assert resp.status_code == 200
     # "no services yet" affordance per spec
     assert "No services yet" in resp.text
@@ -299,17 +299,17 @@ async def test_services_route_empty_db_still_200s_with_affordance(empty_app_clie
 @pytest.mark.asyncio
 async def test_services_route_renders_sidebar_active(services_app_client):
     """The sidebar twin must mark Services as the active item."""
-    resp = await services_app_client.get("/dashboard/v2/services")
+    resp = await services_app_client.get("/dashboard/services")
     body = resp.text
     # Active-class marker on the Services nav item
     assert 'kpi-sidebar__item--active' in body
-    # And the link back to /dashboard/v2 is present (sidebar Triage feed link)
-    assert 'href="/dashboard/v2"' in body
+    # And the link back to /dashboard is present (sidebar Triage feed link)
+    assert 'href="/dashboard"' in body
 
 
 @pytest.mark.asyncio
 async def test_services_route_title_marker(services_app_client):
-    resp = await services_app_client.get("/dashboard/v2/services")
+    resp = await services_app_client.get("/dashboard/services")
     body = resp.text
     assert "Services" in body
     assert "per-service summary" in body

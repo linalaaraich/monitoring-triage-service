@@ -21,14 +21,14 @@ const NAV_GROUPS = [
     label: "Insights",
     items: [
       { id: "stats",     label: "Stats",          icon: "stats" },
-      { id: "services",  label: "Services",       icon: "services", href: "/dashboard/v2/services" },
-      { id: "kpi",       label: "KPI · Evaluation", icon: "kpi", href: "/dashboard/v2/kpi" },
+      { id: "services",  label: "Services",       icon: "services", href: "/dashboard/services" },
+      { id: "kpi",       label: "KPI · Evaluation", icon: "kpi", href: "/dashboard/kpi" },
     ],
   },
   {
     label: "Configuration",
     items: [
-      { id: "alerts-cfg", label: "Alerts",         icon: "alerts", href: "/dashboard/v2/alerts" },
+      { id: "alerts-cfg", label: "Alerts",         icon: "alerts", href: "/dashboard/alerts" },
       { id: "drain3",     label: "Drain3 engine",  icon: "drain3" },
       { id: "integrations", label: "Integrations", icon: "integrations" },
     ],
@@ -55,7 +55,7 @@ function NavIcon({ name, size = 16 }) {
 
 function NavItem({ item, active, collapsed }) {
   // When the nav item carries an `href`, render an <a> so the operator can
-  // click into the linked v2 surface (e.g. KPI · Evaluation → /dashboard/v2/kpi).
+  // click into the linked v2 surface (e.g. KPI · Evaluation → /dashboard/kpi).
   // Items without href keep the existing div-only behaviour — no regression
   // on the triage/incidents/anomalies items that don't have their own routes yet.
   const Wrapper = item.href ? "a" : "div";

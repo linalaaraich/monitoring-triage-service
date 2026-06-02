@@ -1,4 +1,4 @@
-"""Tests for /dashboard/v2/alerts — read-only per-alertname summary.
+"""Tests for /dashboard/alerts — read-only per-alertname summary.
 
 Covers:
   * RCAStore.get_alert_summary() returns the expected shape on an empty
@@ -253,12 +253,12 @@ async def test_get_alert_summary_excludes_rows_outside_window(empty_store):
 
 
 # ---------------------------------------------------------------------------
-# /dashboard/v2/alerts — route integration tests
+# /dashboard/alerts — route integration tests
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_alerts_route_returns_200_with_body(alerts_app_client):
-    resp = await alerts_app_client.get("/dashboard/v2/alerts")
+    resp = await alerts_app_client.get("/dashboard/alerts")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     assert len(resp.text) > 500
@@ -266,7 +266,7 @@ async def test_alerts_route_returns_200_with_body(alerts_app_client):
 
 @pytest.mark.asyncio
 async def test_alerts_route_renders_each_alert_name(alerts_app_client):
-    resp = await alerts_app_client.get("/dashboard/v2/alerts")
+    resp = await alerts_app_client.get("/dashboard/alerts")
     body = resp.text
     for name in ("HighP95Latency", "MediumCpuUsage", "QuietAlert"):
         assert name in body, f"alert name {name!r} missing from rendered page"
@@ -277,7 +277,7 @@ async def test_alerts_route_noisy_row_class_applies(alerts_app_client):
     """The row for HighP95Latency (ratio 0.75 > 0.5) must carry the
     --noisy modifier; the QuietAlert row must not.
     """
-    resp = await alerts_app_client.get("/dashboard/v2/alerts")
+    resp = await alerts_app_client.get("/dashboard/alerts")
     body = resp.text
     assert "alerts-row--noisy" in body
 
@@ -301,7 +301,7 @@ async def test_alerts_route_noisy_row_class_applies(alerts_app_client):
 @pytest.mark.asyncio
 async def test_alerts_route_explainer_block_present(alerts_app_client):
     """The explainer block must surface the Ansible tuning pointer."""
-    resp = await alerts_app_client.get("/dashboard/v2/alerts")
+    resp = await alerts_app_client.get("/dashboard/alerts")
     body = resp.text
     # Spec: must reference the Ansible template path + the recurrence_gate
     # annotation format + the re-provision command + the db79ee7 reference.
@@ -319,7 +319,7 @@ async def test_alerts_route_honest_annotation_reporting(alerts_app_client):
     'annotation not persisted — check Grafana rule' pointer rather
     than fabricating the gate parameters.
     """
-    resp = await alerts_app_client.get("/dashboard/v2/alerts")
+    resp = await alerts_app_client.get("/dashboard/alerts")
     body = resp.text
     # MediumCpuUsage was gated → the page should carry the honest pointer.
     assert "annotation not persisted" in body
@@ -329,7 +329,7 @@ async def test_alerts_route_honest_annotation_reporting(alerts_app_client):
 @pytest.mark.asyncio
 async def test_alerts_route_empty_db_still_200s(empty_app_client):
     """Regression — empty DB must not 500 the route."""
-    resp = await empty_app_client.get("/dashboard/v2/alerts")
+    resp = await empty_app_client.get("/dashboard/alerts")
     assert resp.status_code == 200
     # And the empty-affordance text per the spec.
     assert "no alerts seen yet" in resp.text
@@ -339,7 +339,7 @@ async def test_alerts_route_empty_db_still_200s(empty_app_client):
 
 @pytest.mark.asyncio
 async def test_alerts_route_has_auto_refresh_meta(alerts_app_client):
-    resp = await alerts_app_client.get("/dashboard/v2/alerts")
+    resp = await alerts_app_client.get("/dashboard/alerts")
     body = resp.text
     assert 'http-equiv="refresh"' in body
     assert 'content="60"' in body
@@ -348,14 +348,14 @@ async def test_alerts_route_has_auto_refresh_meta(alerts_app_client):
 @pytest.mark.asyncio
 async def test_alerts_route_sidebar_marks_alerts_active(alerts_app_client):
     """The sidebar's Alerts item must render as the active item on this page."""
-    resp = await alerts_app_client.get("/dashboard/v2/alerts")
+    resp = await alerts_app_client.get("/dashboard/alerts")
     body = resp.text
     # Server-rendered sidebar carries the --active modifier on the active item.
-    assert 'kpi-sidebar__item--active" href="/dashboard/v2/alerts"' in body
+    assert 'kpi-sidebar__item--active" href="/dashboard/alerts"' in body
 
 
 @pytest.mark.asyncio
 async def test_alerts_route_renders_email_ratio_pct(alerts_app_client):
     """HighP95Latency at 75% must render its ratio cell."""
-    resp = await alerts_app_client.get("/dashboard/v2/alerts")
+    resp = await alerts_app_client.get("/dashboard/alerts")
     assert "75%" in resp.text

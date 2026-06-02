@@ -118,7 +118,7 @@ def test_body_dashboard_url_uses_short_id():
     n = EmailNotifier()
     body = n._build_v2_escalation_body(_alert(), _decision(), _record(), 0, None, [])
     # short_id is first 8 chars of the UUID "ad424303-0553-47e9-..."
-    assert "/dashboard/v2/alert/ad424303" in body
+    assert "/dashboard/alert/ad424303" in body
 
 
 def test_body_renders_plain_alert_name():

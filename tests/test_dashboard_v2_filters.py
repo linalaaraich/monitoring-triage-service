@@ -1,4 +1,4 @@
-"""Sprint 4 §14 W2 Wed — URL filter persistence on /dashboard/v2.
+"""Sprint 4 §14 W2 Wed — URL filter persistence on /dashboard.
 
 Acceptance from sprint4-status.html row "URL filter persistence + range
 filter wire-up":
@@ -253,13 +253,13 @@ async def test_store_count_decisions_honors_new_filters(filter_store):
 
 
 # ---------------------------------------------------------------------------
-# /dashboard/v2 route — integration tests
+# /dashboard route — integration tests
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_v2_empty_query_renders_default(filter_client):
     """No query params → 200 + filter bar renders with defaults selected."""
-    resp = await filter_client.get("/dashboard/v2")
+    resp = await filter_client.get("/dashboard")
     assert resp.status_code == 200
     body = resp.text
     # Filter bar present
@@ -273,7 +273,7 @@ async def test_v2_empty_query_renders_default(filter_client):
 @pytest.mark.asyncio
 async def test_v2_verdict_filter_restricts_payload(filter_client):
     """?verdict=escalate → the CIRES_ALERTS payload contains only escalate rows."""
-    resp = await filter_client.get("/dashboard/v2?verdict=escalate&range=15d")
+    resp = await filter_client.get("/dashboard?verdict=escalate&range=15d")
     assert resp.status_code == 200
     body = resp.text
     # The escalate option is selected in the verdict <select>
@@ -288,7 +288,7 @@ async def test_v2_verdict_filter_restricts_payload(filter_client):
 @pytest.mark.asyncio
 async def test_v2_range_24h_excludes_older_rows(filter_client):
     """?range=24h → the 3d / 12d fixture rows are not in the payload."""
-    resp = await filter_client.get("/dashboard/v2?range=24h")
+    resp = await filter_client.get("/dashboard?range=24h")
     assert resp.status_code == 200
     body = resp.text
     assert '<option value="24h" selected>' in body
@@ -304,7 +304,7 @@ async def test_v2_range_24h_excludes_older_rows(filter_client):
 async def test_v2_multiple_filters_compose(filter_client):
     """?verdict=escalate&severity=critical&family=cpu&range=24h → 1 row."""
     resp = await filter_client.get(
-        "/dashboard/v2?verdict=escalate&severity=critical&family=cpu&range=24h"
+        "/dashboard?verdict=escalate&severity=critical&family=cpu&range=24h"
     )
     assert resp.status_code == 200
     body = resp.text
@@ -319,7 +319,7 @@ async def test_v2_multiple_filters_compose(filter_client):
 async def test_v2_bad_values_dont_500(filter_client):
     """Crafted URL with junk values → 200, fall back to default render."""
     resp = await filter_client.get(
-        "/dashboard/v2?verdict=DROP&severity='OR'1=1&family=../../etc/passwd&range=999d"
+        "/dashboard?verdict=DROP&severity='OR'1=1&family=../../etc/passwd&range=999d"
     )
     assert resp.status_code == 200
     body = resp.text
@@ -336,7 +336,7 @@ async def test_v2_bad_values_dont_500(filter_client):
 async def test_v2_html_reflects_active_filter_selections(filter_client):
     """The selected <option> markers in the rendered HTML must match the URL."""
     resp = await filter_client.get(
-        "/dashboard/v2?verdict=dismiss&severity=warning&family=memory&range=7d"
+        "/dashboard?verdict=dismiss&severity=warning&family=memory&range=7d"
     )
     body = resp.text
     assert '<option value="dismiss" selected>' in body
@@ -348,7 +348,7 @@ async def test_v2_html_reflects_active_filter_selections(filter_client):
 @pytest.mark.asyncio
 async def test_v2_search_value_round_trips(filter_client):
     """?q=... renders the value back in the search input (XSS-escaped)."""
-    resp = await filter_client.get("/dashboard/v2?q=spring-boot")
+    resp = await filter_client.get("/dashboard?q=spring-boot")
     body = resp.text
     assert 'value="spring-boot"' in body
 
@@ -357,7 +357,7 @@ async def test_v2_search_value_round_trips(filter_client):
 async def test_v2_search_value_escapes_html(filter_client):
     """Crafted search value must be HTML-escaped — no script injection."""
     resp = await filter_client.get(
-        "/dashboard/v2?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+        "/dashboard?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
     )
     body = resp.text
     # The raw < / > must NOT survive untouched inside the value="..."
@@ -371,7 +371,7 @@ async def test_v2_url_persistence_refresh_identical_render(filter_client):
     """Calling the same URL twice must produce a structurally identical
     filter bar — the acceptance criterion's 'refresh page → filters
     survive' check."""
-    url = "/dashboard/v2?verdict=escalate&severity=critical&family=cpu&range=24h"
+    url = "/dashboard?verdict=escalate&severity=critical&family=cpu&range=24h"
     r1 = await filter_client.get(url)
     r2 = await filter_client.get(url)
     assert r1.status_code == r2.status_code == 200
@@ -388,25 +388,25 @@ async def test_v2_url_persistence_refresh_identical_render(filter_client):
 async def test_v2_filter_form_uses_method_get(filter_client):
     """The form must use method=get so filters land in the URL — the
     bookmark/share affordance is the whole point of this story."""
-    resp = await filter_client.get("/dashboard/v2")
+    resp = await filter_client.get("/dashboard")
     body = resp.text
     assert 'method="get"' in body
-    assert 'action="/dashboard/v2"' in body
+    assert 'action="/dashboard"' in body
 
 
 @pytest.mark.asyncio
 async def test_v2_filter_form_has_clear_affordance(filter_client):
     """The 'clear all' link routes back to the unfiltered page."""
-    resp = await filter_client.get("/dashboard/v2?verdict=escalate")
+    resp = await filter_client.get("/dashboard?verdict=escalate")
     body = resp.text
-    # Anchor that resets to /dashboard/v2 (no query)
-    assert 'href="/dashboard/v2"' in body
+    # Anchor that resets to /dashboard (no query)
+    assert 'href="/dashboard"' in body
 
 
 @pytest.mark.asyncio
 async def test_v2_filters_payload_exposed_to_js(filter_client):
     """window.CIRES_FILTERS is the React layer's read of the active set."""
-    resp = await filter_client.get("/dashboard/v2?verdict=escalate&range=24h")
+    resp = await filter_client.get("/dashboard?verdict=escalate&range=24h")
     body = resp.text
     assert "window.CIRES_FILTERS" in body
     assert '"verdict": "escalate"' in body

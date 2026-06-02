@@ -1,4 +1,4 @@
-"""Phase 3.A.KPI — tests for /dashboard/v2/kpi and app.kpi_queries.
+"""Phase 3.A.KPI — tests for /dashboard/kpi and app.kpi_queries.
 
 Covers:
   * compute_kpis() returns all 8 expected keys with sensible empty-DB defaults
@@ -275,12 +275,12 @@ async def test_compute_kpis_none_store_returns_empty_kpis():
 
 
 # ---------------------------------------------------------------------------
-# /dashboard/v2/kpi — route integration tests
+# /dashboard/kpi — route integration tests
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_kpi_route_returns_200_with_body(kpi_app_client):
-    resp = await kpi_app_client.get("/dashboard/v2/kpi")
+    resp = await kpi_app_client.get("/dashboard/kpi")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     assert len(resp.text) > 500
@@ -288,7 +288,7 @@ async def test_kpi_route_returns_200_with_body(kpi_app_client):
 
 @pytest.mark.asyncio
 async def test_kpi_route_renders_all_six_live_kpi_titles(kpi_app_client):
-    resp = await kpi_app_client.get("/dashboard/v2/kpi")
+    resp = await kpi_app_client.get("/dashboard/kpi")
     body = resp.text
     for title in LIVE_KPI_TITLES:
         assert title in body, f"KPI title {title!r} missing from rendered page"
@@ -299,7 +299,7 @@ async def test_kpi_route_renders_digits_in_each_card(kpi_app_client):
     """Every card must render at least one digit somewhere — proves the
     KPI values aren't literal placeholders like '—'.
     """
-    resp = await kpi_app_client.get("/dashboard/v2/kpi")
+    resp = await kpi_app_client.get("/dashboard/kpi")
     body = resp.text
     # Split the body on the card class so we can assert per-card.
     parts = body.split('class="kpi-card kpi-card--')
@@ -315,7 +315,7 @@ async def test_kpi_route_renders_digits_in_each_card(kpi_app_client):
 
 @pytest.mark.asyncio
 async def test_kpi_route_has_auto_refresh_meta(kpi_app_client):
-    resp = await kpi_app_client.get("/dashboard/v2/kpi")
+    resp = await kpi_app_client.get("/dashboard/kpi")
     body = resp.text
     # 60s refresh — protects SQLite from query churn per spec.
     assert 'http-equiv="refresh"' in body
@@ -324,15 +324,15 @@ async def test_kpi_route_has_auto_refresh_meta(kpi_app_client):
 
 @pytest.mark.asyncio
 async def test_kpi_route_includes_sidebar_link_back_to_v2(kpi_app_client):
-    """Sidebar surfaces a clickable link back to /dashboard/v2."""
-    resp = await kpi_app_client.get("/dashboard/v2/kpi")
-    assert 'href="/dashboard/v2"' in resp.text
+    """Sidebar surfaces a clickable link back to /dashboard."""
+    resp = await kpi_app_client.get("/dashboard/kpi")
+    assert 'href="/dashboard"' in resp.text
 
 
 @pytest.mark.asyncio
 async def test_kpi_route_empty_db_still_200s(empty_app_client):
     """Regression — empty DB must not 500 the route."""
-    resp = await empty_app_client.get("/dashboard/v2/kpi")
+    resp = await empty_app_client.get("/dashboard/kpi")
     assert resp.status_code == 200
     # And the "0 / day" emails formatting per the spec edge case.
     assert "0 / day" in resp.text
@@ -347,14 +347,14 @@ async def test_kpi_route_renders_emails_per_day_value_3(kpi_app_client):
     rendered card so we know the live-data pipeline actually drives the
     template, not a hardcoded constant.
     """
-    resp = await kpi_app_client.get("/dashboard/v2/kpi")
+    resp = await kpi_app_client.get("/dashboard/kpi")
     assert "3 / day" in resp.text
 
 
 @pytest.mark.asyncio
 async def test_kpi_route_renders_archetype_top_alerts(kpi_app_client):
     """Sub-line under archetype coverage must enumerate top alert names."""
-    resp = await kpi_app_client.get("/dashboard/v2/kpi")
+    resp = await kpi_app_client.get("/dashboard/kpi")
     # HighP95Latency appears twice in the populated fixture, so it should
     # rank #1 by frequency in the top-5 list.
     assert "HighP95Latency" in resp.text
@@ -363,7 +363,7 @@ async def test_kpi_route_renders_archetype_top_alerts(kpi_app_client):
 @pytest.mark.asyncio
 async def test_kpi_route_title_marker(kpi_app_client):
     """The page title and header must announce the KPI surface."""
-    resp = await kpi_app_client.get("/dashboard/v2/kpi")
+    resp = await kpi_app_client.get("/dashboard/kpi")
     body = resp.text
     # Page <title>
     assert "KPI" in body

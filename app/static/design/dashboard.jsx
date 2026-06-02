@@ -259,14 +259,14 @@ function ExpandedDetail({ a }) {
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <div className="section-label">Quick actions</div>
-        <a className="btn primary lift" href={`/dashboard/v2/alert/${a.id}`} style={{ justifyContent: "space-between", textDecoration: "none" }}>
+        <a className="btn primary lift" href={`/dashboard/alert/${a.id}`} style={{ justifyContent: "space-between", textDecoration: "none" }}>
           <span>View full detail</span><Icon.chevR/>
         </a>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           <a className="btn lift" style={{ justifyContent: "space-between" }}>Grafana <Icon.ext/></a>
           <a className="btn lift" style={{ justifyContent: "space-between" }}>Loki <Icon.ext/></a>
           <a className="btn lift" style={{ justifyContent: "space-between" }}>Jaeger <Icon.ext/></a>
-          <a className="btn lift" href={`/dashboard/v2/alert/${a.id}/rate`} style={{ justifyContent: "space-between", textDecoration: "none" }}>Rate alert <Icon.ext/></a>
+          <a className="btn lift" href={`/dashboard/alert/${a.id}/rate`} style={{ justifyContent: "space-between", textDecoration: "none" }}>Rate alert <Icon.ext/></a>
         </div>
         {a.fireCount > 1 && <div style={{
           fontSize: 12, color: "var(--muted)", marginTop: 4,

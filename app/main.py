@@ -1623,168 +1623,6 @@ def _render_detail_panel(r: dict) -> str:
     )
 
 
-@app.get("/dashboard")
-async def dashboard_root_redirect():
-    """Production cutover 2026-06-01 — v2 is now the production surface.
-    The legacy v1 view stays reachable at /dashboard/v1 for anyone with
-    deep bookmarks; this root path 302s to v2. Query strings (if any)
-    are not preserved — v2's filter shape is different from v1's
-    pagination shape, so there's no meaningful translation."""
-    return RedirectResponse(url="/dashboard/v2", status_code=302)
-
-
-@app.get("/dashboard/v1", response_class=HTMLResponse)
-async def dashboard_v1(
-    page: int = Query(1, ge=1),
-    size: int = Query(50, ge=10, le=200),
-    since_days: int = Query(15, ge=1, le=365),
-):
-    offset = (page - 1) * size
-    rows = await _store.get_decisions(limit=size, offset=offset, since_days=since_days)
-    total_in_window = await _store.count_decisions(since_days=since_days)
-    last_page = max(1, (total_in_window + size - 1) // size)
-    drain_stats = _drain.get_stats() if _drain is not None else {}
-
-    # Stat-card counters reflect the current page slice; the "Total decisions"
-    # card is replaced with the window total so operators can see how many
-    # alerts exist in the window even when the current page is small.
-    escalated = sum(1 for r in rows if r.get('action_taken') == 'emailed')
-    dismissed = sum(1 for r in rows if r.get('action_taken') == 'suppressed')
-    timed_out = sum(1 for r in rows if r.get('action_taken') == 'emailed_raw')
-    suppressed_pre = sum(1 for r in rows if (r.get('triage_decision') or '').lower() == 'triage_suppressed')
-    total = total_in_window
-
-    body_rows = ""
-    for r in rows:
-        raw_id = r.get('id') or ''
-        local_ts = _to_local_time(r.get('timestamp'))
-        did = _html.escape(raw_id)
-        ts = _html.escape(local_ts)
-        alert_name = r.get('alert_name') or '—'
-        service = r.get('affected_service') or '—'
-        severity = (r.get('severity') or '').lower()
-        action = r.get('action_taken') or '—'
-        duration = int(r.get('investigation_duration_ms') or 0)
-        verdict = r.get('llm_verdict') or ''
-
-        # Client-side filter input — see _build_dashboard_search_blob().
-        search_blob = _build_dashboard_search_blob(r, local_ts)
-
-        body_rows += (
-            f'<tr class="summary" data-id="{did}" data-search="{_html.escape(search_blob, quote=True)}" onclick="toggleDetail(\'{did}\')">'
-            f'  <td class="chev"><span class="chev-icon"></span></td>'
-            f'  <td class="mono">{ts}</td>'
-            f'  <td>{_html.escape(alert_name)}</td>'
-            f'  <td>{_source_tag(r.get("alert_source") or "")}</td>'
-            f'  <td>{_html.escape(service)}{_deep_chips(service, alert_name)}</td>'
-            f'  <td><span class="sev sev-{_html.escape(severity)}">{_html.escape(severity or "—")}</span></td>'
-            f'  <td>{_verdict_pill(verdict, action)}{_quality_pill(r.get("rca_quality"))}</td>'
-            f'  <td class="action action-{_html.escape(action)}" title="{_html.escape(_humanize_action(action)[1])}">{_html.escape(_humanize_action(action)[0])}</td>'
-            f'  <td class="mono">{_fmt_duration_ms(duration)}</td>'
-            f'</tr>'
-            f'<tr class="detail" id="detail-{did}"><td colspan="9">{_render_detail_panel(r)}</td></tr>'
-        )
-
-    if not body_rows:
-        body_rows = '<tr class="empty"><td colspan="9">No decisions yet. Fire an alert and watch this space.</td></tr>'
-
-    def _page_link(p: int, label: str, disabled: bool = False) -> str:
-        if disabled:
-            return f'<span class="page-btn disabled">{label}</span>'
-        return f'<a class="page-btn" href="/dashboard?page={p}&amp;size={size}&amp;since_days={since_days}">{label}</a>'
-
-    def _window_link(d: int, label: str) -> str:
-        active = ' active' if d == since_days else ''
-        return f'<a class="window-btn{active}" href="/dashboard?page=1&amp;size={size}&amp;since_days={d}">{label}</a>'
-
-    pagination_html = (
-        '<div class="pagination">'
-        '  <div class="pagination-info">'
-        f'    Page <strong>{page}</strong> of <strong>{last_page}</strong>'
-        f'    &middot; {total_in_window} alert{"s" if total_in_window != 1 else ""} in last '
-        f'    {since_days} day{"s" if since_days != 1 else ""}'
-        '  </div>'
-        '  <div class="pagination-controls">'
-        f'    {_page_link(page - 1, "&larr; Prev", disabled=(page <= 1))}'
-        f'    {_page_link(page + 1, "Next &rarr;", disabled=(page >= last_page))}'
-        '  </div>'
-        '  <div class="pagination-window">'
-        '    Show last:&nbsp;'
-        f'    {_window_link(7, "7 days")}'
-        f'    {_window_link(15, "15 days")}'
-        f'    {_window_link(30, "30 days")}'
-        f'    {_window_link(365, "all")}'
-        '  </div>'
-        '</div>'
-    )
-
-    return (
-        f'<!DOCTYPE html><html lang="en"><head>'
-        f'<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
-        f'<title>RCA Triage platform · Decisions</title>'
-        f'<link rel="icon" type="image/svg+xml" href="/favicon.svg">'
-        # Apply the persisted theme class to <html> SYNCHRONOUSLY, before
-        # any rendering. The auto-refresh does a full page reload every
-        # 30s; without this the page paints with the dark default first
-        # and the JS-applied .light class arrives one frame later, which
-        # the operator sees as a flash on every reload. Putting this at
-        # the very top of <head> means the class is on documentElement
-        # before the CSS computes against it.
-        f'<script>(function(){{try{{if(localStorage.getItem("triage-theme")==="light")document.documentElement.classList.add("light");}}catch(e){{}}}})();</script>'
-        f'<link rel="preconnect" href="https://fonts.googleapis.com">'
-        f'<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-        f'<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">'
-        f'<style>{_DASHBOARD_CSS}</style>'
-        f'</head><body>'
-        f'<div class="app-shell">'
-        f'{_render_topbar(active="decisions")}'
-        f'  <div class="app-body">'
-        f'{_render_leftnav(active="decisions")}'
-        f'    <main class="main-area">'
-        f'      <div class="container">'
-        f'        <div class="header">'
-        f'          <div class="eyebrow">AI root-cause triage</div>'
-        f'          <h1>Decisions <span class="accent">history</span></h1>'
-        f'          <div class="subtitle">Recent verdicts produced by the triage pipeline. Click any row to review the full root-cause analysis.</div>'
-        f'        </div>'
-        f'        <div class="stats">'
-        f'          <div class="stat t-total"><div class="num">{total}</div><div class="lbl">Total decisions</div></div>'
-        f'          <div class="stat t-esc" title="Verdict was ESCALATE and an email was sent"><div class="num">{escalated}</div><div class="lbl">Notified</div></div>'
-        f'          <div class="stat t-dismiss" title="Verdict was DISMISS — alert judged not actionable"><div class="num">{dismissed}</div><div class="lbl">Dismissed</div></div>'
-        f'          <div class="stat t-suppress" title="Pre-LLM dedup — same fingerprint already seen in window"><div class="num">{suppressed_pre}</div><div class="lbl">Deduped</div></div>'
-        f'          <div class="stat t-timeout" title="Pipeline exceeded its budget — raw alert forwarded with no LLM verdict"><div class="num">{timed_out}</div><div class="lbl">Timed out</div></div>'
-        f'        </div>'
-        f'        {_render_drain3_panel(drain_stats)}'
-        f'        <div class="toolbar">'
-        f'          <input id="filter" type="text" placeholder="Filter by alert name, service, verdict, or RCA text" autocomplete="off" />'
-        f'          <span class="hint" id="match-count"></span>'
-        f'        </div>'
-        f'        <div class="table-card">'
-        f'          <table>'
-        f'            <thead><tr>'
-        f'              <th></th>'
-        f'              <th title="Wall-clock time the decision was persisted, in Casablanca local zone (GMT+1)">Time (local)</th>'
-        f'              <th title="Alert rule name as configured in Grafana">Alert</th>'
-        f'              <th title="Where the alert came from: grafana=metric rule, drain3=log-template anomaly">Source</th>'
-        f'              <th title="The service the alert is about">Service</th>'
-        f'              <th title="Alert severity: critical / warning / info">Severity</th>'
-        f'              <th title="LLM verdict (escalate / dismiss / inconclusive) + RCA quality pill (fits / thin / review)">Verdict</th>'
-        f'              <th title="What the pipeline did downstream of the verdict (Notified / Suppressed / Dropped / Notified-no-LLM)">Action</th>'
-        f'              <th title="End-to-end pipeline duration including MCP context-gathering + LLM inference">Duration</th>'
-        f'            </tr></thead>'
-        f'            <tbody>{body_rows}</tbody>'
-        f'          </table>'
-        f'        </div>'
-        f'        {pagination_html}'
-        f'      </div>'
-        f'    </main>'
-        f'  </div>'
-        f'</div>'
-        f'<script>{_DASHBOARD_JS}</script>'
-        f'</body></html>'
-    )
-
-
 _GUIDE_CSS = """
   /* Guide page reuses the same Figma palette + TopBar/LeftNav chrome as
      /dashboard. Tokens duplicated rather than imported because each page
@@ -2381,7 +2219,7 @@ async def dashboard_guide():
 
 
 # ────────────────────────────────────────────────────────────────────
-# /dashboard/v2 — Claude Design output (2026-05-22 supervisor-feedback redesign)
+# /dashboard — Claude Design output (2026-05-22 supervisor-feedback redesign)
 # ────────────────────────────────────────────────────────────────────
 # This route serves the v2 operator dashboard rendered via the React mockup
 # from Claude Design (see solution-brief.html §12 + design-prompt.html).
@@ -2670,7 +2508,7 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
 
 
 # ──────────────────────────────────────────────────────────────────────
-# /dashboard/v2 — URL filter persistence (Sprint 4 §14 W2 Wed, 2026-05-27)
+# /dashboard — URL filter persistence (Sprint 4 §14 W2 Wed, 2026-05-27)
 # ──────────────────────────────────────────────────────────────────────
 # The v2 dashboard's filters (verdict / severity / family / range / search)
 # now round-trip through the query string so a refresh, a back-button, or
@@ -2718,7 +2556,7 @@ def _parse_v2_filters(
     range_: str | None,
     q: str | None,
 ) -> dict:
-    """Validate & normalize the /dashboard/v2 URL filter set.
+    """Validate & normalize the /dashboard URL filter set.
 
     Returns a dict with always-present keys:
       - verdict, severity, family, range, q (each may be None / "")
@@ -2799,7 +2637,7 @@ def _render_v2_filter_bar(filters: dict, page: int, size: int) -> str:
     )
     q_val = _h.escape(filters["q"] or "", quote=True)
     return f"""
-<form class="v2-filter-bar" method="get" action="/dashboard/v2" data-v2-filter-bar>
+<form class="v2-filter-bar" method="get" action="/dashboard" data-v2-filter-bar>
   <label class="v2-filter-bar__lbl">Verdict
     <select name="verdict" onchange="this.form.submit()">
       <option value=""{_sel(None, filters["verdict"])}>any</option>
@@ -2828,13 +2666,13 @@ def _render_v2_filter_bar(filters: dict, page: int, size: int) -> str:
   </label>
   <input type="hidden" name="size" value="{int(size)}"/>
   <noscript><button type="submit" class="v2-filter-bar__apply">Apply</button></noscript>
-  <a class="v2-filter-bar__clear" href="/dashboard/v2" title="Clear all filters">clear</a>
+  <a class="v2-filter-bar__clear" href="/dashboard" title="Clear all filters">clear</a>
   <button type="button" class="v2-filter-bar__share" onclick="navigator.clipboard&amp;&amp;navigator.clipboard.writeText(location.href);this.textContent='copied!';setTimeout(()=>this.textContent='copy URL',1200)" title="Copy filtered URL to clipboard">copy URL</button>
 </form>
 """
 
 
-@app.get("/dashboard/v2", response_class=HTMLResponse)
+@app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_v2(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=10, le=200),
@@ -2870,7 +2708,7 @@ async def dashboard_v2(
     # fireCount=N + latest timestamp instead of N separate rows. Pull a wide
     # slab from /decisions (range-bounded, cap 500 rows for perf), group by
     # fingerprint, keep the LATEST row per group as the representative, then
-    # paginate the unique-fingerprint list. Detail page (/dashboard/v2/alert/
+    # paginate the unique-fingerprint list. Detail page (/dashboard/alert/
     # {short_id}) already shows the full fire history per fingerprint.
     #
     # Sprint 4 §14 W2 Wed: filters apply BEFORE the fingerprint collapse so
@@ -3115,7 +2953,7 @@ async def dashboard_v2(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# /dashboard/v2/kpi — Phase 3.A.KPI platform-health surface
+# /dashboard/kpi — Phase 3.A.KPI platform-health surface
 # ──────────────────────────────────────────────────────────────────────
 # Sprint 4 §14 Wed item (pulled forward to Mon 2026-05-25). The supervisor-
 # asked-for "platform health at a glance" page: six live KPIs computed from
@@ -3128,13 +2966,13 @@ async def dashboard_v2(
 # Refresh policy: meta http-equiv refresh at 60 s — protects SQLite from
 # query churn while still feeling "live enough" to an operator monitoring
 # the surface during incident response.
-@app.get("/dashboard/v2/kpi", response_class=HTMLResponse)
+@app.get("/dashboard/kpi", response_class=HTMLResponse)
 async def dashboard_v2_kpi():
     """Platform-health KPI surface — 6 live + 2 static numbers in a 2x4 grid.
 
     Reads from the existing RCAStore connection; no new data paths.
     Renders server-side HTML matching the v2 design tokens (tokens.css)
-    so the look-and-feel is identical to /dashboard/v2 without pulling in
+    so the look-and-feel is identical to /dashboard without pulling in
     the React layer the feed needs.
     """
     from app.kpi_queries import compute_kpis
@@ -3183,7 +3021,7 @@ async def dashboard_v2_kpi():
 
     # Sidebar mirrors the v2 React sidebar's NAV_GROUPS shape — same labels,
     # same icon names, but rendered as anchors so an operator can click
-    # straight back to /dashboard/v2 from the KPI surface.
+    # straight back to /dashboard from the KPI surface.
     sidebar_html = """
   <aside class="kpi-sidebar">
     <div class="kpi-sidebar__brand">
@@ -3195,15 +3033,15 @@ async def dashboard_v2_kpi():
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Incident response</div>
-      <a class="kpi-sidebar__item" href="/dashboard/v2">Triage feed</a>
-      <a class="kpi-sidebar__item" href="/dashboard/v2">Incidents</a>
-      <a class="kpi-sidebar__item" href="/dashboard/v2">Anomalies</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Incidents</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Anomalies</a>
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Insights</div>
-      <a class="kpi-sidebar__item" href="/dashboard/v2">Stats</a>
-      <a class="kpi-sidebar__item" href="/dashboard/v2">Services</a>
-      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/v2/kpi">KPI &middot; Evaluation</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Stats</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Services</a>
+      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/kpi">KPI &middot; Evaluation</a>
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Configuration</div>
@@ -3276,7 +3114,7 @@ async def dashboard_v2_kpi():
     box-shadow: inset 2.5px 0 0 var(--accent-blue);
   }}
 
-  /* Top banner matches /dashboard/v2 — same v2-preview vibe */
+  /* Top banner matches /dashboard — same page-banner vibe */
   .kpi-banner {{
     background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
     border-bottom: 1px solid rgba(176,126,232,.35);
@@ -3372,7 +3210,7 @@ async def dashboard_v2_kpi():
   <strong>KPI &middot; Evaluation</strong>
   <span>Platform-health surface &mdash; reads from local rca_history + feedback tables.</span>
   <span style="flex: 1"></span>
-  <a href="/dashboard/v2">&larr; back to triage feed</a>
+  <a href="/dashboard">&larr; back to triage feed</a>
   <a href="/dashboard">existing /dashboard</a>
 </div>
 
@@ -3403,7 +3241,7 @@ async def dashboard_v2_kpi():
 
 
 # ──────────────────────────────────────────────────────────────────────
-# /dashboard/v2/services — per-service read-only summary
+# /dashboard/services — per-service read-only summary
 # ──────────────────────────────────────────────────────────────────────
 # Fills out a previously-dead sidebar item. One row per distinct
 # affected_service over the last 7 days, with the counts an operator
@@ -3411,12 +3249,12 @@ async def dashboard_v2_kpi():
 # decisions, breakdown by action_taken / llm_verdict / severity, last
 # fire timestamp, and the dominant alertname.
 #
-# Server-rendered HTML in the same chrome as /dashboard/v2/kpi
+# Server-rendered HTML in the same chrome as /dashboard/kpi
 # (sidebar twin, dark theme, 60s meta-refresh). Service names link
 # back to the filtered triage feed via the existing ?q= URL filter.
 # Read-only — no writes, no Grafana API, all data via RCAStore (which
 # is itself the canonical writer; the MCP-only invariant is preserved).
-@app.get("/dashboard/v2/services", response_class=HTMLResponse)
+@app.get("/dashboard/services", response_class=HTMLResponse)
 async def dashboard_v2_services():
     """Per-service rollup surface — one row per affected_service in the last 7d."""
     import urllib.parse as _urllib
@@ -3479,7 +3317,7 @@ async def dashboard_v2_services():
             top_alert = s["top_alertname"] or "—"
             row_html_parts.append(f"""
         <tr>
-          <td class="svc-cell-name"><a href="/dashboard/v2?q={q_param}">{_esc(svc)}</a></td>
+          <td class="svc-cell-name"><a href="/dashboard?q={q_param}">{_esc(svc)}</a></td>
           <td class="svc-cell-num">{s["total"]}</td>
           <td>{_fmt(actions)}</td>
           <td>{_fmt(verdicts)}</td>
@@ -3512,7 +3350,7 @@ async def dashboard_v2_services():
       <div class="svc-empty__sub">No decisions in the last 7 days carry an <code>affected_service</code> label. As alerts flow through the pipeline, this page will populate.</div>
     </div>"""
 
-    # Sidebar mirrors /dashboard/v2/kpi exactly so the chrome is consistent;
+    # Sidebar mirrors /dashboard/kpi exactly so the chrome is consistent;
     # the "Services" item is the active one here.
     sidebar_html = """
   <aside class="kpi-sidebar">
@@ -3525,15 +3363,15 @@ async def dashboard_v2_services():
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Incident response</div>
-      <a class="kpi-sidebar__item" href="/dashboard/v2">Triage feed</a>
-      <a class="kpi-sidebar__item" href="/dashboard/v2">Incidents</a>
-      <a class="kpi-sidebar__item" href="/dashboard/v2">Anomalies</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Incidents</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Anomalies</a>
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Insights</div>
-      <a class="kpi-sidebar__item" href="/dashboard/v2">Stats</a>
-      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/v2/services">Services</a>
-      <a class="kpi-sidebar__item" href="/dashboard/v2/kpi">KPI &middot; Evaluation</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Stats</a>
+      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/services">Services</a>
+      <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Configuration</div>
@@ -3564,7 +3402,7 @@ async def dashboard_v2_services():
   }}
   .kpi-shell {{ display: flex; min-height: 100vh; }}
 
-  /* Sidebar — twin of /dashboard/v2/kpi's sidebar so chrome stays uniform */
+  /* Sidebar — twin of /dashboard/kpi's sidebar so chrome stays uniform */
   .kpi-sidebar {{
     width: 224px; flex-shrink: 0;
     background: var(--bg-soft, #13151e);
@@ -3749,8 +3587,8 @@ async def dashboard_v2_services():
   <strong>Services</strong>
   <span>Per-service rollup &mdash; last 7 days, reads from local rca_history.</span>
   <span style="flex: 1"></span>
-  <a href="/dashboard/v2">&larr; back to triage feed</a>
-  <a href="/dashboard/v2/kpi">KPI overview</a>
+  <a href="/dashboard">&larr; back to triage feed</a>
+  <a href="/dashboard/kpi">KPI overview</a>
 </div>
 
 <div class="kpi-shell">
@@ -3782,7 +3620,7 @@ async def dashboard_v2_services():
 
 
 # ──────────────────────────────────────────────────────────────────────
-# /dashboard/v2/alerts — read-only per-alertname rollup
+# /dashboard/alerts — read-only per-alertname rollup
 # ──────────────────────────────────────────────────────────────────────
 # Wires up the previously-dead "Alerts" sidebar item in the Configuration
 # group. Read-only by design — the operator path for tuning is "edit the
@@ -3795,7 +3633,7 @@ async def dashboard_v2_services():
 # these are the alerts that mostly get through to the inbox, i.e. the
 # noise candidates. Reference is commit db79ee7 (raised MediumCpuUsage's
 # llm_dismiss 2→10 after this same ratio surfaced it as the top emailer).
-@app.get("/dashboard/v2/alerts", response_class=HTMLResponse)
+@app.get("/dashboard/alerts", response_class=HTMLResponse)
 async def dashboard_v2_alerts():
     """Per-alertname summary for the last 7 days.
 
@@ -3928,19 +3766,19 @@ async def dashboard_v2_alerts():
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Incident response</div>
-      <a class="kpi-sidebar__item" href="/dashboard/v2">Triage feed</a>
-      <a class="kpi-sidebar__item" href="/dashboard/v2">Incidents</a>
-      <a class="kpi-sidebar__item" href="/dashboard/v2">Anomalies</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Incidents</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Anomalies</a>
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Insights</div>
-      <a class="kpi-sidebar__item" href="/dashboard/v2">Stats</a>
-      <a class="kpi-sidebar__item" href="/dashboard/v2/services">Services</a>
-      <a class="kpi-sidebar__item" href="/dashboard/v2/kpi">KPI &middot; Evaluation</a>
+      <a class="kpi-sidebar__item" href="/dashboard">Stats</a>
+      <a class="kpi-sidebar__item" href="/dashboard/services">Services</a>
+      <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Configuration</div>
-      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/v2/alerts">Alerts</a>
+      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/alerts">Alerts</a>
       <a class="kpi-sidebar__item" href="/dashboard">Drain3 engine</a>
       <a class="kpi-sidebar__item" href="/dashboard">Integrations</a>
     </div>
@@ -4190,8 +4028,8 @@ async def dashboard_v2_alerts():
   <strong>Alerts &middot; per-rule summary</strong>
   <span>Read-only roll-up of the last 7 days from <code>rca_history</code>.</span>
   <span style="flex: 1"></span>
-  <a href="/dashboard/v2">&larr; back to triage feed</a>
-  <a href="/dashboard/v2/kpi">KPI &middot; Evaluation</a>
+  <a href="/dashboard">&larr; back to triage feed</a>
+  <a href="/dashboard/kpi">KPI &middot; Evaluation</a>
 </div>
 
 <div class="kpi-shell">
@@ -4258,9 +4096,9 @@ async def dashboard_v2_alerts():
 </html>""")
 
 
-@app.get("/dashboard/v2/alert/{short_id}", response_class=HTMLResponse)
+@app.get("/dashboard/alert/{short_id}", response_class=HTMLResponse)
 async def dashboard_v2_alert(short_id: str):
-    """Phase 2.1 — alert detail page click-through from /dashboard/v2.
+    """Phase 2.1 — alert detail page click-through from /dashboard.
 
     Resolves the 8-char short_id back to the full UUID (by scanning the
     most-recent 500 rows), transforms via the same _v2_transform_row
@@ -4409,7 +4247,7 @@ async def dashboard_v2_alert(short_id: str):
 <style>
   body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); }}
   #root {{ min-height: 100vh; }}
-  .v2-banner {{
+  .page-banner {{
     background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
     border-bottom: 1px solid rgba(176,126,232,.35);
     padding: 8px 22px;
@@ -4417,14 +4255,14 @@ async def dashboard_v2_alert(short_id: str):
     color: var(--text-soft, #c0c5d0);
     display: flex; align-items: center; gap: 14px;
   }}
-  .v2-banner strong {{ color: var(--accent-purple, #b07ee8); }}
-  .v2-banner a {{ color: var(--accent-cyan, #40d0d0); text-decoration: none; }}
-  .v2-banner a:hover {{ text-decoration: underline; }}
+  .page-banner strong {{ color: var(--accent-purple, #b07ee8); }}
+  .page-banner a {{ color: var(--accent-cyan, #40d0d0); text-decoration: none; }}
+  .page-banner a:hover {{ text-decoration: underline; }}
 </style>
 </head>
 <body>
 
-<div class="v2-banner">
+<div class="page-banner">
   <strong>detail page</strong>
   <span title="Click to copy full UUID"
         onclick="navigator.clipboard.writeText('{target.get('id') or ''}').then(()=>{{const e=this.querySelector('em');if(e){{e.textContent='✓ copied';setTimeout(()=>e.textContent='📋 copy full',1800)}}}});"
@@ -4433,8 +4271,7 @@ async def dashboard_v2_alert(short_id: str):
     <em style="font-size:11px; opacity:.65; margin-left:6px; font-style:normal;">📋 copy full</em>
   </span>
   <span style="flex: 1"></span>
-  <a href="/dashboard/v2">← back to feed</a>
-  <a href="/dashboard/v1">↩ legacy v1</a>
+  <a href="/dashboard">← back to feed</a>
 </div>
 
 <div id="root"></div>
@@ -4465,7 +4302,7 @@ async def dashboard_v2_alert(short_id: str):
 </html>""")
 
 
-@app.get("/dashboard/v2/alert/{short_id}/rate", response_class=HTMLResponse)
+@app.get("/dashboard/alert/{short_id}/rate", response_class=HTMLResponse)
 async def dashboard_v2_alert_rate(short_id: str):
     """SF-7 (2026-05-23) — operator feedback page for a specific alert.
 
@@ -4504,7 +4341,7 @@ async def dashboard_v2_alert_rate(short_id: str):
 <style>
   body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); }}
   #root {{ min-height: 100vh; }}
-  .v2-banner {{
+  .page-banner {{
     background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
     border-bottom: 1px solid rgba(176,126,232,.35);
     padding: 8px 22px;
@@ -4512,18 +4349,18 @@ async def dashboard_v2_alert_rate(short_id: str):
     color: var(--text-soft, #c0c5d0);
     display: flex; align-items: center; gap: 14px;
   }}
-  .v2-banner strong {{ color: var(--accent-purple, #b07ee8); }}
-  .v2-banner a {{ color: var(--accent-cyan, #40d0d0); text-decoration: none; }}
+  .page-banner strong {{ color: var(--accent-purple, #b07ee8); }}
+  .page-banner a {{ color: var(--accent-cyan, #40d0d0); text-decoration: none; }}
 </style>
 </head>
 <body>
 
-<div class="v2-banner">
-  <strong>v2 preview · rate alert</strong>
+<div class="page-banner">
+  <strong>rate alert</strong>
   <span>Alert <code style="color:var(--accent-yellow)">{short_id}</code></span>
   <span style="flex: 1"></span>
-  <a href="/dashboard/v2/alert/{short_id}">← back to alert detail</a>
-  <a href="/dashboard/v2">↩ feed</a>
+  <a href="/dashboard/alert/{short_id}">← back to alert detail</a>
+  <a href="/dashboard">↩ feed</a>
 </div>
 
 <div id="root"></div>
@@ -4566,6 +4403,26 @@ async def dashboard_v2_alert_rate(short_id: str):
 
 </body>
 </html>""")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# /dashboard/v2/{path} → /dashboard/{path} — backward-compat redirect
+# ──────────────────────────────────────────────────────────────────────
+# The 2026-06-01 production cutover made v2 THE dashboard; the /v2/*
+# URL prefix is gone. This permanent redirect catches any lingering
+# Tailscale bookmarks (or supervisor-demo links) so they don't 404 during
+# the transition. 301 (not 302) so browsers + reverse proxies cache the
+# new location. Two declarations so the bare /dashboard/v2 form skips
+# FastAPI's auto-trailing-slash 307 hop and lands on /dashboard directly.
+@app.get("/dashboard/v2")
+async def dashboard_v2_root_legacy_redirect():
+    return RedirectResponse(url="/dashboard", status_code=301)
+
+
+@app.get("/dashboard/v2/{path:path}")
+async def dashboard_v2_legacy_redirect(path: str):
+    target = f"/dashboard/{path}" if path else "/dashboard"
+    return RedirectResponse(url=target, status_code=301)
 
 
 @app.get("/metrics")
