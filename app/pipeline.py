@@ -950,6 +950,29 @@ class TriagePipeline:
                 (decision.suggested_actions or [])[:3],
             )
 
+        # 2026-06-02 human-first reason refactor — persist `rca_report` as a
+        # JSON envelope so the dashboard / email renderers can pull
+        # `human_cause` (plain English) without parsing PromQL out of
+        # rca prose. The envelope is decoded in `_v2_transform_row` and
+        # `derive_human_cause`; legacy rows (raw RCA text, no `{` prefix)
+        # still render via the prose_helpers fallback. No DB migration —
+        # the column type stays TEXT.
+        from app.prose_helpers import split_human_cause_and_evidence
+        _human_cause = (getattr(decision, "human_cause", "") or "").strip()
+        if not _human_cause and decision.rca:
+            # Derive a plain-English cause from the RCA prose. This catches
+            # fallback paths (LLM unreachable, parse retry path) where the
+            # new field wasn't populated, and any small-model retries that
+            # silently dropped the field.
+            derived, _extra_ev = split_human_cause_and_evidence(decision.rca)
+            if derived:
+                _human_cause = derived
+        _rca_envelope = _json.dumps({
+            "human_cause": _human_cause,
+            "rca": decision.rca or "",
+            "schema": "v2",
+        })
+
         record = RCARecord(
             alert_source=source,
             alert_name=alert.alertname,
@@ -959,7 +982,7 @@ class TriagePipeline:
             triage_decision="override_forced_escalate" if forced_by_override else "investigate",
             llm_verdict=decision.decision.value.lower(),
             llm_confidence=f"{decision.confidence:.2f}" if decision.confidence is not None else None,
-            rca_report=decision.rca,
+            rca_report=_rca_envelope,
             llm_reasoning=decision.reason,
             action_taken=(
                 "shelved" if is_shelved_in_disguise

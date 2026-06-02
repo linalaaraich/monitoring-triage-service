@@ -24,6 +24,11 @@
 #                     evidence diverges)
 #   confidence_band — typical confidence range as guidance
 #   one_line        — one-sentence RCA gist; cheap-to-include version
+#   human_cause     — added 2026-06-02: single plain-English sentence
+#                     stating WHAT is broken (no PromQL, no formulas).
+#                     This is what the email banner + dashboard "why" cell
+#                     render verbatim. Operators read this first; mental
+#                     load must be near zero. See app/prose_helpers.py.
 #   rca             — model RCA paragraph, ~3-5 sentences. Match this
 #                     STRUCTURE, not the facts.
 #   evidence_shape  — list of evidence patterns the canonical RCA cited
@@ -45,6 +50,7 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.88-0.95"
     one_line: "JVM heap saturating cgroup limit because the JVM defaults aren't tuned for the container — OOM-kill cycle confirmed."
+    human_cause: "spring-boot is in an OOM-kill loop, restarting every 12 minutes because the JVM heap is capped at only 256 MB."
     rca: |
       spring-boot is in a steady-state OOM-kill loop: every ~12 minutes the JVM heap
       exhausts, the kernel kills the container, and the pod restarts. The mechanism is
@@ -80,6 +86,7 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.88-0.95"
     one_line: "Kong is healthy; latency originates upstream — point the operator at the right service."
+    human_cause: "Kong itself is fast; the slowness is in the upstream spring-boot service - operators should look there, not at Kong."
     rca: |
       Kong is the alert subject but not the cause: its own proxy time
       (kong_proxy_latency_ms p95) is single-digit milliseconds. Almost all of the
@@ -122,6 +129,7 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.78-0.92"
     one_line: "Service is saturated at one of: connection pool exhausted, GC pauses blocking threads, slow downstream call, or DB query plan regression — name which from the trace breakdown."
+    human_cause: "spring-boot is saturated on its JDBC connection pool - requests are queueing for a free database connection instead of being served."
     rca: |
       The alerted service itself is the bottleneck — there is no upstream layer
       to redirect attribution to (unlike the Kong-says-upstream pattern). The
@@ -167,6 +175,7 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.90-0.98"
     one_line: "A specific resource is exhausted — the cgroup limit, the JVM heap, or the host's physical memory. Name which from the metric breakdown."
+    human_cause: "spring-boot is sitting at 98% of its memory cap for more than 5 minutes - the next request will trigger an OOM-kill."
     rca: |
       The host or pod has hit a hard resource ceiling — this is not seasonal
       noise. CriticalCpuUsage means the CPU has been at >90% for the rule's
@@ -215,6 +224,7 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.85-0.95"
     one_line: "Collector is dropping spans / exporter blocked / batch buffer overflowing — name which exporter or upstream is causing backpressure."
+    human_cause: "The OTel collector is dropping spans because its Jaeger exporter is slow - the receive queue is backing up."
     rca: |
       The OTel collector is failing to keep up with incoming telemetry. The
       diagnostic split: dropped spans means the receiver-side queue overflowed
@@ -250,6 +260,7 @@ exemplars:
     decision: "DISMISS"
     confidence_band: "0.75-0.90"
     one_line: "Transient scrape collision or network jitter — target self-recovered before triage finished, no corroborating anomaly anywhere."
+    human_cause: "Brief scrape blip on the target - it missed two checks then recovered on its own. No real outage."
     rca: |
       This is transient scrape jitter, not an outage: the target missed two consecutive
       scrape intervals, then recovered, and has been steadily up since — all of this
@@ -282,6 +293,7 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.88-0.96"
     one_line: "Single root cause (disk pressure / ingest backpressure) produced N symptoms within ~12 min — treat as one incident, fix at the source."
+    human_cause: "The monitoring VM disk is filling up, which is causing Loki to drop log ingest and Grafana to lose datasource visibility - one root cause, multiple symptoms."
     rca: |
       Multiple alerts in this window are symptoms of a single infrastructure-layer
       failure, not independent events: the chain starts at a saturated resource (the
@@ -320,6 +332,7 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.82-0.92"
     one_line: "Recent deploy introduced a regression — Drain3 caught it via a novel error template that has never appeared in 14 days of prior logs."
+    human_cause: "The most recent deploy introduced a regression - a new error log line has appeared that has never been seen in the prior 14 days."
     rca: |
       The most recent deploy of {service} introduced a regression: a novel error log
       template appeared N minutes after the helm rollout completed and has been
@@ -360,6 +373,7 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.78-0.88"
     one_line: "Frontend 5xx rate is the symptom; the upstream is admission-rejecting requests (saturated thread/connection pool or tripped circuit breaker)."
+    human_cause: "Frontend is returning 5xx because the upstream service is rejecting requests at admission - its thread pool or circuit breaker is saturated."
     rca: |
       The frontend's 5xx rate is the user-visible symptom; the actual failure is one
       hop upstream. Initial evidence in the alerting service was thin (error rate up,
@@ -393,6 +407,7 @@ exemplars:
     decision: "DISMISS"
     confidence_band: "0.80-0.95"
     one_line: "Static-threshold blind spot to traffic seasonality — current value is a normal time-of-day ramp, not a degradation."
+    human_cause: "Normal time-of-day traffic ramp - same pattern as the prior 4 weeks at this hour. The alert rule's static threshold is the problem, not the system."
     rca: |
       This is the static threshold misfiring on a normal traffic ramp, not a real
       degradation: the current value is +0.4σ above the same-hour baseline from one
@@ -429,6 +444,7 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.65-0.85"
     one_line: "Operator override on a recent similar alert reverses the LLM's DISMISS — escalating for human review per the standing override policy."
+    human_cause: "An on-call engineer recently flagged a similar alert as a real incident - this fire is being escalated to honour that operator decision."
     rca: |
       The override is the cause of the escalation, not the alert content itself. The
       LLM's first-pass verdict was DISMISS (the alert matches a known seasonal pattern,
@@ -471,6 +487,7 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.92-0.98"
     one_line: "Recent config / migration change broke the boot path — every restart aborts at the same boot step before the work loop starts."
+    human_cause: "Recent config change broke the boot path - the pod restarts, fails at the same line, and crash-loops. No traffic is being served."
     rca: |
       The pod can't get through its boot phase: it restarts, executes a few seconds of
       bootstrap code, hits a precise error at a specific boot step, and the kernel
@@ -510,6 +527,7 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.82-0.92"
     one_line: "A recent infrastructure change (terraform apply / SG / NetworkPolicy) is blocking previously-allowed traffic — the app layer is healthy, the path between layers is severed."
+    human_cause: "A recent infrastructure change cut the network path between the gateway and its upstream service - the apps are healthy but cannot reach each other."
     rca: |
       This is a network-layer break, not an application failure: a recent
       infrastructure change has revoked previously-allowed traffic between two
@@ -553,6 +571,7 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.88-0.96"
     one_line: "cert-manager has been silently failing renewal for K days because the ACME challenge path is broken — act now while the cert is still serving."
+    human_cause: "cert-manager has not been able to renew the TLS cert for several days - the cert is still serving today, but will expire soon if not fixed."
     rca: |
       The renewal pipeline is the failing component, not the cert itself. cert-manager
       has been unable to renew this certificate for K days — cert_manager_certificate_ready_status
@@ -585,6 +604,7 @@ default:
   id: generic-sre-shape
   archetype: "Generic three-pillar RCA"
   one_line: "Lead with a NAMED cause; cite metrics/logs/traces in support; rank remediation cheap-and-reversible first."
+  human_cause: "<one plain-English sentence: what is broken in human prose - no PromQL, no formulas, no metric=value strings>"
   rca: |
     Name the failing component or mechanism in the first sentence — a saturated pool,
     a stalled process, a config drift, a recent deploy regression, an exhausted disk,

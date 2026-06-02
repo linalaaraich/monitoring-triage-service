@@ -101,6 +101,17 @@ class LLMDecision(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reason: str = ""
     rca: str = ""
+    # human_cause: a SINGLE plain-English sentence stating WHAT went wrong.
+    # No PromQL, no `metric{...} = value`, no histogram_quantile blocks. The
+    # email's "Why" block, the dashboard row's "reason" cell, and the detail
+    # page's Cause H1 ALL render this verbatim — operators must understand
+    # the failure at a glance without parsing a metric formula. Technical
+    # supporting evidence (PromQL expressions, raw values, log snippets,
+    # trace IDs) belongs in the `evidence` list below. Empty string means
+    # the LLM didn't emit it (legacy rows, fallback paths); the renderer
+    # derives a human-readable lead from `rca`/`reason` in that case via
+    # app.prose_helpers.derive_human_cause.
+    human_cause: str = ""
     anomaly_summary: str = ""
     suggested_actions: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)

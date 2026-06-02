@@ -33,9 +33,29 @@ Your job:
 
 CRITICAL output quality rules (must follow):
 
-A. **Start the RCA with the CAUSE, not the symptom.** The alert already told the
-   operator a metric crossed a threshold — restating that is not analysis. Your job
-   is to NAME what is broken: a component, link, process, queue, connection pool,
+A0. **The `human_cause` field is the operator's first line of sight — human
+   English ONLY, no formulas.** Every email banner, every dashboard "why" cell,
+   every detail-page H1 renders `human_cause` verbatim. It MUST be a single
+   plain-English sentence that an SRE can read in under 3 seconds and know
+   what is broken. NO PromQL. NO backticked metric expressions. NO `metric{...}
+   = value`. NO `histogram_quantile(...)` blocks. NO raw ratios like "0.984"
+   without a human unit. Numbers are OK only when carried by human prose
+   ("CPU sustained at 95% for 6 min", "error rate spiked to 47%", "p95 jumped
+   to 8.5 seconds"). Examples:
+     GOOD: "Error 500 from /api/users at 47% rate — frontend is failing fast."
+     GOOD: "spring-boot pod is in an OOM-kill loop; restarting every 12 minutes."
+     GOOD: "Loki disk is 98% full — ingest will stop dropping logs in ~7 minutes."
+     BAD : "histogram_quantile(0.95, sum(rate(...))) = 8487.9 reported above threshold."
+     BAD : "container_memory_working_set_bytes / spec_memory_limit_bytes = 0.984"
+     BAD : "The PromQL expression `up == 0` returned 0 for instance 10.0.1.68:9100."
+   Put any of the technical expressions (PromQL, raw metric values, label
+   selectors, trace IDs) in the `evidence` array — they're rendered below
+   the human banner, in service of it. Operators want to READ a cause, not
+   parse a formula.
+
+A. **Start the RCA prose with the CAUSE, not the symptom.** The alert already told
+   the operator a metric crossed a threshold — restating that is not analysis. Your
+   job is to NAME what is broken: a component, link, process, queue, connection pool,
    deploy, config change, dependency, or saturation point. The first sentence must
    say WHAT failed and WHY; the metric / log / trace evidence comes after, in
    service of that conclusion.
@@ -123,11 +143,12 @@ You MUST return JSON matching the schema below. The Ollama runtime validates at 
   "decision": "ESCALATE" | "DISMISS" | "INCONCLUSIVE",
   "severity": "critical" | "warning" | "info",
   "confidence": <float 0.0-1.0>,
-  "reason": "<one-line summary that NAMES a cause, not a symptom>",
+  "human_cause": "<ONE plain-English sentence: what is broken, in human prose. NO PromQL, NO `metric{...}=value`, NO formulas. This is what the operator reads first. See rule A0.>",
+  "reason": "<one-line summary that NAMES a cause, not a symptom; may be terser than human_cause but must still be formula-free>",
   "rca": "<2-5 sentences; first sentence names a specific cause (component / link / process / config / change). Metric/log/trace evidence follows in support>",
   "anomaly_summary": "<Drain3 findings or '' if none>",
   "suggested_actions": [<2-4 concrete commands/queries/URLs — see rule E>],
-  "evidence": [<specific metric values / log lines / trace IDs — see rule F>]
+  "evidence": [<specific metric values / log lines / trace IDs — see rule F. THIS is where PromQL expressions, raw metric formulas, and `metric{...}=value` strings go.>]
 }
 
 ## Few-shot examples
@@ -150,6 +171,7 @@ EXPECTED OUTPUT:
   "decision": "ESCALATE",
   "severity": "critical",
   "confidence": 0.92,
+  "human_cause": "spring-boot is in an OOM-kill loop, restarting every 12 minutes because the JVM heap is capped at only 256 MB.",
   "reason": "spring-boot is in an OOM-kill loop because the JVM is using its default heap fraction (~25% of the cgroup) instead of a tuned value — the 1Gi container limit produces only ~256 MB effective heap, which normal traffic exhausts.",
   "rca": "spring-boot is in a steady-state OOM-kill loop: the JVM heap is sized as a fraction of the cgroup, but JAVA_TOOL_OPTIONS is unset so the JVM falls back to its default of ~25% of the 1 GiB container limit — about 256 MB of effective heap, which normal traffic exhausts every ~12 minutes. The pod has restarted 45 times. Loki shows the smoking gun: 4 `OutOfMemoryError: Java heap space` lines in the last minute, and the working-set memory is sitting at 98% of the container cap (sustained 8 minutes). The correlated HighP95Latency on the same service is downstream of this — Java GC pauses block request threads while the heap is being reclaimed, inflating p95 every time the cycle approaches the limit.",
   "anomaly_summary": "",
@@ -182,6 +204,7 @@ EXPECTED OUTPUT:
   "decision": "DISMISS",
   "severity": "info",
   "confidence": 0.75,
+  "human_cause": "Single-sample latency blip on spring-boot — p95 jumped to 1.02 s for one scrape, then recovered to 340 ms. No real slowdown.",
   "reason": "Single-sample bucket-edge artifact, not a real latency event — p95 returned to 340 ms within one scrape interval and no individual request exceeded the threshold.",
   "rca": "This is a single-scrape statistical artifact, not a real slowdown. p95 briefly read 1020 ms (2% over the 1000 ms threshold) for one 10-second sample, then dropped back to 340 ms on the very next scrape. The slowest Jaeger trace in the alert window was 340 ms — i.e., no actual request was over threshold; the histogram bucket edge moved the p95 estimate above 1000 ms transiently. Loki returned 50 lines of clean INFO logs with no error or exception. The same single-sample blip has fired 14 times in the last 24 h on this rule and been dismissed every time, which is itself the signal that the threshold is too tight for the bucket distribution.",
   "anomaly_summary": "0 of 50 lines anomalous",
@@ -212,6 +235,7 @@ EXPECTED OUTPUT:
   "decision": "ESCALATE",
   "severity": "critical",
   "confidence": 0.70,
+  "human_cause": "node-exporter on the monitoring VM is unreachable for 2+ minutes — the container is likely stopped or crashed.",
   "reason": "node-exporter on the monitoring VM is unreachable to Prometheus — most likely the container stopped or crashed; secondary candidates are network-path break or Prometheus scrape config drift.",
   "rca": "node-exporter on the monitoring VM (10.0.1.68:9100) is the failing component: Prometheus has been unable to reach its scrape endpoint for 2+ minutes. The pillar pattern matches 'target itself is down' — Prometheus can't pull metrics from the dead target, and Loki has no service=monitoring lines because the monitoring stack runs via docker-compose (deployment_type=docker-vm) and ships logs through docker's own pipeline rather than through the app log shipper. Ranked causes: (1) the node-exporter container is stopped or crashed (most likely — single-target failure with no upstream symptoms); (2) network path between Prometheus and the monitoring VM is broken (would also affect grafana/loki/jaeger scrapes — verify these are still up); (3) Prometheus scrape config drift after a recent monitoring-project deploy.",
   "anomaly_summary": "",
@@ -373,6 +397,7 @@ def _build_fallback_decision() -> LLMDecision:
         severity="warning",
         confidence=0.0,
         reason="LLM unavailable \u2014 automatic escalation for human review",
+        human_cause="AI triage could not reach the LLM - alert forwarded without analysis.",
         rca="AI triage could not complete analysis. Raw alert forwarded for manual review.",
         suggested_actions=[
             "ssh deploy@adolin-wsl 'docker compose -f ~/cires-ai/docker-compose.yml restart ai-ollama' — recover the local LLM",
@@ -825,6 +850,11 @@ Analyze this alert using the context above. Respond with ONLY valid JSON. Start 
     # just unlikely. The schema mirrors LLMDecision but is hand-written here
     # to keep it inline-simple (no $defs/$refs, which some Ollama versions
     # don't follow cleanly). Keep this in sync with LLMDecision in models.py.
+    # Schema enforced at decode-time by Ollama. The 2026-06-02 addition of
+    # `human_cause` is REQUIRED — every fresh response must include the
+    # plain-English single-sentence cause that the email banner + dashboard
+    # "why" cell will render verbatim. PromQL / metric formulas belong in
+    # `evidence` only. See app/prose_helpers.py for the renderer contract.
     _RESPONSE_SCHEMA = {
         "type": "object",
         "properties": {
@@ -832,13 +862,14 @@ Analyze this alert using the context above. Respond with ONLY valid JSON. Start 
             "severity": {"type": "string", "enum": ["critical", "warning", "info"]},
             "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
             "reason": {"type": "string"},
+            "human_cause": {"type": "string"},
             "rca": {"type": "string"},
             "anomaly_summary": {"type": "string"},
             "suggested_actions": {"type": "array", "items": {"type": "string"}},
             "evidence": {"type": "array", "items": {"type": "string"}},
         },
         "required": [
-            "decision", "severity", "confidence", "reason", "rca",
+            "decision", "severity", "confidence", "reason", "human_cause", "rca",
             "anomaly_summary", "suggested_actions", "evidence",
         ],
     }
@@ -913,6 +944,31 @@ Analyze this alert using the context above. Respond with ONLY valid JSON. Start 
             # Accept "verdict" as alias for "decision"
             if "verdict" in data and "decision" not in data:
                 data["decision"] = data.pop("verdict")
+            # 2026-06-02 — human_cause refactor backstop. If the model didn't
+            # populate `human_cause` (legacy schema, retry without the new
+            # field), derive a plain-English lede from `rca` so the email
+            # banner + dashboard "why" cell never go blank. Any PromQL /
+            # metric formulas embedded in the RCA prose get peeled into
+            # `evidence` so they're still surfaced — just below the human
+            # banner, not in front of it.
+            from app.prose_helpers import split_human_cause_and_evidence
+            if not (data.get("human_cause") or "").strip():
+                derived_cause, extra_evidence = split_human_cause_and_evidence(
+                    data.get("rca", "") or data.get("reason", "")
+                )
+                if derived_cause:
+                    data["human_cause"] = derived_cause
+                if extra_evidence:
+                    existing_ev = data.get("evidence") or []
+                    if not isinstance(existing_ev, list):
+                        existing_ev = [str(existing_ev)]
+                    # Merge new fragments without disturbing existing entries
+                    seen_ev = {str(e).strip() for e in existing_ev}
+                    for e in extra_evidence:
+                        if e not in seen_ev:
+                            existing_ev.append(e)
+                            seen_ev.add(e)
+                    data["evidence"] = existing_ev
 
             decision = LLMDecision(**data)
             return decision, ""

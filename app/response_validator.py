@@ -499,6 +499,24 @@ def validate(
 
     # --- 1. Banned-phrase scan on rca + reason
     combined = " ".join(filter(None, [decision.rca or "", decision.reason or ""]))
+
+    # --- 1.0 human_cause formula scan (2026-06-02 — human-first reason
+    # refactor). The `human_cause` field is the operator's first line of
+    # sight (email banner, dashboard "why" cell, detail-page H1). It MUST
+    # be formula-free plain English. If the LLM dumps a PromQL block, a
+    # `metric{...} = value` string, or a histogram_quantile expression into
+    # this field, surface it as a violation so the caller can either retry
+    # the LLM or run the back-compat split in app.prose_helpers.
+    from app.prose_helpers import _looks_like_evidence_clause as _hc_is_formula
+    hc_text = (decision.human_cause or "").strip()
+    if hc_text and _hc_is_formula(hc_text):
+        report.violations.append(
+            f"human_cause contains a metric formula or PromQL fragment: "
+            f"{hc_text[:120]!r}. The `human_cause` field is operator-facing prose — "
+            "move formulas / metric expressions to the `evidence` list and "
+            "rewrite `human_cause` as one plain-English sentence."
+        )
+        report.banned_phrase_hits.append("human_cause-formula")
     for pattern in _BANNED_PHRASE_PATTERNS:
         m = pattern.search(combined)
         if m:

@@ -58,8 +58,37 @@ import aiosmtplib
 from app.config import settings
 from app.metrics import triage_email_sent_total
 from app.models import GatheredContext, GrafanaAlert, LLMDecision, RCARecord
+from app.prose_helpers import derive_human_cause
 
 logger = logging.getLogger(__name__)
+
+
+def _v1_human_cause(decision: LLMDecision) -> str:
+    """Plain-English single-sentence cause for the v1 email card.
+
+    Renders `decision.human_cause` verbatim if the LLM populated it
+    (2026-06-02 human-first reason refactor). Otherwise falls back to
+    the legacy split via app.prose_helpers — pulls formulas out of `rca`
+    so the operator never reads a PromQL block in the email banner.
+    """
+    return derive_human_cause(
+        getattr(decision, "human_cause", None),
+        decision.rca,
+        decision.reason,
+        fallback="No RCA prose recorded.",
+    )
+
+
+def _html_escape_for_email(text: str) -> str:
+    """Minimal HTML-escape helper for email-body inline use.
+
+    The class-level _build_escalation_body uses Python-level f-strings to
+    interpolate user-derived prose into the HTML; this helper guarantees
+    `<`, `>`, `&` are escaped so a misbehaved RCA can't break the layout
+    or smuggle markup.
+    """
+    import html as _html
+    return _html.escape(text or "")
 
 
 def _instance_display(instance: str | None) -> str:
@@ -510,14 +539,20 @@ class EmailNotifier:
           <small>Confidence: {confidence_pct} · Quality: {quality_human}</small>
         </div>
       </div>
-      <div class="mono">Reason: {_humanize_unix_timestamps(decision.reason or '')}
-
-Root cause:
-{_humanize_unix_timestamps(decision.rca or '')}</div>
+      <!-- 2026-06-02 human-first reason refactor: the cause is shown as
+           plain-English prose (no PromQL formulas) at the TOP of the verdict
+           card. Technical evidence (PromQL, metric values, log snippets) is
+           rendered separately under "Evidence" below the suggested actions.
+           Renderers consume `decision.human_cause` directly; if empty, the
+           prose_helpers fallback strips formula content from `rca`. -->
+      <p style="font-size:15px;line-height:1.55;margin:6px 0 14px 0">
+        <strong style="color:#8890a0;font-size:11px;text-transform:uppercase;letter-spacing:.1px">Cause:</strong>
+        {_html_escape_for_email(_humanize_unix_timestamps(_v1_human_cause(decision)))}
+      </p>
       <h3>Suggested actions</h3>
       <ul>{actions_html}</ul>
       {diagnostic_block}
-      <h3>Evidence</h3>
+      <h3>Evidence <span class="mute">- PromQL, metric values, log snippets (for SRE reference)</span></h3>
       <ul>{evidence_html}</ul>
     </div>
   </div>
@@ -592,6 +627,12 @@ Root cause:
 
         Capped at ~70 chars; alertPlain truncated if needed. Verdict comes
         from action_taken (SHELVED) or the LLM verdict (ESCALATE/DISMISS).
+
+        env uses the persisted RCARecord.env when present (set by the pipeline
+        at write time via env_resolver) so the email + dashboard always agree.
+        Falls back to design_shape_for_alert's resolver-driven path when env
+        is missing - legacy short-path callers (timeout/suppression) may
+        invoke without persisting env first.
         """
         from app.v2_mappings import design_shape_for_alert
         action_taken = getattr(record, "action_taken", "") or ""
@@ -601,7 +642,14 @@ Root cause:
             service=alert.service,
             verdict_lower=verdict_lower,
             action_taken=action_taken,
+            labels=alert.labels,
+            annotations=alert.annotations,
         )
+        # Prefer the persisted env (pipeline-resolved) over the live re-derived
+        # value so the email subject matches the dashboard row 1:1 even if
+        # alert.labels was mutated between persist + email.
+        if getattr(record, "env", None):
+            shape["env"] = record.env
         env = shape["env"]
         ns = shape["namespace"]
         verdict = shape["verdict"]
@@ -640,7 +688,11 @@ Root cause:
             service=alert.service,
             verdict_lower=verdict_lower,
             action_taken=action_taken,
+            labels=alert.labels,
+            annotations=alert.annotations,
         )
+        if getattr(record, "env", None):
+            shape["env"] = record.env
         env = shape["env"]
         ns = shape["namespace"]
         svc_type = shape["serviceType"]
@@ -670,14 +722,52 @@ Root cause:
         loki_url = settings.loki_url
         # jaeger_url = settings.jaeger_url  # not in the 4-button row per design
 
-        # The 3 mid blocks.
-        reason_html = _html.escape((decision.rca or decision.reason or "No RCA prose recorded.").strip())
+        # The "Why" banner. 2026-06-02 human-first reason refactor:
+        # the banner renders `decision.human_cause` (a single plain-English
+        # sentence with NO PromQL, no metric formulas). Legacy rows where
+        # the LLM didn't populate human_cause fall back through
+        # app.prose_helpers.derive_human_cause which strips formula content
+        # from `rca` so the operator never reads a histogram_quantile block
+        # in the banner. The technical evidence list is rendered separately
+        # in an evidence section BELOW the banner (see evidence_block_html).
+        from app.prose_helpers import derive_human_cause
+        human_cause_text = derive_human_cause(
+            getattr(decision, "human_cause", None),
+            decision.rca,
+            decision.reason,
+            fallback="No RCA prose recorded.",
+        )
+        reason_html = _html.escape(human_cause_text)
         # Truncate to first sentence + bold the component name inline.
         end = reason_html.find(". ")
         reason_short = reason_html[: end + 1] if end > 0 and end < 260 else reason_html[:260]
         if component and component != "—" and component in reason_short:
             bold = f'<strong style="color:#e8dca0;font-family:JetBrains Mono,monospace;font-weight:600">{_html.escape(component)}</strong>'
             reason_short = reason_short.replace(_html.escape(component), bold, 1)
+
+        # Technical evidence block — PromQL expressions, metric values, log
+        # snippets, trace IDs. Rendered BELOW the banner + suggested action
+        # so the operator's eye lands on the human prose first. Empty list
+        # means we render nothing (no empty-state clutter in the email).
+        evidence_items_html = "".join(
+            f'<li style="margin:4px 0;color:#c0c5d0;line-height:1.5">{_html.escape(str(e))}</li>'
+            for e in (decision.evidence or [])
+        )
+        evidence_block_html = ""
+        if evidence_items_html:
+            evidence_block_html = (
+                '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+                'width="100%" style="background:#15171f;border:1px solid #2a2d3a;'
+                'border-radius:10px;margin-bottom:18px"><tr><td style="padding:12px 14px">'
+                '<div style="font-size:10.5px;font-weight:600;color:#8890a0;'
+                'text-transform:uppercase;letter-spacing:.1px;margin-bottom:8px">'
+                'Technical evidence <span style="color:#5b6172;font-weight:400;'
+                'text-transform:none;letter-spacing:0">- PromQL, metric values, '
+                'log snippets (for SRE reference)</span></div>'
+                f'<ul style="margin:0;padding-left:20px;font-family:JetBrains Mono,monospace;'
+                f'font-size:11.5px">{evidence_items_html}</ul>'
+                '</td></tr></table>'
+            )
 
         # First suggested action only — design shows one inline + says "more on detail page".
         action_cmd = "—"
@@ -747,12 +837,14 @@ Root cause:
       </td></tr></table>
 
       <!-- Suggested action block -->
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#1a1d27;border:1px solid #2a2d3a;border-radius:10px;margin-bottom:22px"><tr><td style="padding:12px 14px">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#1a1d27;border:1px solid #2a2d3a;border-radius:10px;margin-bottom:18px"><tr><td style="padding:12px 14px">
         <div style="font-size:10.5px;font-weight:600;color:#8890a0;text-transform:uppercase;letter-spacing:.1px;margin-bottom:6px">Suggested action</div>
         <div style="background:#0a0c11;border:1px solid #2a2d3a;border-radius:6px;padding:8px 10px;font-family:JetBrains Mono,monospace;font-size:12px;color:#e4e6ee;word-break:break-all">
           <span style="color:#40d0d0">$</span> {action_cmd_html}
         </div>
       </td></tr></table>
+
+      {evidence_block_html}
 
       <!-- Buttons row -->
       <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>

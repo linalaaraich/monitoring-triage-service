@@ -154,6 +154,10 @@ def format_for_prompt(exemplar: dict[str, Any] | None) -> str:
 
     archetype = exemplar.get("archetype", "(unnamed archetype)")
     one_line = exemplar.get("one_line", "")
+    # 2026-06-02 human-first reason refactor: human_cause is the plain-English
+    # banner the email + dashboard render verbatim. Surface it in the exemplar
+    # block so the LLM sees the target shape for the field it's expected to fill.
+    human_cause = (exemplar.get("human_cause") or "").strip()
     decision = exemplar.get("decision", "")
     confidence_band = exemplar.get("confidence_band", "")
     rca = (exemplar.get("rca") or "").strip()
@@ -181,6 +185,8 @@ def format_for_prompt(exemplar: dict[str, Any] | None) -> str:
         lines.append(f"**Canonical decision:** {decision}" + (f"  (confidence band {confidence_band})" if confidence_band else ""))
     if one_line:
         lines.append(f"**One-line gist:** {one_line}")
+    if human_cause:
+        lines.append(f"**Human cause (target shape for the `human_cause` field — plain English, no formulas):** {human_cause}")
     lines.append("")
     if rca:
         lines.append("**RCA shape (paragraph):**")

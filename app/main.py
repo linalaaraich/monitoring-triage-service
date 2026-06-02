@@ -2419,13 +2419,33 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
     if not tags:
         tags = ["—"]
 
-    # First sentence of the RCA report as the "reason"
-    rca = r.get("rca_report") or ""
-    if rca:
-        end = rca.find(". ")
-        reason = rca[: end + 1] if end > 0 else rca[:240]
-    else:
-        reason = "No RCA prose recorded."
+    # 2026-06-02 human-first reason refactor — the "reason" cell renders
+    # `human_cause` (plain-English single sentence, NO PromQL / metric
+    # formulas), not the first sentence of the RCA prose. Resolution order:
+    #   1. The decoded `human_cause` from the JSON envelope (new rows).
+    #   2. The legacy split via prose_helpers on raw-text rca_report (old rows).
+    #   3. llm_reasoning as a last-resort fallback for very old rows whose
+    #      rca_report is empty.
+    # The technical evidence (PromQL etc.) is rendered separately in the
+    # row's expanded "Technical evidence" section via `evidence`.
+    from app.prose_helpers import derive_human_cause
+    raw_rca = r.get("rca_report") or ""
+    rca_prose_only = raw_rca
+    human_cause_field = ""
+    if raw_rca.startswith("{"):
+        try:
+            envelope = _json2.loads(raw_rca)
+            if isinstance(envelope, dict):
+                human_cause_field = (envelope.get("human_cause") or "").strip()
+                rca_prose_only = envelope.get("rca") or ""
+        except (ValueError, TypeError):
+            pass
+    reason = derive_human_cause(
+        human_cause_field,
+        rca_prose_only,
+        r.get("llm_reasoning") or "",
+        fallback="No RCA prose recorded.",
+    )
 
     confidence = None
     try:
