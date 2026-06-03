@@ -77,6 +77,8 @@ async def _save_prior(
     alert_name: str = "HighP95Latency",
     service: str = "spring-boot",
     llm_verdict_override: str | None = "__unset__",
+    triage_decision: str = "investigate",
+    rca_quality: str = "actionable",
 ) -> RCARecord:
     """Persist a prior decision and back-date its timestamp by minutes_ago.
 
@@ -87,12 +89,12 @@ async def _save_prior(
         alert_name=alert_name,
         affected_service=service,
         alert_fingerprint=fingerprint,
-        triage_decision="investigate",
+        triage_decision=triage_decision,
         llm_verdict=verdict if llm_verdict_override == "__unset__" else llm_verdict_override,
         rca_report=rca,
         llm_reasoning="prior reasoning",
         action_taken="emailed",
-        rca_quality="actionable",
+        rca_quality=rca_quality,
     )
     # Back-date the timestamp so window tests are deterministic.
     rec.timestamp = _utc_now() - timedelta(minutes=minutes_ago)
@@ -170,6 +172,92 @@ async def test_store_empty_fingerprint_returns_none(store):
 
 
 # ---------------------------------------------------------------------------
+# Store lookup — bad-prior filter (don't poison the next prompt)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_store_skips_inconclusive_prior(store):
+    """An inconclusive prior carries no usable cause — must be skipped so it
+    doesn't get quoted back to the LLM as 'reuse this prior'."""
+    fp = "fp-inconclusive"
+    await _save_prior(store, fp, minutes_ago=5, verdict="inconclusive",
+                      rca="insufficient data to determine cause")
+    assert await store.get_recent_decision_for_fingerprint(fp, window_minutes=30) is None
+
+
+@pytest.mark.asyncio
+async def test_store_skips_data_starved_prior(store):
+    """A data_starved RCA hedges by definition — skipping it stops the
+    flapping-alert hedge from compounding across consecutive fires."""
+    fp = "fp-data-starved"
+    await _save_prior(store, fp, minutes_ago=5, verdict="escalate",
+                      rca_quality="data_starved")
+    assert await store.get_recent_decision_for_fingerprint(fp, window_minutes=30) is None
+
+
+@pytest.mark.asyncio
+async def test_store_skips_needs_review_prior(store):
+    """A needs_review row had no actions + no evidence — useless as a prior."""
+    fp = "fp-needs-review"
+    await _save_prior(store, fp, minutes_ago=5, verdict="escalate",
+                      rca_quality="needs_review")
+    assert await store.get_recent_decision_for_fingerprint(fp, window_minutes=30) is None
+
+
+@pytest.mark.asyncio
+async def test_store_skips_spike_shelved_prior(store):
+    """SF-5 shelved a transient spike — the row exists but is not a real
+    coherence anchor; subsequent fires deserve fresh analysis."""
+    fp = "fp-spike-shelved"
+    await _save_prior(store, fp, minutes_ago=5, verdict="dismiss",
+                      triage_decision="spike_shelved")
+    assert await store.get_recent_decision_for_fingerprint(fp, window_minutes=30) is None
+
+
+@pytest.mark.asyncio
+async def test_store_returns_actionable_prior(store):
+    """The filter must NOT drop a clean, actionable prior — that's the
+    only kind of prior the DA-3 anchor is designed to surface."""
+    fp = "fp-actionable"
+    await _save_prior(store, fp, minutes_ago=5, verdict="escalate",
+                      rca_quality="actionable", triage_decision="investigate")
+    prior = await store.get_recent_decision_for_fingerprint(fp, window_minutes=30)
+    assert prior is not None
+    assert prior["llm_verdict"] == "escalate"
+
+
+# ---------------------------------------------------------------------------
+# Prompt block include/omit branches for usable vs unusable priors
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_block_included_for_usable_prior():
+    """When the lookup returns a usable prior, the prompt builder injects
+    it as a 'starting hypothesis' framing (no 'REUSE this prior' wording)."""
+    prior = {
+        "timestamp": "2026-05-26T10:20:00",
+        "llm_verdict": "escalate",
+        "rca_report": "Kong upstream pool saturated — backend slots queueing >8s.",
+    }
+    block = build_prior_decision_block(prior)
+    assert block != ""
+    assert "Prior investigation summary" in block
+    assert "Kong upstream pool saturated" in block
+    assert "starting hypothesis" in block.lower()
+
+
+def test_prompt_block_omitted_when_lookup_returned_none():
+    """The flip side: when the store-level filter returned None for an
+    unusable prior (inconclusive / data_starved / spike_shelved /
+    needs_review), the prompt builder receives None and emits the empty
+    string — no DA-3 block at all (NOT a 'no usable prior' placeholder)."""
+    # Empty / None / falsy inputs all collapse to "" (block omitted).
+    assert build_prior_decision_block(None) == ""
+    assert build_prior_decision_block({}) == ""
+
+
+# ---------------------------------------------------------------------------
 # Prompt-building helper — build_prior_decision_block
 # ---------------------------------------------------------------------------
 
@@ -189,16 +277,18 @@ def test_block_formats_prior_cause_and_coherence_rule():
     }
     block = build_prior_decision_block(prior)
     # Section header + DA-3 marker
-    assert "Prior decision on THIS fingerprint" in block
+    assert "Prior investigation summary" in block
     # Prior verdict surfaced (upper-cased) and timestamp trimmed to 19 chars
     assert "ESCALATE" in block
     assert "2026-05-26T10:20:00" in block
     # The prior cause is quoted back verbatim
     assert "JVM heap exhausted" in block
-    # All three coherence branches present
+    # New framing: hypothesis + revise + recovery branches present.
+    assert "starting hypothesis" in block.lower()
     assert "changed my mind because" in block.lower()
     assert "condition resolved" in block.lower()
-    assert "reuse" in block.lower()
+    # Anti-parroting guidance present (replaces the old "REUSE this prior" rule).
+    assert "do not blindly reuse" in block.lower()
 
 
 def test_block_falls_back_to_reasoning_when_rca_empty():
@@ -242,7 +332,7 @@ def test_prompt_includes_block_when_prior_supplied():
             correlated=None, metric_facts=None, prior_decision=prior,
         )
         user_content = messages[-1]["content"]
-        assert "Prior decision on THIS fingerprint" in user_content
+        assert "Prior investigation summary" in user_content
         assert "JDBC pool exhausted" in user_content
     finally:
         import asyncio
@@ -259,7 +349,7 @@ def test_prompt_omits_block_when_no_prior():
             correlated=None, metric_facts=None, prior_decision=None,
         )
         user_content = messages[-1]["content"]
-        assert "Prior decision on THIS fingerprint" not in user_content
+        assert "Prior investigation summary" not in user_content
     finally:
         import asyncio
         asyncio.get_event_loop().run_until_complete(client.close())

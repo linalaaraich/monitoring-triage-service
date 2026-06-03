@@ -512,6 +512,14 @@ class RCAStore:
         Synthetic-test fires (audit-live cron, chaos harness) are excluded so
         their decisions don't seed a coherence anchor for real fires — mirrors
         the same exclusion in get_recent_decision_for_alert.
+
+        Low-quality priors are filtered out so they don't poison the next
+        prompt: an inconclusive verdict / spike_shelved triage row / a
+        data_starved or needs_review RCA carries no usable cause to be
+        coherent with. Quoting them back to the LLM as "REUSE this prior"
+        teaches the model to repeat the same hedge. If no usable prior
+        exists, the lookup returns None and the prompt simply omits the
+        DA-3 block (the model reasons from fresh evidence).
         """
         if not fingerprint:
             return None
@@ -525,6 +533,10 @@ class RCAStore:
                  AND llm_verdict IS NOT NULL
                  AND alert_fingerprint NOT LIKE 'audit-live-%'
                  AND alert_fingerprint NOT LIKE 'chaos-%'
+                 AND llm_verdict NOT IN ('inconclusive')
+                 AND triage_decision NOT IN ('spike_shelved')
+                 AND (rca_quality IS NULL
+                      OR rca_quality NOT IN ('data_starved', 'needs_review'))
                ORDER BY timestamp DESC LIMIT 1""",
             (fingerprint, since),
         )

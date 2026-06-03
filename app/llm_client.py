@@ -81,7 +81,7 @@ J. **Translate raw expressions into plain language.** Don't paste a `histogram_q
    The PromQL still appears in the evidence list; what changes is that the prose
    explains what it MEANS for a human reader.
 
-B. If any pre-gathered pillar (metrics/logs/traces) is empty, name WHICH pillar returned nothing and WHY that might be (e.g. "Loki returned 0 lines for service=X — possible causes: service not emitting logs, wrong label, shipper down"). Never write the phrase "insufficient data" as a standalone conclusion — always pair it with a named missing source and a concrete hypothesis to test next.
+B. If any pre-gathered pillar (metrics/logs/traces) is empty, name WHICH pillar returned nothing and WHY that might be (e.g. "Loki returned 0 lines for service={{SERVICE_NAME}} — possible causes: service not emitting logs, wrong label, shipper down"). Never write the phrase "insufficient data" as a standalone conclusion — always pair it with a named missing source and a concrete hypothesis to test next.
 C. If the "Prior decisions for this alert" section below shows past decisions that hedged (tagged data_starved), DO NOT repeat the same hedge. Use the available signal — even if thin — to propose a specific hypothesis, and suggest concrete remediation the human can check.
 D. Prefer ESCALATE over INCONCLUSIVE when you can at least name a probable cause. INCONCLUSIVE should be rare and always accompanied by a specific remediation: what query to run, what label to add, which shipper to restart.
 
@@ -371,22 +371,17 @@ def build_prior_decision_block(prior_decision: dict | None) -> str:
         prior_cause = "(no cause text recorded on the prior decision)"
 
     return (
-        "\n## Prior decision on THIS fingerprint (cross-row coherence — DA-3)\n"
-        f"This exact alert fingerprint already produced a decision at {prior_when} "
-        f"(verdict: {prior_verdict}). The cause named then was:\n"
-        f'  "{prior_cause}"\n\n'
-        "COHERENCE RULE — you MUST do exactly one of the following, and state which:\n"
-        "  (a) If the situation is UNCHANGED (same underlying problem still firing), "
-        "REUSE that prior cause as your RCA. Do NOT invent a new, contradictory cause "
-        "for the same flapping alert.\n"
-        "  (b) If the evidence now genuinely points to a DIFFERENT cause, you may revise — "
-        "but you MUST frame it explicitly as 'changed my mind because …' and say what new "
-        "evidence overturned the prior diagnosis.\n"
-        "  (c) If the alert is now RECOVERING / the breach has cleared, say 'condition "
-        "resolved' in your RCA and DISMISS (the earlier cause may simply have been "
-        "transient).\n"
-        "Silent contradiction — a brand-new unrelated cause with no '(a)/(b)/(c)' framing — "
-        "is the failure mode this rule exists to prevent.\n"
+        "\n## Prior investigation summary (within DA-3 window, may be incomplete)\n"
+        f"  - Prior verdict: {prior_verdict}\n"
+        f"  - Prior cause: {prior_cause}\n"
+        f"  - Prior was decided at: {prior_when}\n\n"
+        "Use this as a starting hypothesis but verify against fresh evidence below. "
+        "If the fresh evidence contradicts the prior, name a NEW cause and note that "
+        "the prior should be corrected (frame it as 'changed my mind because …' and "
+        "say what new evidence overturned the prior diagnosis). If the alert is now "
+        "RECOVERING / the breach has cleared, say 'condition resolved' in your RCA "
+        "and DISMISS. Do not blindly reuse — your job is fresh analysis informed by "
+        "history, not parroting.\n"
     )
 
 
@@ -768,8 +763,14 @@ The observed value above is ground-truth signal from Prometheus at the moment th
 
 Analyze this alert using the context above. Respond with ONLY valid JSON. Start your RCA by restating the observed value and PromQL."""
 
+        # Substitute the actual service name into the SYSTEM_PROMPT's rule-B
+        # example so the small model doesn't copy-paste the literal "service=X"
+        # placeholder verbatim into every empty-pillar RCA.
+        service_name = alert.service or "this-service"
+        system_prompt = SYSTEM_PROMPT.replace("{{SERVICE_NAME}}", service_name)
+
         return [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
 
