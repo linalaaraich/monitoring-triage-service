@@ -209,6 +209,34 @@ services:
       start_period: 15s
 
   # ---------------------------------------------------------------------------
+  # OTel Collector — ships every container's stdout/stderr on this host to the
+  # central Loki on the monitoring VM (Phase 2, 2026-06-03). Without this, the
+  # triage + 5 MCPs + ollama logs are invisible to the platform and any RCA
+  # query that touches GPU-host services returns empty.
+  #
+  # Runs as root (default) so it can read root-owned
+  # /var/lib/docker/containers/* json-log files. Single-purpose container -
+  # no inbound surface beyond health on :13133.
+  # ---------------------------------------------------------------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.120.0
+    container_name: ai-otel-collector
+    hostname: otel-collector
+    networks: [ai-stack]
+    user: "0:0"
+    volumes:
+      - ./otel-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:13133/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
   # MCP: RCA history. SQLite reader. Same /data volume as triage (must be RW).
   # ---------------------------------------------------------------------------
   rca-history-mcp:

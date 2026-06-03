@@ -1,0 +1,85 @@
+# =============================================================================
+# OTel Collector config for the dedicated GPU EC2 box (Phase 2, 2026-06-03).
+# Ships triage-service + 5 MCP container stdout/stderr + host-side Ollama
+# unit logs to the central Loki on the monitoring VM.
+#
+# Receivers:
+#   - filelog: docker json-log files for every container on this host
+#
+# Exporters:
+#   - otlphttp/loki: Loki's native OTLP ingest endpoint on monitoring VM.
+#     This avoids the deprecated `loki` exporter and the older
+#     /loki/api/v1/push path - Loki since 2.9 ingests OTLP directly at
+#     /otlp/v1/logs and lifts resource attributes to labels automatically.
+#
+# Network: this container runs on the ai-stack bridge; Tailscale MagicDNS
+# (observability-rca-newacct-monitoring) resolves via the host's resolver
+# inherited from /etc/resolv.conf, same as the MCP containers.
+# =============================================================================
+
+receivers:
+  filelog/containers:
+    include:
+      - /var/lib/docker/containers/*/*-json.log
+    start_at: end
+    include_file_path: true
+    operators:
+      - type: json_parser
+        parse_from: body
+        parse_to: attributes
+      - type: move
+        from: attributes.log
+        to: body
+      - type: move
+        from: attributes.stream
+        to: attributes["log.iostream"]
+      - type: move
+        from: attributes.time
+        to: attributes["log.time"]
+      # Pull the container id out of the file path so it can become a Loki
+      # label - /var/lib/docker/containers/<id>/<id>-json.log.
+      - type: regex_parser
+        parse_from: attributes["log.file.path"]
+        regex: '^/var/lib/docker/containers/(?P<container_id>[a-f0-9]+)/'
+        parse_to: resource
+      # Drop this collector's own output to avoid a feedback loop.
+      - type: filter
+        expr: 'body matches "otelcol\\.component" or body matches "fileconsumer"'
+
+processors:
+  resource:
+    attributes:
+      - action: insert
+        key: host.name
+        value: gpu-uswest2-newacct
+      - action: insert
+        key: deployment.environment
+        value: cires
+      - action: insert
+        key: service.name
+        value: gpu-stack
+  batch:
+    send_batch_size: 200
+    send_batch_max_size: 200
+    timeout: 5s
+
+exporters:
+  otlphttp/loki:
+    endpoint: "http://observability-rca-newacct-monitoring:3100/otlp"
+    tls:
+      insecure: true
+
+extensions:
+  health_check:
+    endpoint: "0.0.0.0:13133"
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    logs:
+      receivers: [filelog/containers]
+      processors: [resource, batch]
+      exporters: [otlphttp/loki]
