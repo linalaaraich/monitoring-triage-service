@@ -229,12 +229,9 @@ services:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:13133/"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    # No healthcheck - the contrib image is distroless (no shell, no
+    # wget/curl). The health_check extension is exposed on :13133 for
+    # external probes (Prometheus blackbox / manual curl from host).
 
   # ---------------------------------------------------------------------------
   # MCP: RCA history. SQLite reader. Same /data volume as triage (must be RW).
