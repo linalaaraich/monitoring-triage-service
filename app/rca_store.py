@@ -894,6 +894,84 @@ class RCAStore:
         )
         return dict(row) if row else {}
 
+    async def get_high_value_feedback_for_family(
+        self,
+        alert_name: str,
+        affected_service: str | None,
+        days: int = 14,
+        limit: int = 3,
+    ) -> list[dict]:
+        """Phase 6 (2026-06-03) — proactive feedback injection source.
+
+        Returns recent operator feedback rows for the same (alert_name,
+        service) family that are HIGH-VALUE:
+          - verdict_was_right = 'no'  (operator explicitly corrected the
+            past verdict), OR
+          - actual_cause is non-empty (operator wrote a specific cause).
+
+        Filter rationale: not every feedback row carries actionable
+        operator wisdom. A bare rating=yes/no thumbs-vote teaches the LLM
+        nothing about WHY. The two filters above catch exactly the rows
+        an operator took the time to encode meaningful correction into,
+        which are worth the ~200-500 prompt tokens to ALWAYS inject in
+        the initial LLM prompt — no token gamble on whether the LLM picks
+        the right bounded-agency tool.
+
+        family_key derivation: we JOIN on alert_name + (optional)
+        affected_service rather than adding a `family_key` column to the
+        feedback table. The alertname + service tuple IS the family for
+        the operator's intent — they tagged "this specific alert on this
+        specific service" — so the JOIN shape matches what
+        `get_active_overrides_for_alert` already uses for the same table.
+
+        Ordered by feedback.created_at DESC. Empty list when no
+        high-value rows exist in the window — caller should omit the
+        proactive block from the prompt.
+        """
+        since = (_utc_now() - timedelta(days=days)).isoformat()
+        if affected_service:
+            sql = """
+                SELECT f.id AS feedback_id, f.decision_id, f.feedback_type,
+                       f.created_at, f.rating, f.verdict_was_right,
+                       f.action_was_right, f.actual_cause, f.tags,
+                       f.notes, f.rater,
+                       r.alert_name, r.affected_service, r.timestamp AS decision_timestamp
+                FROM feedback f
+                INNER JOIN rca_history r ON r.id = f.decision_id
+                WHERE r.alert_name = ?
+                  AND r.affected_service = ?
+                  AND f.created_at > ?
+                  AND (
+                       f.verdict_was_right = 'no'
+                    OR (f.actual_cause IS NOT NULL AND LENGTH(TRIM(f.actual_cause)) > 5)
+                  )
+                ORDER BY f.created_at DESC
+                LIMIT ?
+            """
+            params = (alert_name, affected_service, since, limit)
+        else:
+            sql = """
+                SELECT f.id AS feedback_id, f.decision_id, f.feedback_type,
+                       f.created_at, f.rating, f.verdict_was_right,
+                       f.action_was_right, f.actual_cause, f.tags,
+                       f.notes, f.rater,
+                       r.alert_name, r.affected_service, r.timestamp AS decision_timestamp
+                FROM feedback f
+                INNER JOIN rca_history r ON r.id = f.decision_id
+                WHERE r.alert_name = ?
+                  AND f.created_at > ?
+                  AND (
+                       f.verdict_was_right = 'no'
+                    OR (f.actual_cause IS NOT NULL AND LENGTH(TRIM(f.actual_cause)) > 5)
+                  )
+                ORDER BY f.created_at DESC
+                LIMIT ?
+            """
+            params = (alert_name, since, limit)
+        cursor = await self._db.execute(sql, params)
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
     async def get_active_overrides_for_alert(
         self,
         alert_name: str,

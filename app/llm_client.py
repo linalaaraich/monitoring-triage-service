@@ -385,6 +385,76 @@ def build_prior_decision_block(prior_decision: dict | None) -> str:
     )
 
 
+def build_corrective_feedback_block(rows: list[dict] | None) -> str:
+    """Phase 6 (2026-06-03) — render the proactive operator-feedback block.
+
+    `rows` is the list produced by RCAStore.get_high_value_feedback_for_family
+    — each row is a feedback record JOINed with its prior rca_history row,
+    pre-filtered to high-value entries (verdict_was_right='no' OR a
+    non-empty actual_cause). Returns "" when the list is empty so the
+    prompt builder can skip the section.
+
+    Why this exists: operator wisdom is the strongest available training
+    signal we have — when on-call has explicitly corrected a past similar
+    alert, that correction is more authoritative than any MCP evidence
+    the LLM might pull. The hybrid design always injects high-value
+    feedback proactively (no token gamble that the LLM might or might not
+    pick the bounded-agency tool) AND exposes the broader feedback corpus
+    on demand via rca_history.list_feedback. This builder is for the
+    proactive half.
+    """
+    if not rows:
+        return ""
+
+    bullets = []
+    for r in rows:
+        # Prefer the feedback created_at (when the operator left the
+        # note); fall back to the underlying decision timestamp.
+        when = (r.get("created_at") or r.get("decision_timestamp") or "")[:10]
+        alert_name = r.get("alert_name") or "?"
+        service = r.get("affected_service") or "?"
+        verdict_was_right = (r.get("verdict_was_right") or "").lower()
+        action_was_right = (r.get("action_was_right") or "").lower()
+        actual_cause = (r.get("actual_cause") or "").strip()
+        notes = (r.get("notes") or "").strip()
+
+        lead = f"  - {when} (alert {alert_name} on {service}): "
+        line_parts: list[str] = []
+        if verdict_was_right == "no":
+            line_parts.append("operator said verdict was WRONG.")
+        if action_was_right == "no":
+            line_parts.append("operator said action was WRONG.")
+        if not line_parts and (actual_cause or notes):
+            # No explicit verdict/action correction, but operator wrote
+            # specific cause/notes — still high-value.
+            line_parts.append("operator left corrective context.")
+
+        bullet = lead + " ".join(line_parts)
+        if actual_cause:
+            # Trim to keep prompt budget bounded; the lede sentence carries
+            # the operator's correction.
+            ac = actual_cause.replace("\n", " ")
+            if len(ac) > 300:
+                ac = ac[:300].rstrip() + " ..."
+            bullet += f'\n    Actual cause: "{ac}"'
+        if notes and notes != actual_cause:
+            nt = notes.replace("\n", " ")
+            if len(nt) > 240:
+                nt = nt[:240].rstrip() + " ..."
+            bullet += f'\n    Notes: "{nt}"'
+        bullets.append(bullet)
+
+    body = "\n".join(bullets)
+    return (
+        "\n## OPERATOR CORRECTIVE FEEDBACK ON SIMILAR PAST ALERTS\n\n"
+        + body
+        + "\n\nTrust this feedback HEAVILY. If your reasoning contradicts what "
+        "operators have said about similar past alerts, you are likely wrong. "
+        "State explicitly in your RCA whether your current analysis aligns with "
+        "or differs from this feedback.\n"
+    )
+
+
 def _build_fallback_decision() -> LLMDecision:
     """Return a safe NEEDS_HUMAN_REVIEW fallback when the LLM is unavailable."""
     return LLMDecision(
@@ -432,6 +502,7 @@ class LLMClient:
         metric_facts=None,  # app.metric_interpreter.MetricFacts, but avoid import cycle
         tool_result_block: str | None = None,
         prior_decision: dict | None = None,  # DA-3 cross-row coherence anchor
+        corrective_feedback: list[dict] | None = None,  # Phase 6 proactive feedback
     ) -> tuple[LLMDecision, int]:
         """Run LLM investigation. Returns (decision, duration_ms).
 
@@ -441,10 +512,15 @@ class LLMClient:
         If prior_decision is given (DA-3), the prior cause for this exact
         fingerprint is injected with a coherence instruction so consecutive
         fires of a flapping alert don't produce contradictory RCAs.
+
+        If corrective_feedback is given (Phase 6), high-value operator
+        feedback rows are injected proactively in the prompt so the LLM
+        always sees operator wisdom for similar past alerts.
         """
         messages = self._build_prompt(
             alert, context, drain_summary, history_context, correlated,
             metric_facts, prior_decision=prior_decision,
+            corrective_feedback=corrective_feedback,
         )
         if tool_result_block:
             # Append to the final user message so the tool result is read
@@ -508,6 +584,7 @@ class LLMClient:
         correlated: list[dict] | None,
         metric_facts,
         prior_decision: dict | None = None,  # DA-3 cross-row coherence anchor
+        corrective_feedback: list[dict] | None = None,  # Phase 6 proactive feedback
     ) -> tuple[dict | None, int]:
         """Bounded-agency first half: ask the LLM to either request ONE
         tool call from the whitelist OR emit a final decision.
@@ -524,6 +601,7 @@ class LLMClient:
         messages = self._build_prompt(
             alert, context, drain_summary, history_context, correlated,
             metric_facts, prior_decision=prior_decision,
+            corrective_feedback=corrective_feedback,
         )
         messages[-1]["content"] += (
             "\n\n## YOUR FIRST PASS WAS DATA-STARVED\n\n"
@@ -583,6 +661,7 @@ class LLMClient:
         correlated: list[dict] | None = None,
         metric_facts=None,
         prior_decision: dict | None = None,
+        corrective_feedback: list[dict] | None = None,
     ) -> list[dict]:
         rule_expr = alert.annotations.get("expr", "") or "(rule expression not provided — ask the alert owner to add annotations.expr)"
         observed_value = _format_observed_value(alert.values)
@@ -685,6 +764,10 @@ class LLMClient:
         # no recent prior decision for this exact fingerprint.
         prior_decision_block = build_prior_decision_block(prior_decision)
 
+        # Phase 6 — proactive corrective-feedback block. Empty string when
+        # the family has no high-value operator feedback in the window.
+        corrective_feedback_block = build_corrective_feedback_block(corrective_feedback)
+
         # Loki block: precomputed in plain Python so the long literal with
         # `\n\n` lives outside the f-string expression. Python 3.12 (PEP 701)
         # allows backslashes inside f-string expressions; 3.11 does not. Audit
@@ -732,6 +815,7 @@ class LLMClient:
 {drain3_playbook_block}
 {correlated_block}
 {prior_decision_block}
+{corrective_feedback_block}
 The observed value above is ground-truth signal from Prometheus at the moment the rule's threshold was crossed. Cite this value explicitly in your RCA — do not say "insufficient data" if the alert itself carries a value.
 {exemplar_block}
 ## Pre-Gathered Context

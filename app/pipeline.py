@@ -561,11 +561,39 @@ class TriagePipeline:
                     (alert.fingerprint or "")[:12],
                 )
 
+        # Phase 6 — proactive high-value operator-feedback injection.
+        # Sister to DA-3: that block carries the prior LLM cause for this
+        # fingerprint; this block carries operator corrections on similar
+        # past alerts (same alertname + service) within 14 days. Always
+        # injected when non-empty so the LLM cannot miss it — the hybrid
+        # design also exposes the broader feedback corpus via the
+        # rca_history.list_feedback bounded-agency tool. Best-effort: a
+        # store error must not block the investigation.
+        corrective_feedback = []
+        try:
+            corrective_feedback = await self.store.get_high_value_feedback_for_family(
+                alert_name=alert.alertname,
+                affected_service=alert.service,
+                days=14,
+                limit=3,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Phase 6 corrective-feedback lookup failed (non-fatal — continuing without proactive feedback): %s",
+                exc,
+            )
+        if corrective_feedback:
+            logger.info(
+                "Phase 6: injecting %d high-value operator feedback row(s) for %s/%s",
+                len(corrective_feedback), alert.alertname, alert.service,
+            )
+
         decision, llm_ms = await self.llm.investigate(
             alert, ctx, anomaly_summary, history_context,
             correlated=correlated,
             metric_facts=metric_facts,
             prior_decision=prior_decision,
+            corrective_feedback=corrective_feedback,
         )
         llm_duration.observe(llm_ms / 1000)
 
@@ -649,6 +677,7 @@ class TriagePipeline:
                     alert, ctx, anomaly_summary, history_context,
                     correlated=correlated, metric_facts=metric_facts,
                     prior_decision=prior_decision,
+                    corrective_feedback=corrective_feedback,
                 )
                 llm_ms += agency_ms
                 llm_duration.observe(agency_ms / 1000)
@@ -668,6 +697,7 @@ class TriagePipeline:
                             correlated=correlated, metric_facts=metric_facts,
                             tool_result_block=tool_block,
                             prior_decision=prior_decision,
+                            corrective_feedback=corrective_feedback,
                         )
                         llm_duration.observe(rd_ms / 1000)
                         llm_ms += rd_ms
@@ -706,6 +736,7 @@ class TriagePipeline:
                     alert, ctx, anomaly_summary, retry_history,
                     correlated=correlated, metric_facts=metric_facts,
                     prior_decision=prior_decision,
+                    corrective_feedback=corrective_feedback,
                 )
                 llm_duration.observe(fallback_ms / 1000)
                 llm_ms += fallback_ms

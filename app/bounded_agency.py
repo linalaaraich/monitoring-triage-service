@@ -83,6 +83,19 @@ class RCAHistoryGetExemplarArgs(BaseModel):
     exemplar_id: str = Field(..., description="Exemplar id, e.g. 'oom-loop'")
 
 
+class RCAHistoryListFeedbackArgs(BaseModel):
+    """Phase 6 (2026-06-03) — list operator feedback rows for similar past
+    alerts. The hybrid feedback-loop design ALWAYS proactively injects the
+    HIGH-VALUE subset (verdict_was_right='no' OR non-empty actual_cause)
+    into the initial prompt; this tool surfaces the BROADER corpus on
+    demand so the LLM can read positive ratings, action_was_right notes,
+    and tag chips that didn't pass the high-value filter."""
+    alert_name: str = Field(..., description="Alert name to match")
+    service: str | None = Field(None, description="Affected service to match. Omit for alert-name-only filter.")
+    days: int = Field(14, ge=1, le=180, description="Days to look back")
+    limit: int = Field(5, ge=1, le=20, description="Max records to return")
+
+
 # Mapping from tool name → arg schema class. The model picks a tool by
 # name; we parse args into the matching schema (which rejects extras).
 _TOOL_SCHEMAS: dict[str, type[BaseModel]] = {
@@ -92,6 +105,7 @@ _TOOL_SCHEMAS: dict[str, type[BaseModel]] = {
     "rca_history.similar":         RCAHistorySimilarArgs,
     "rca_history.list_exemplars":  RCAHistoryListExemplarsArgs,
     "rca_history.get_exemplar":    RCAHistoryGetExemplarArgs,
+    "rca_history.list_feedback":   RCAHistoryListFeedbackArgs,
 }
 
 
@@ -144,6 +158,16 @@ Tool catalog:
     use when: you found a better-fitting archetype via list_exemplars and
     want its full RCA shape, evidence shape, and actions shape. Returns the
     full structured exemplar (the same content as the pre-injected reference).
+
+- rca_history.list_feedback
+    args: { "alert_name": "<name>", "service": "<opt>", "days": <1-180>, "limit": <1-20> }
+    use when: you want to see what operators have rated/said about similar
+    past alerts that aren't already in your proactive feedback block. The
+    proactive block at the top of this prompt carries ONLY high-value
+    feedback (verdict_was_right='no' OR non-empty actual_cause); this tool
+    returns the broader corpus including positive ratings, action_was_right
+    notes, and tag chips. Useful when you want a more complete picture of
+    operator opinion on this alert pattern before committing to a verdict.
 
 If none of these will help, return the normal decision JSON with
 best-effort reasoning and a needs_review-worthy confidence.
@@ -268,6 +292,26 @@ async def execute_tool(
                 if ex is None:
                     return {"tool": name, "args": args, "error": f"exemplar_not_found:{args['exemplar_id']}"}
                 return {"tool": name, "args": args, "result": ex}
+            elif name == "rca_history.list_feedback":
+                # Phase 6 (2026-06-03) — broader operator-feedback corpus.
+                # Routes through rca_history_mcp's /tools/list_feedback so
+                # the MCP-only data-access invariant holds (no direct DB
+                # read from the bounded-agency path). Sister to the
+                # proactive corrective_feedback block built in the
+                # pipeline pre-call.
+                params = {
+                    "alert_name": args["alert_name"],
+                    "days": args.get("days", 14),
+                    "limit": args.get("limit", 5),
+                }
+                if args.get("service"):
+                    params["service"] = args["service"]
+                r = await client.get(
+                    f"{settings.rca_history_mcp_url}/tools/list_feedback",
+                    params=params,
+                )
+                r.raise_for_status()
+                return {"tool": name, "args": args, "result": r.json()}
             else:
                 return {"tool": name, "args": args, "error": f"unknown_tool:{name}"}
     except httpx.HTTPError as e:
