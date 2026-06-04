@@ -131,7 +131,10 @@ function Sidebar({ active = "triage", collapsed = false, onToggleCollapse }) {
       background: "var(--bg-soft)",
       borderRight: "1px solid var(--border)",
       display: "flex", flexDirection: "column",
-      alignSelf: "stretch",
+      // Pin to the viewport so the footer user/on-call card is ALWAYS visible
+      // without scrolling — the nav section (flex:1, overflowY:auto) scrolls
+      // internally instead of pushing the card below the fold. (2026-06-04)
+      height: "100vh", position: "sticky", top: 0,
       transition: "width .15s",
     }}>
       {/* Brand + collapse toggle */}

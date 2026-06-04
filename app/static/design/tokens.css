@@ -53,7 +53,12 @@ html[data-theme="light"] body {
   --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-/* Light theme overrides — applied via [data-theme="light"] on .cires wrapper */
+/* Light theme overrides. Applied at BOTH the <html> level (so server-rendered
+   chrome that lives OUTSIDE .cires — e.g. the v2 filter bar — themes correctly;
+   it was staying dark because var(--*) fell back to the :root dark defaults) AND
+   the .cires React wrapper. Both carry data-theme from the same persisted
+   obs-rca-theme key, so they never disagree. (2026-06-04) */
+html[data-theme="light"],
 .cires[data-theme="light"] {
   --bg:           #f4f6fa;
   --bg-soft:      #ffffff;
