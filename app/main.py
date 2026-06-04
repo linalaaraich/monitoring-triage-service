@@ -2245,6 +2245,7 @@ from app.v2_mappings import (
     ALERT_NAME_PLAIN as _V2_ALERT_NAME_PLAIN,
     SERVICE_TYPE as _V2_SERVICE_TYPE,
     NAMESPACE as _V2_NAMESPACE,
+    env_resolver,
 )
 
 
@@ -2629,12 +2630,14 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
         "dateShort": date_short,
         "relTime": rel_time,
         "activeFor": active_for,
-        # env: heuristic for the single-cluster test bed. Real multi-env support
-        # is SF-1 in Sprint 4 (extract from alert labels — `env`, `environment`,
-        # or k8s namespace prefix). For now everything on observability-rca-k3s
-        # reads as `prod`; rental-namespace alerts read as `stg` so the operator
-        # sees at least two values in the column.
-        "env": "stg" if "rental" in svc else "prod",
+        # env: render the env resolved + persisted by the pipeline
+        # (env_resolver's full label-precedence chain — alert labels.env first;
+        # task #11 fix 2026-06-04). Legacy rows written before the env column
+        # existed have no stored value: fall back to a service-token inference
+        # via env_resolver (which still maps `rental*` -> stg) and ultimately
+        # to "unknown" — never a silent hardcoded "prod".
+        "env": (r.get("env") or "").strip().lower()
+                or env_resolver(service=svc if svc != "—" else None),
         "namespace": _V2_NAMESPACE.get(svc, svc[:20] or "—"),
         "serviceType": _V2_SERVICE_TYPE.get(svc, "infra"),
         "component": svc,

@@ -99,7 +99,7 @@ async def test_process_drain3_webhook_builds_rich_description():
     # the alert that gets passed to _process_alert.
     captured_alerts = []
 
-    async def _capture(alert, source):
+    async def _capture(alert, source, env=None):
         captured_alerts.append(alert)
 
     # Bypass __init__: set only what process_drain3_webhook touches
@@ -145,7 +145,7 @@ async def test_process_drain3_webhook_handles_empty_templates_gracefully():
     from app.pipeline import TriagePipeline
 
     captured_alerts = []
-    async def _capture(alert, source):
+    async def _capture(alert, source, env=None):
         captured_alerts.append(alert)
     pipeline = TriagePipeline.__new__(TriagePipeline)
     pipeline._process_alert = _capture

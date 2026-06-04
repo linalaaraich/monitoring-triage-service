@@ -28,6 +28,7 @@ from app.metrics import (
 from app.models import Decision, Drain3Webhook, GrafanaAlert, GrafanaWebhook, RCARecord
 from app.notifier import EmailNotifier
 from app.rca_store import RCAStore, _classify_rca_quality
+from app.v2_mappings import env_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +78,38 @@ class TriagePipeline:
         self.notifier = notifier
         self.dedup = dedup
 
+    @staticmethod
+    def _resolve_env(alert: GrafanaAlert,
+                     common_labels: dict | None = None,
+                     common_annotations: dict | None = None) -> str:
+        """Resolve the environment for an alert via the full precedence chain.
+
+        Tier 1 (alert `labels.env`/`environment`/`deployment_environment`) only
+        runs when we feed the resolver the actual labels — historically the
+        pipeline left `env` unset on the RCARecord and rca_store re-resolved
+        from `service` alone, so tier-1 never fired and every row read "prod"
+        via the legacy `env_for` shim (operator-reported, task #11). Resolve it
+        here where the labels / commonLabels are on hand, and store the result
+        on the record so rca_store never falls back to service-only.
+        """
+        return env_resolver(
+            labels=alert.labels,
+            annotations=alert.annotations,
+            common_labels=common_labels,
+            common_annotations=common_annotations,
+            service=alert.service,
+            namespace=(alert.labels.get("namespace") or None),
+        )
+
     async def process_grafana_webhook(self, webhook: GrafanaWebhook):
         for alert in webhook.alerts:
             try:
-                await self._process_alert(alert, source="grafana")
+                env = self._resolve_env(
+                    alert,
+                    common_labels=webhook.commonLabels,
+                    common_annotations=webhook.commonAnnotations,
+                )
+                await self._process_alert(alert, source="grafana", env=env)
             except Exception as e:
                 logger.error("Unhandled error processing alert %s: %s", alert.alertname, e, exc_info=True)
 
@@ -139,6 +168,7 @@ class TriagePipeline:
         # suppressed here — it always goes to the LLM. The stabilised
         # fingerprint above means genuinely-recurring noise of the same shape
         # also collapses via the normal dedup path on subsequent fires.
+        env = self._resolve_env(alert)
         has_new_templates = any(
             (t or "").strip() for t in (webhook.new_templates or [])
         )
@@ -172,6 +202,7 @@ class TriagePipeline:
                 action_taken="suppressed",
                 investigation_duration_ms=0,
                 rca_quality="data_starved",
+                env=env,
             )
             try:
                 await self.store.save_decision(record)
@@ -180,11 +211,17 @@ class TriagePipeline:
             return
 
         try:
-            await self._process_alert(alert, source="drain3")
+            await self._process_alert(alert, source="drain3", env=env)
         except Exception as e:
             logger.error("Unhandled error processing Drain3 alert: %s", e, exc_info=True)
 
-    async def _process_alert(self, alert: GrafanaAlert, source: str):
+    async def _process_alert(self, alert: GrafanaAlert, source: str,
+                             env: str | None = None):
+        # env resolved by the webhook entrypoint (full label precedence). Fall
+        # back to a labels-aware resolve for any direct caller that didn't pass
+        # one, so we never silently degrade to rca_store's service-only path.
+        if env is None:
+            env = self._resolve_env(alert)
         pipeline_start = time.monotonic()
 
         # Step 1: Deduplication (P1.6 — fingerprint-window).
@@ -222,6 +259,7 @@ class TriagePipeline:
                 ),
                 investigation_duration_ms=int((time.monotonic() - pipeline_start) * 1000),
                 rca_quality="actionable",
+                env=env,
             )
             try:
                 await self.store.save_decision(short)
@@ -253,6 +291,7 @@ class TriagePipeline:
                 llm_reasoning=None,
                 action_taken="suppressed",
                 investigation_duration_ms=elapsed_ms,
+                env=env,
             )
             await self.store.save_decision(record)
             return
@@ -284,6 +323,7 @@ class TriagePipeline:
                 llm_reasoning=None,
                 action_taken="suppressed",
                 investigation_duration_ms=elapsed_ms,
+                env=env,
             )
             await self.store.save_decision(record)
             return
@@ -294,7 +334,7 @@ class TriagePipeline:
             # Step 2: Pipeline with timeout fallback
             try:
                 await asyncio.wait_for(
-                    self._investigate_and_act(alert, source, pipeline_start),
+                    self._investigate_and_act(alert, source, pipeline_start, env=env),
                     timeout=settings.pipeline_timeout,
                 )
             except asyncio.TimeoutError:
@@ -320,6 +360,7 @@ class TriagePipeline:
                     triage_decision="timeout_passthrough",
                     action_taken="emailed_raw",
                     investigation_duration_ms=elapsed_ms,
+                    env=env,
                 )
                 await self.store.save_decision(record)
         finally:
@@ -351,8 +392,11 @@ class TriagePipeline:
         return None
 
     async def _investigate_and_act(
-        self, alert: GrafanaAlert, source: str, pipeline_start: float
+        self, alert: GrafanaAlert, source: str, pipeline_start: float,
+        env: str | None = None,
     ):
+        if env is None:
+            env = self._resolve_env(alert)
         # Step 2.5 (SF-5): sustained-vs-spike modifier. If this fingerprint
         # (or family-scope sibling — MediumCpu→HighCpu on the same host)
         # already fired within sf5_transient_spike_window_seconds, classify
@@ -444,6 +488,7 @@ class TriagePipeline:
                         alert_instance=alert.instance,
                         alert_component=alert.labels.get("component"),
                         alert_signal=alert.labels.get("signal"),
+                        env=env,
                     )
                     await self.store.save_decision(record)
                     # Link the dedup window to this shelved row so
@@ -1128,6 +1173,7 @@ class TriagePipeline:
             anomaly_summary=decision.anomaly_summary or (ctx.anomaly_summary if ctx else None),
             correlated_alerts=_json.dumps(correlated) if correlated else None,
             excluded_from_lookup=1 if should_quarantine else 0,
+            env=env,
         )
 
         # Step 8: Act on decision. A notifier failure (SMTP hiccup, template

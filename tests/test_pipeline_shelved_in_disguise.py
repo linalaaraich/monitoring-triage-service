@@ -192,7 +192,7 @@ async def _run_with_staged_decision(
     from app.metrics import alerts_processed, emails_sent
     from app.pipeline import _is_shelved_in_disguise
 
-    async def _stub_investigate_and_act(alert, source, pipeline_start):
+    async def _stub_investigate_and_act(alert, source, pipeline_start, env=None):
         elapsed_ms = int((_time.monotonic() - pipeline_start) * 1000)
         is_shelved_in_disguise = _is_shelved_in_disguise(decision, quality)
         record = RCARecord(

@@ -468,3 +468,142 @@ def test_subject_env_from_label_when_present():
     alert.labels["env"] = "uat"
     subj = n._v2_subject(alert, _make_decision(), _make_record(env=None))
     assert "[uat]" in subj
+
+
+# ---------------------------------------------------------------------------
+# Task #11 (2026-06-04) — env must be resolved from the alert labels in the
+# pipeline and persisted on the record, NOT a hardcoded "prod"/rental heuristic.
+#
+# Root cause: _process_alert never resolved env, so rca_store fell back to
+# env_resolver(service=...) (tier-1 alert labels.env never ran) and the v2
+# transform rendered `"stg" if "rental" in svc else "prod"` — a silent prod
+# default. These tests pin the wire-through end to end.
+# ---------------------------------------------------------------------------
+
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
+
+from app.models import GrafanaWebhook  # noqa: E402
+from app.pipeline import TriagePipeline  # noqa: E402
+from app.main import _v2_transform_row  # noqa: E402
+
+
+def _pipeline_with_store(store):
+    return TriagePipeline(
+        rca_store=store,
+        drain=MagicMock(),
+        context_gatherer=MagicMock(),
+        llm_client=MagicMock(),
+        notifier=MagicMock(send_escalation=AsyncMock(),
+                           send_timeout_alert=AsyncMock()),
+        dedup=MagicMock(check=AsyncMock(return_value=(False, None))),
+    )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_persists_alert_label_env(env_store):
+    """An alert carrying labels.env=dev persists `dev` (tier-1 wins) — proving
+    env_resolver is fed the alert labels in the pipeline, not service-only."""
+    # Pre-seed a prior dismiss so the suppression short-path persists a record
+    # without needing the LLM, and force that exact short-path.
+    await env_store.save_decision(RCARecord(
+        alert_name="HighCpuUsage", affected_service="spring-boot",
+        triage_decision="investigate", llm_verdict="dismiss",
+        action_taken="suppressed",
+    ))
+    pipeline = _pipeline_with_store(env_store)
+    alert = GrafanaAlert(
+        status="firing",
+        labels={"alertname": "HighCpuUsage", "service": "spring-boot",
+                "severity": "warning", "env": "dev"},
+        annotations={"summary": "cpu"},
+        startsAt="2026-06-04T10:00:00Z",
+        fingerprint="fp-env-dev",
+    )
+    webhook = GrafanaWebhook(receiver="t", status="firing", alerts=[alert])
+    await pipeline.process_grafana_webhook(webhook)
+
+    rows = await env_store.get_decisions(limit=20, since_hours=1)
+    suppressed = [r for r in rows if r["triage_decision"] == "triage_suppressed"]
+    assert suppressed, "expected a triage_suppressed short-path row"
+    assert suppressed[0]["env"] == "dev"
+    # And the dashboard renders the persisted dev, not a hardcoded prod.
+    assert _v2_transform_row(suppressed[0])["env"] == "dev"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_no_env_hint_falls_back_not_prod(env_store):
+    """An alert with NO env hint for a non-rental service falls back through
+    service/namespace inference to "unknown" — never a silent prod."""
+    await env_store.save_decision(RCARecord(
+        alert_name="HighCpuUsage", affected_service="mystery-service",
+        triage_decision="investigate", llm_verdict="dismiss",
+        action_taken="suppressed",
+    ))
+    pipeline = _pipeline_with_store(env_store)
+    alert = GrafanaAlert(
+        status="firing",
+        labels={"alertname": "HighCpuUsage", "service": "mystery-service",
+                "severity": "warning"},
+        annotations={"summary": "cpu"},
+        startsAt="2026-06-04T10:00:00Z",
+        fingerprint="fp-env-none",
+    )
+    webhook = GrafanaWebhook(receiver="t", status="firing", alerts=[alert])
+    await pipeline.process_grafana_webhook(webhook)
+
+    rows = await env_store.get_decisions(limit=20, since_hours=1)
+    suppressed = [r for r in rows
+                  if r["triage_decision"] == "triage_suppressed"
+                  and r["affected_service"] == "mystery-service"]
+    assert suppressed
+    assert suppressed[0]["env"] == "unknown"
+    assert suppressed[0]["env"] != "prod"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_common_labels_env_tier(env_store):
+    """commonLabels.env (Alertmanager-style) is honoured when the per-alert
+    label is absent — proves the webhook commonLabels are threaded in."""
+    await env_store.save_decision(RCARecord(
+        alert_name="HighCpuUsage", affected_service="spring-boot",
+        triage_decision="investigate", llm_verdict="dismiss",
+        action_taken="suppressed",
+    ))
+    pipeline = _pipeline_with_store(env_store)
+    alert = GrafanaAlert(
+        status="firing",
+        labels={"alertname": "HighCpuUsage", "service": "spring-boot",
+                "severity": "warning"},
+        annotations={"summary": "cpu"},
+        startsAt="2026-06-04T10:00:00Z",
+        fingerprint="fp-env-common",
+    )
+    webhook = GrafanaWebhook(receiver="t", status="firing", alerts=[alert],
+                             commonLabels={"env": "uat"})
+    await pipeline.process_grafana_webhook(webhook)
+
+    rows = await env_store.get_decisions(limit=20, since_hours=1)
+    suppressed = [r for r in rows if r["triage_decision"] == "triage_suppressed"]
+    assert suppressed
+    assert suppressed[0]["env"] == "uat"
+
+
+def test_v2_transform_renders_stored_env_no_prod_hardcode():
+    """_v2_transform_row renders the stored env column verbatim and never
+    falls back to a hardcoded prod for a non-rental service."""
+    row = {"id": "x" * 12, "affected_service": "spring-boot",
+           "alert_name": "HighCpuUsage", "env": "dev"}
+    assert _v2_transform_row(row)["env"] == "dev"
+
+
+def test_v2_transform_legacy_row_no_env_falls_back_not_prod():
+    """A legacy row with no env column infers via env_resolver (rental->stg,
+    else unknown) — the old `else prod` hardcode is gone."""
+    # non-rental, unknown service -> unknown (NOT prod)
+    row = {"id": "y" * 12, "affected_service": "mystery-service",
+           "alert_name": "HighCpuUsage"}
+    assert _v2_transform_row(row)["env"] == "unknown"
+    # rental service still infers stg via the resolver's service-token tier
+    rrow = {"id": "z" * 12, "affected_service": "rental-backend",
+            "alert_name": "HighCpuUsage"}
+    assert _v2_transform_row(rrow)["env"] == "stg"
