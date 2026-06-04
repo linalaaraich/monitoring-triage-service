@@ -52,6 +52,15 @@ ALERT_NAME_PLAIN = {
 }
 
 SERVICE_TYPE = {
+    # WS-1 (2026-06-04): operator-facing names for the platform's app tenant.
+    # The image is the mukundmadhav employee-CRUD demo (/api/employee). The
+    # generic framework tokens (`spring-boot`, `mysql`, `kong`) stay as
+    # legacy aliases so historical RCA rows keep resolving; new emissions
+    # from the OTel service.name + app.kubernetes.io/name relabel use the
+    # `employees-*` tokens.
+    "employees-backend":  "backend",
+    "employees-db":       "db",
+    "employees-gateway":  "network",
     "spring-boot": "backend",
     "spring-boot-app": "backend",
     "springboot-app": "backend",
@@ -76,6 +85,10 @@ SERVICE_TYPE = {
 }
 
 NAMESPACE = {
+    # WS-1 (2026-06-04): see SERVICE_TYPE note above.
+    "employees-backend":  "app",
+    "employees-db":       "app",
+    "employees-gateway":  "network",
     "spring-boot": "app",
     "spring-boot-app": "app",
     "springboot-app": "app",

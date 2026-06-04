@@ -43,16 +43,19 @@ exemplars:
     archetype: "JVM container OOM-kill loop"
     match:
       alertname: "^(Pod)?(High|Medium|Critical)MemoryUsage$"
-      services: ["spring-boot", "spring-boot-app", "springboot-app"]
+      # WS-1 (2026-06-04): `employees-backend` is the new operator-facing
+      # token from app.kubernetes.io/name + OTel service.name. The
+      # `spring-boot*` aliases stay so historical alerts still match.
+      services: ["employees-backend", "spring-boot", "spring-boot-app", "springboot-app"]
       deployment_types: ["k8s"]
       signal: "metric"
       severity: ["critical", "warning"]
     decision: "ESCALATE"
     confidence_band: "0.88-0.95"
     one_line: "JVM heap saturating cgroup limit because the JVM defaults aren't tuned for the container — OOM-kill cycle confirmed."
-    human_cause: "spring-boot is in an OOM-kill loop, restarting every 12 minutes because the JVM heap is capped at only 256 MB."
+    human_cause: "employees-backend is in an OOM-kill loop, restarting every 12 minutes because the JVM heap is capped at only 256 MB."
     rca: |
-      spring-boot is in a steady-state OOM-kill loop: every ~12 minutes the JVM heap
+      employees-backend is in a steady-state OOM-kill loop: every ~12 minutes the JVM heap
       exhausts, the kernel kills the container, and the pod restarts. The mechanism is
       a JVM-vs-cgroup mismatch — JAVA_TOOL_OPTIONS is unset so the JVM uses ~25% of the
       cgroup as heap (the default), which produces ~256 MB effective heap for a 1 GiB
@@ -86,12 +89,12 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.88-0.95"
     one_line: "Kong is healthy; latency originates upstream — point the operator at the right service."
-    human_cause: "Kong itself is fast; the slowness is in the upstream spring-boot service - operators should look there, not at Kong."
+    human_cause: "Kong itself is fast; the slowness is in the upstream employees-backend service - operators should look there, not at Kong."
     rca: |
       Kong is the alert subject but not the cause: its own proxy time
       (kong_proxy_latency_ms p95) is single-digit milliseconds. Almost all of the
       reported end-to-end p95 is time spent inside the upstream service (commonly
-      spring-boot), dominated by a single child operation — typically a MySQL query
+      employees-backend), dominated by a single child operation — typically a MySQL query
       that's regressed or a downstream resource that's saturated. Trace evidence shows
       >95% of total request time in the upstream span; the kong span is a thin shim.
       The right intervention is in the upstream service (query plan, connection pool,
@@ -123,13 +126,14 @@ exemplars:
     archetype: "Service p95 spike — the alerted service IS the bottleneck"
     match:
       alertname: "^(High|Critical)P95Latency$"
-      services: ["spring-boot", "spring-boot-app", "springboot-app", "frontend"]
+      # WS-1 (2026-06-04): `employees-backend` is the operator-facing alias.
+      services: ["employees-backend", "spring-boot", "spring-boot-app", "springboot-app", "frontend"]
       deployment_types: ["k8s"]
       signal: "metric"
     decision: "ESCALATE"
     confidence_band: "0.78-0.92"
     one_line: "Service is saturated at one of: connection pool exhausted, GC pauses blocking threads, slow downstream call, or DB query plan regression — name which from the trace breakdown."
-    human_cause: "spring-boot is saturated on its JDBC connection pool - requests are queueing for a free database connection instead of being served."
+    human_cause: "employees-backend is saturated on its JDBC connection pool - requests are queueing for a free database connection instead of being served."
     rca: |
       The alerted service itself is the bottleneck — there is no upstream layer
       to redirect attribution to (unlike the Kong-says-upstream pattern). The
@@ -168,14 +172,15 @@ exemplars:
     archetype: "Critical CPU/memory saturation on an application service — paged tier"
     match:
       alertname: "^(Pod)?Critical(Cpu|Memory)Usage$"
-      services: ["spring-boot", "spring-boot-app", "springboot-app", "kong", "frontend", "k3s-node"]
+      # WS-1 (2026-06-04): `employees-*` are the operator-facing aliases.
+      services: ["employees-backend", "employees-db", "employees-gateway", "spring-boot", "spring-boot-app", "springboot-app", "kong", "frontend", "k3s-node"]
       deployment_types: ["k8s", "systemd"]
       signal: "metric"
       severity: ["critical"]
     decision: "ESCALATE"
     confidence_band: "0.90-0.98"
     one_line: "A specific resource is exhausted — the cgroup limit, the JVM heap, or the host's physical memory. Name which from the metric breakdown."
-    human_cause: "spring-boot is sitting at 98% of its memory cap for more than 5 minutes - the next request will trigger an OOM-kill."
+    human_cause: "employees-backend is sitting at 98% of its memory cap for more than 5 minutes - the next request will trigger an OOM-kill."
     rca: |
       The host or pod has hit a hard resource ceiling — this is not seasonal
       noise. CriticalCpuUsage means the CPU has been at >90% for the rule's
@@ -185,7 +190,7 @@ exemplars:
       from OS memory pressure); for CPU, check whether cpu_throttled_time
       is non-zero (pod throttling) vs across-the-host (noisy neighbour or
       genuine demand). Trace evidence shows whether the saturation
-      originates from spring-boot's own request handling, a runaway batch
+      originates from employees-backend's own request handling, a runaway batch
       job, or a sidecar (otel-agent, init-container). The right action is
       sized to the cause: raise the limit if normal load exceeded
       provisioning; rollback the deploy if a regression introduced the
@@ -481,7 +486,8 @@ exemplars:
     archetype: "App boot failure / CrashLoopBackOff from a bad config or migration"
     match:
       alertname: "^(KubePodCrashLooping|TargetDown)$"
-      services: ["spring-boot", "spring-boot-app", "springboot-app", "kong", "frontend"]
+      # WS-1 (2026-06-04): `employees-*` are the operator-facing aliases.
+      services: ["employees-backend", "employees-db", "employees-gateway", "spring-boot", "spring-boot-app", "springboot-app", "kong", "frontend"]
       deployment_types: ["k8s"]
       signal: "metric"
     decision: "ESCALATE"
@@ -534,7 +540,7 @@ exemplars:
       services that the app layer still expects to reach. The diagnostic split is
       what makes this readable — Kong (or the alerting service) sees connect-timeout
       / connect-reset on its upstream connection and surfaces 5xx; meanwhile the
-      apparent target (spring-boot) is reporting healthy by its own metrics
+      apparent target (employees-backend) is reporting healthy by its own metrics
       (up{}=1, application thread pools idle) and Loki shows zero inbound requests
       landing in the target during the alert window. Jaeger confirms the gap
       explicitly: kong spans show connect-timeout, no child spans appear in the

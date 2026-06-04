@@ -177,6 +177,14 @@ class Settings(BaseSettings):
     # architecture-specific suggestions (templates emit generic actions only).
     service_deployment_type: dict[str, str] = {
         # k3s workloads (live in the k3s cluster, namespace=app/frontend/network/observability)
+        # WS-1 (2026-06-04): operator-facing names for the platform's app
+        # tenant. The image is the mukundmadhav employee-CRUD demo
+        # (/api/employee). The generic framework tokens stay as aliases
+        # below so historical alerts and dashboards keep routing to k8s
+        # actions.
+        "employees-backend": "k8s",
+        "employees-db":      "k8s",
+        "employees-gateway": "k8s",
         "spring-boot":   "k8s",
         # spring-boot-app + springboot-app are Grafana / OTel label variants for
         # the same workload; charts/spring-boot/ is the canonical deployment.
