@@ -3043,7 +3043,8 @@ async def dashboard_v2(
     # Server-rendered filter bar. The React layer doesn't need to know about
     # filters - the page is reloaded on every change, and the alerts payload
     # arrives already filtered.
-    filter_bar_html = _render_v2_filter_bar(filters, page=page, size=size)
+    # (legacy server-rendered v2 filter bar removed 2026-06-04 — the React app
+    # renders its own FilterBar; the duplicate dark bar above #root is gone.)
     # Mirror the resolved filter set into window.CIRES_FILTERS so the React
     # layer can surface "active filters" badges + the empty-filtered state.
     filters_payload = {
@@ -3176,7 +3177,9 @@ async def dashboard_v2(
 </head>
 <body>
 
-{filter_bar_html}
+<!-- 2026-06-04: removed the legacy server-rendered v2-filter-bar that rendered
+     here ABOVE the React app — it was a duplicate dark bar stacked on top of
+     the React chrome (which has its own FilterBar). The React app owns the UI. -->
 
 <div id="root"></div>
 
