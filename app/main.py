@@ -2263,6 +2263,114 @@ def _v2_humanize_duration(seconds: float) -> str:
     return f"{d} d {h} h" if h else f"{d} d"
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 2026-06-04 (WS-2 / detail-page deep links). The detail page's
+# DetailHeader has three buttons ("Open in Grafana", "Open in Loki",
+# "Open in Jaeger") that previously linked to bare service roots
+# (often the dead old-account IP). Operator feedback 2026-06-04 was
+# explicit: "Grafana and other extra links do not work, fix that have
+# them point to the exact needed page."
+#
+# `_build_cires_links` takes the resolved alert (after _v2_transform_row)
+# and returns a {grafana, loki, jaeger} dict where each URL deep-links to
+# the dashboard / Explore view the operator most likely needs for that
+# specific alert shape:
+#
+#   * Infra alerts (Cpu / Memory / Disk on a node)      → unified-overview
+#   * Latency / RequestRate (app on spring-boot / kong) → tracing-overview
+#   * Drain3 / OTel collector health                    → otel-collector-health
+#   * Otherwise → Grafana root (no dashboard guess beats the dashboards page)
+#
+# Loki + Jaeger always carry a service-name filter when the alert has a
+# resolvable affected_service, so Explore / Search opens prefiltered.
+# Dashboard UIDs are the ones provisioned by
+# monitoring-project/roles/grafana/files/dashboards/*.json — verified
+# at implementation time, not made up.
+# ──────────────────────────────────────────────────────────────────────
+_DASH_UID_UNIFIED = "unified-overview"
+_DASH_UID_TRACING = "tracing-overview"
+_DASH_UID_OTEL    = "otel-collector-health"
+
+
+def _grafana_deep_link_for_alert(alert_name: str, service: str) -> str:
+    """Pick the most relevant provisioned dashboard URL for this alert.
+
+    Returns a path of the form `/d/{uid}/{slug}?var-service=<svc>` when
+    we can route confidently, else the Grafana root. Filter params are
+    safe to include even when the dashboard has no matching template
+    variable — Grafana ignores unknown var-* keys.
+    """
+    import urllib.parse as _u
+    base = (settings.grafana_url or "").rstrip("/")
+    name = (alert_name or "")
+    svc_q = _u.quote_plus(service) if service and service != "—" else ""
+
+    def _with_svc(path: str) -> str:
+        if not svc_q:
+            return f"{base}{path}"
+        sep = "&" if "?" in path else "?"
+        return f"{base}{path}{sep}var-service={svc_q}"
+
+    # OTel collector health / Drain3 anomalies → collector dashboard.
+    if "Drain3" in name or "Otel" in name or "OTel" in name:
+        return _with_svc(f"/d/{_DASH_UID_OTEL}/otel-collector-health")
+    # Latency / request-rate / error-rate → distributed tracing overview.
+    if any(k in name for k in ("P95Latency", "Latency", "RequestRate", "ErrorRate", "HighKong", "HighP95")):
+        return _with_svc(f"/d/{_DASH_UID_TRACING}/distributed-tracing-overview")
+    # Infra (CPU / Memory / Disk / Pod) → unified overview.
+    if any(k in name for k in ("Cpu", "CPU", "Memory", "Disk", "Pod", "Node", "TargetDown")):
+        return _with_svc(f"/d/{_DASH_UID_UNIFIED}/unified-observability-overview")
+    # Fallback: Grafana root.
+    return base or "#"
+
+
+def _loki_deep_link_for_alert(service: str) -> str:
+    """Open Loki Explore prefiltered to {service_name="<service>"} for ~1h."""
+    import urllib.parse as _u
+    import json as _j
+    base = (settings.loki_url or "").rstrip("/")
+    if not base:
+        return "#"
+    if not service or service == "—":
+        return base
+    expr = f'{{service_name="{service}"}}'
+    left = {
+        "datasource": "loki",
+        "queries": [{"refId": "A", "expr": expr, "queryType": "range"}],
+        "range": {"from": "now-1h", "to": "now"},
+    }
+    qs = _u.urlencode({"orgId": "1", "left": _j.dumps(left, separators=(",", ":"))})
+    return f"{base}/explore?{qs}"
+
+
+def _jaeger_deep_link_for_alert(service: str) -> str:
+    """Open the Jaeger search UI prefiltered to the affected service for ~1h."""
+    import urllib.parse as _u
+    base = (settings.jaeger_url or "").rstrip("/")
+    if not base:
+        return "#"
+    if not service or service == "—":
+        return base
+    qs = _u.urlencode({"service": service, "lookback": "1h"})
+    return f"{base}/search?{qs}"
+
+
+def _build_cires_links(alert: dict) -> dict:
+    """Compute the three CIRES_LINKS URLs for the resolved alert.
+
+    `alert` is the dict produced by `_v2_transform_row` (has
+    `alertName` + `component` keys). Returns the dict that gets
+    json-dumped into the detail page's `window.CIRES_LINKS`.
+    """
+    alert_name = (alert.get("alertName") or "")
+    service = (alert.get("component") or alert.get("boldSubject") or "") or ""
+    return {
+        "grafana": _grafana_deep_link_for_alert(alert_name, service),
+        "loki":    _loki_deep_link_for_alert(service),
+        "jaeger":  _jaeger_deep_link_for_alert(service),
+    }
+
+
 def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
                        drain3_stats: dict | None = None,
                        now_utc=None) -> dict:
@@ -2394,10 +2502,27 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
         else:
             parsed = raw_ev
         if isinstance(parsed, list):
+            # 2026-06-04 (WS-2 Prong 4): evidence[].link used to be the
+            # bare string "Grafana" which the frontend turned into a
+            # dead "#" anchor. Populate with a real Grafana deep-link
+            # using the same routing helper as DetailHeader. Per-row
+            # PromQL-aware Grafana Explore links (so each evidence row
+            # opens its own metric) deferred to Sprint 5 (US-G-EV1)
+            # so we don't block the old-account-IP fix on a bigger
+            # refactor of the evidence array shape.
+            ev_link = _grafana_deep_link_for_alert(alert_name, svc)
             for e in parsed[:5]:
                 if isinstance(e, str):
-                    evidence.append({"source": "prom", "text": e, "link": "Grafana"})
+                    evidence.append({"source": "prom", "text": e, "link": ev_link})
                 elif isinstance(e, dict):
+                    # Existing dicts may carry their own link or none. If
+                    # the link is empty / placeholder ("Grafana" / "#"),
+                    # overwrite with the contextual URL so the row is
+                    # clickable. Preserve any real URL the upstream code
+                    # has already provided.
+                    existing = (e.get("link") or "").strip()
+                    if (not existing) or existing in ("#", "Grafana", "Loki", "Jaeger"):
+                        e = {**e, "link": ev_link}
                     evidence.append(e)
     except Exception:
         pass
@@ -4414,14 +4539,16 @@ async def dashboard_v2_alert(short_id: str):
   window.CIRES_NOW_LOCAL = "{now_tng}";
   window.CIRES_DASHBOARD_STATS = {_json2.dumps(dashboard_stats)};
   window.CIRES_SIDEBAR_BADGES = {_json2.dumps(sidebar_badges)};
-  // 2026-06-02 - real Grafana/Loki/Jaeger hrefs for DetailHeader buttons.
-  // detail.jsx reads window.CIRES_LINKS.{{grafana,loki,jaeger}} with a
+  // 2026-06-04 (WS-2) - real Grafana/Loki/Jaeger deep-links for
+  // DetailHeader buttons. detail.jsx reads window.CIRES_LINKS with a
   // "#" fallback so the design canvas page still renders standalone.
-  window.CIRES_LINKS = {_json2.dumps({
-      "grafana": settings.grafana_url,
-      "loki":    settings.loki_url,
-      "jaeger":  settings.jaeger_url,
-  })};
+  // Each URL is now contextual to THIS alert (alert-name + service):
+  // Grafana routes to unified-overview / tracing-overview /
+  // otel-collector-health based on the alert family; Loki opens
+  // Explore prefiltered to {{service_name="<svc>"}}; Jaeger opens
+  // /search prefiltered to ?service=<svc>&lookback=1h. See
+  // `_build_cires_links` for the routing table.
+  window.CIRES_LINKS = {_json2.dumps(_build_cires_links(alert))};
 </script>
 
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>

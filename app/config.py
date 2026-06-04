@@ -134,9 +134,15 @@ class Settings(BaseSettings):
     # Public UIs for deep-links in the escalation email + dashboard.
     # Defaults assume the tailnet/MagicDNS layout; override per-deployment
     # via env (GRAFANA_URL, JAEGER_URL, LOKI_URL).
-    grafana_url: str = "http://52.202.21.192:3000"
-    jaeger_url: str = "http://52.202.21.192:16686"
-    loki_url: str = "http://52.202.21.192:3100"
+    # 2026-06-04: defaults updated from the old-account IP (52.202.21.192,
+    # decommissioned) to the new-account Tailscale MagicDNS hostname. The
+    # detail-page CIRES_LINKS (Open Grafana / Loki / Jaeger buttons) read
+    # these. Compose env vars (GRAFANA_URL / JAEGER_URL / LOKI_URL) still
+    # win when set; these defaults are the fallback for any container or
+    # local dev shell that doesn't export them.
+    grafana_url: str = "http://observability-rca-newacct-monitoring:3000"
+    jaeger_url: str = "http://observability-rca-newacct-monitoring:16686"
+    loki_url: str = "http://observability-rca-newacct-monitoring:3100"
     # Public URL of the triage's own /dashboard (used by the v2 escalation
     # email's "View on dashboard" button to deep-link into the alert's
     # detail page). Override per-deploy via TRIAGE_DASHBOARD_URL env.

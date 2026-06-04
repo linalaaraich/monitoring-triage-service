@@ -89,6 +89,13 @@ services:
       # --- Email links + dashboard ---
       GRAFANA_DASHBOARD_URL: "http://observability-rca-newacct-monitoring:3000"
       GRAFANA_URL: "http://observability-rca-newacct-monitoring:3000"
+      # 2026-06-04: detail-page CIRES_LINKS for Open Loki / Open Jaeger
+      # were falling back to the old-account IP because only LOKI_API_URL
+      # (a separate pydantic field used by Drain3 ingestion) was set, not
+      # LOKI_URL. Make the dashboard-facing UI URLs explicit so the
+      # operator never gets dead links.
+      LOKI_URL: "http://observability-rca-newacct-monitoring:3100"
+      JAEGER_URL: "http://observability-rca-newacct-monitoring:16686"
       GRAFANA_API_USER: admin
       GRAFANA_API_PASSWORD: admin
 
