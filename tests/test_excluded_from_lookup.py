@@ -316,6 +316,87 @@ async def test_marking_sql_quarantines_each_pattern(store):
     assert by_fp["fp-clean"] == 0, "clean row must stay included"
 
 
+# ---------------------------------------------------------------------------
+# Stage E follow-up (2026-06-04) — save_decision honours excluded_from_lookup
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_save_decision_persists_excluded_from_lookup_flag(store):
+    """RCARecord(excluded_from_lookup=1) must be written to the row.
+    Pipeline.py sets this when the final RCA is data_starved or carries
+    unresolved banned-phrase / parrot-placeholder hits — the row must
+    actually arrive in the DB with the flag set, not silently default to 0.
+    """
+    rec = RCARecord(
+        alert_name="MediumCpuUsage",
+        affected_service="k3s-node",
+        alert_fingerprint="fp-write-quarantine",
+        triage_decision="investigate",
+        llm_verdict="escalate",
+        rca_report='{"human_cause": "Insufficient data ...", "rca": "...", "schema": "v2"}',
+        llm_reasoning="hedged",
+        action_taken="emailed",
+        rca_quality="data_starved",
+        severity="warning",
+        excluded_from_lookup=1,
+    )
+    await store.save_decision(rec)
+    cursor = await store._db.execute(
+        "SELECT excluded_from_lookup FROM rca_history WHERE id = ?",
+        (rec.id,),
+    )
+    row = await cursor.fetchone()
+    assert row["excluded_from_lookup"] == 1
+
+
+@pytest.mark.asyncio
+async def test_save_decision_defaults_excluded_to_zero_when_unset(store):
+    """RCARecord without excluded_from_lookup must default to 0 — backward
+    compat with every existing call-site that doesn't know about the flag."""
+    rec = RCARecord(
+        alert_name="HighMemoryUsage",
+        affected_service="spring-boot",
+        alert_fingerprint="fp-write-clean",
+        triage_decision="investigate",
+        llm_verdict="escalate",
+        rca_report="JVM heap exhausted - full GC every 4s.",
+        action_taken="emailed",
+        severity="warning",
+    )
+    await store.save_decision(rec)
+    cursor = await store._db.execute(
+        "SELECT excluded_from_lookup FROM rca_history WHERE id = ?",
+        (rec.id,),
+    )
+    row = await cursor.fetchone()
+    assert row["excluded_from_lookup"] == 0
+
+
+@pytest.mark.asyncio
+async def test_da3_lookup_skips_write_time_quarantined_row(store):
+    """End-to-end: a row written with excluded_from_lookup=1 must not
+    surface in the DA-3 prior-decision lookup. Closes the loop on the
+    write-time-quarantine + read-time-skip contract."""
+    rec = RCARecord(
+        alert_name="MediumCpuUsage",
+        affected_service="k3s-node",
+        alert_fingerprint="fp-da3-write-quarantine",
+        triage_decision="investigate",
+        llm_verdict="escalate",
+        rca_report='{"human_cause": "Insufficient data", "rca": "..."}',
+        action_taken="emailed",
+        rca_quality="data_starved",
+        severity="warning",
+        excluded_from_lookup=1,
+    )
+    await store.save_decision(rec)
+    prior = await store.get_recent_decision_for_fingerprint(
+        "fp-da3-write-quarantine", window_minutes=30,
+    )
+    assert prior is None
+
+
 @pytest.mark.asyncio
 async def test_quarantine_is_reversible(store):
     """Setting excluded_from_lookup back to 0 must restore visibility in

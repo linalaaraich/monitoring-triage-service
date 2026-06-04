@@ -117,12 +117,55 @@ def find_hallucination_hits(rca: str, alertname: str) -> list[_HallucinationRule
 # Banned phrases — same patterns as rca_quality classifier for consistency.
 # ---------------------------------------------------------------------------
 _BANNED_PHRASE_PATTERNS: list[re.Pattern] = [
-    re.compile(r"\binsufficient (?:data|information|context)\b", re.I),
+    re.compile(r"\binsufficient (?:data|information|context|signal|evidence)\b", re.I),
     re.compile(r"\bno (?:recent |available )?(?:metrics|logs|traces|data)\b", re.I),
     re.compile(r"\b(?:cannot|unable to) (?:determine|identify|conclude)\b", re.I),
     re.compile(r"\bnot enough (?:data|information|context)\b", re.I),
     re.compile(r"\black(?:s|ing)? (?:sufficient |enough )?(?:data|context|information)\b", re.I),
+    # 2026-06-04 — widened after live-prod evidence of LLM hedging with
+    # "could not determine" / "additional investigation needed" /
+    # "additional evidence" as the entire human_cause. These are the same
+    # data_starved shape as the originals, just slightly different verbs.
+    re.compile(r"\bcould\s+not\s+determine\b", re.I),
+    re.compile(r"\b(?:need(?:s|ed)?|require[sd]?)\s+(?:additional|further|more)\s+(?:investigation|evidence|context|data|information|analysis)\b", re.I),
+    re.compile(r"\badditional\s+(?:investigation|evidence|context|data|information|analysis)\s+(?:needed|required|warranted)\b", re.I),
+    re.compile(r"\bno\s+actionable\s+evidence\b", re.I),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Parrot-placeholder scan (2026-06-04). Live prod evidence shows the LLM
+# emits literal placeholder strings like `service=X`, `service=Y`, or
+# `service=alert_service` instead of the actual service token even though
+# the prompt builder substitutes `{{SERVICE_NAME}}` -> the real service in
+# the system prompt rule B example. The model is either ignoring the
+# substitution and copying the rule-B template literally, OR hallucinating
+# a placeholder noun ("alert_service") from the prompt vocabulary. Either
+# way, the row is unusable — the operator gets handed garbage. Scan rca,
+# reason, human_cause, AND every evidence item.
+#
+# Treated as a banned-phrase hit so the existing retry path fires. If the
+# retry still parrots, the F-4 confidence clamp + Stage-E quarantine-on-save
+# (pipeline.py) prevent the bad row from poisoning future LLM prompts via
+# DA-3 / similar-decisions / high-value feedback lookups.
+# ---------------------------------------------------------------------------
+_PARROT_PLACEHOLDER_PATTERNS: tuple[re.Pattern, ...] = (
+    # `service=X` / `service=Y` — single-letter placeholder taken straight
+    # from a tutorial template. Bounded by word boundary to avoid
+    # matching legitimate service names that happen to start with X/Y.
+    re.compile(r"\bservice\s*=\s*[XY]\b"),
+    # `service={{SERVICE_NAME}}` or `service={SERVICE_NAME}` — the
+    # substitution failed entirely
+    re.compile(r"\bservice\s*=\s*\{\{?\s*SERVICE_NAME\s*\}?\}", re.I),
+    # `service=<...>` — angle-bracket placeholder
+    re.compile(r"\bservice\s*=\s*<[^>]+>"),
+    # `service=service_name` / `service=alert_service` / `service=affected_service`
+    # — the LLM emitted the FIELD NAME as the VALUE
+    re.compile(r"\bservice\s*=\s*(?:service_name|alert_service|affected_service|the_service|service_value)\b", re.I),
+    # `service=this-service` — the prompt builder fallback string (when
+    # alert.service is empty) leaking into the RCA prose
+    re.compile(r"\bservice\s*=\s*this[-_ ]service\b", re.I),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -497,8 +540,19 @@ def validate(
     """
     report = ValidationReport(decision=decision)
 
-    # --- 1. Banned-phrase scan on rca + reason
-    combined = " ".join(filter(None, [decision.rca or "", decision.reason or ""]))
+    # --- 1. Banned-phrase scan on rca + reason + human_cause.
+    # 2026-06-04: human_cause MUST be included in the scan — it's the
+    # operator's first line of sight (email banner, dashboard "why" cell,
+    # detail-page H1). Live prod evidence (id 2905854e, 42588461, 3340eb3c)
+    # showed the LLM dumping "Insufficient data to determine root cause —
+    # need additional evidence." into human_cause while leaving rca/reason
+    # superficially OK. Without scanning human_cause the validator was blind
+    # to the worst offenders.
+    combined = " ".join(filter(None, [
+        decision.rca or "",
+        decision.reason or "",
+        decision.human_cause or "",
+    ]))
 
     # --- 1.0 human_cause formula scan (2026-06-02 — human-first reason
     # refactor). The `human_cause` field is the operator's first line of
@@ -522,7 +576,37 @@ def validate(
         if m:
             phrase = m.group(0)
             report.banned_phrase_hits.append(phrase)
-            report.violations.append(f"banned phrase in rca/reason: {phrase!r}")
+            report.violations.append(f"banned phrase in rca/reason/human_cause: {phrase!r}")
+
+    # --- 1.0b Parrot-placeholder scan (2026-06-04). Catches literal
+    # `service=X` / `service=alert_service` / `service={{SERVICE_NAME}}`
+    # placeholder strings the LLM emits instead of the actual service name.
+    # Scans the same combined narrative AND every evidence item, because
+    # live-prod rows persisted parrots in evidence (e.g. id 1a4d5740:
+    # `"Loki returned 0 lines for service=X — possible causes: ..."`).
+    evidence_strs: list[str] = []
+    for e in (decision.evidence or []):
+        if isinstance(e, str):
+            evidence_strs.append(e)
+        elif e is not None:
+            evidence_strs.append(str(e))
+    scan_targets = [combined] + evidence_strs
+    for pattern in _PARROT_PLACEHOLDER_PATTERNS:
+        for target in scan_targets:
+            m = pattern.search(target)
+            if m:
+                phrase = m.group(0)
+                report.banned_phrase_hits.append(f"parrot-placeholder: {phrase!r}")
+                report.violations.append(
+                    f"parrot-placeholder in rca/reason/human_cause/evidence: "
+                    f"{phrase!r} — the LLM emitted a literal placeholder "
+                    "instead of the actual service name. Rewrite naming the "
+                    "real service from the alert above."
+                )
+                break
+        else:
+            continue
+        break
 
     # --- 1c. Per-alert hallucination blocklist scan (F-3, added 2026-04-28).
     # The LLM grasps at scrape-internal log frequency (e.g. /actuator/*) as
@@ -708,12 +792,23 @@ def build_retry_feedback(report: ValidationReport) -> str:
         non_halluc = [p for p in report.banned_phrase_hits if not p.startswith("hallucination[")]
         phrases = ", ".join(f"{p!r}" for p in non_halluc)
         # Distinguish surface-only feedback from hypothesis-menu / cause-evidence
-        # feedback from data-thin (rule B) feedback — the LLM needs different
-        # guidance for each.
+        # feedback from parrot-placeholder feedback from data-thin (rule B)
+        # feedback — the LLM needs different guidance for each.
         is_surface_only = any("surface-only" in p for p in non_halluc)
         is_hypothesis_menu = any(p.startswith("hypothesis-menu:") for p in non_halluc)
         is_cause_evidence = any(p == "cause-evidence-mismatch" for p in non_halluc)
-        if is_hypothesis_menu and not is_surface_only:
+        is_parrot = any(p.startswith("parrot-placeholder:") for p in non_halluc)
+        if is_parrot:
+            parts.append(
+                f"Your previous response emitted literal placeholder strings instead "
+                f"of the actual service name: {phrases}. The alert above has a real "
+                "service token (look at the `Service:` line in the Alert Details). "
+                "Rewrite using THAT service name everywhere — never write `service=X`, "
+                "`service=Y`, `service=alert_service`, `service={{SERVICE_NAME}}`, or "
+                "any other placeholder. If a pillar genuinely returned nothing for the "
+                "real service, name the real service in the phrasing."
+            )
+        elif is_hypothesis_menu and not is_surface_only:
             parts.append(
                 f"Your previous response listed alternatives instead of naming one cause: {phrases}. "
                 "A hypothesis menu is not a diagnosis. Pick ONE cause backed by specific "

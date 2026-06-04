@@ -232,6 +232,15 @@ class RCARecord(BaseModel):
     # Correlated alerts found in the ±5m window. JSON list of the same
     # shape returned by RCAStore.get_correlated_alerts.
     correlated_alerts: Optional[str] = None
+    # 2026-06-04 (Stage E follow-up): write-time quarantine flag. Pipeline
+    # sets this to 1 BEFORE save_decision() when the final RCA is still
+    # data_starved OR carries unresolved banned-phrase / parrot-placeholder
+    # validator hits. Operator-facing reads (dashboard, KPI rollups) still
+    # show the row; LLM-context lookups (DA-3 prior, similar decisions,
+    # high-value feedback) skip it via the COALESCE guards in rca_store.
+    # Default 0 means "include in lookups" — same semantics as the ALTER
+    # column default in rca_store.init_db.
+    excluded_from_lookup: int = 0
 
 
 # --- Health ---

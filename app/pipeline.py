@@ -1004,6 +1004,36 @@ class TriagePipeline:
             "schema": "v2",
         })
 
+        # 2026-06-04 quarantine-on-save (Stage E follow-up). The validator
+        # runs at first-pass and on retry, but if the LLM still parrots
+        # `service=X` / hedges with "insufficient data" / "cannot determine"
+        # after both passes, the row is unusable as future LLM context. Mark
+        # it excluded_from_lookup=1 at write time so DA-3 / similar-decisions
+        # / high-value-feedback lookups can't quote the bad row back to the
+        # model on the next fire and reinforce the same hedging pattern.
+        # Operator-facing reads (dashboard, KPI rollups) still surface the
+        # row — quarantine is an LLM-context concept only. Re-run the
+        # validator on the FINAL decision (after retry replaced or kept the
+        # first-pass) so the gate reflects what is actually being persisted.
+        final_validation = validate_decision(
+            decision,
+            deployment_type=metric_facts.deployment_type,
+            confidence_floor=0.3,
+            alertname=alert.alertname,
+        )
+        should_quarantine = (
+            quality == "data_starved"
+            or bool(final_validation.banned_phrase_hits)
+        )
+        if should_quarantine:
+            logger.info(
+                "Stage E quarantine-on-save: marking %s/%s as excluded_from_lookup=1 "
+                "(quality=%s, banned_hits=%d, first_hit=%r)",
+                alert.alertname, alert.service, quality,
+                len(final_validation.banned_phrase_hits),
+                (final_validation.banned_phrase_hits[:1] or [""])[0],
+            )
+
         record = RCARecord(
             alert_source=source,
             alert_name=alert.alertname,
@@ -1032,6 +1062,7 @@ class TriagePipeline:
             diagnostic_steps=_json.dumps(decision.diagnostic_steps) if decision.diagnostic_steps else None,
             anomaly_summary=decision.anomaly_summary or (ctx.anomaly_summary if ctx else None),
             correlated_alerts=_json.dumps(correlated) if correlated else None,
+            excluded_from_lookup=1 if should_quarantine else 0,
         )
 
         # Step 8: Act on decision. A notifier failure (SMTP hiccup, template

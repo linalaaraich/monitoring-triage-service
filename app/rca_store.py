@@ -265,9 +265,9 @@ class RCAStore:
                 related_alerts, investigation_duration_ms, rca_quality,
                 alert_instance, alert_component, alert_signal, observed_value,
                 promql_expr, suggested_actions, evidence, diagnostic_steps,
-                anomaly_summary, correlated_alerts, env)
+                anomaly_summary, correlated_alerts, env, excluded_from_lookup)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.id,
                 record.timestamp.isoformat(),
@@ -296,6 +296,7 @@ class RCAStore:
                 record.anomaly_summary,
                 record.correlated_alerts,
                 record.env,
+                int(getattr(record, "excluded_from_lookup", 0) or 0),
             ),
         )
         await self._db.commit()
