@@ -5254,9 +5254,246 @@ async def dashboard_sprint5_anomalies():
     return _render_sprint5_placeholder("anomalies")
 
 
+# ──────────────────────────────────────────────────────────────────────
+# /dashboard/stats — S5-INC-03 — insight aggregates over rca_history
+# ──────────────────────────────────────────────────────────────────────
+# Pure read aggregation, no new schema: top-10 noisiest alerts, top-5
+# most-escalated services, verdict mix per alert family, and a false-positive
+# proxy from the feedback table (verdict_was_right='no'). Same chrome /
+# tokens.css idiom as the KPI + services pages. Read-only via RCAStore —
+# MCP-invariant clean.
 @app.get("/dashboard/stats", response_class=HTMLResponse)
 async def dashboard_sprint5_stats():
-    return _render_sprint5_placeholder("stats")
+    """Aggregate insight surface over the last 7 days."""
+    from datetime import datetime, timezone, timedelta
+
+    agg: dict = {}
+    if _store is not None:
+        try:
+            agg = await _store.get_stats_aggregates(days=7)
+        except Exception as exc:
+            logger.warning("stats aggregates query failed (non-fatal): %s", exc)
+            agg = {}
+
+    noisiest = agg.get("noisiest_alerts", [])
+    escalated = agg.get("escalated_services", [])
+    families = agg.get("verdict_by_family", [])
+    fp = agg.get("false_positive", {})
+
+    now_tng = datetime.now(timezone.utc).astimezone(
+        timezone(timedelta(hours=1))
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _esc(s) -> str:
+        return _html.escape(str(s)) if s is not None else ""
+
+    # ── Bar-row renderer: horizontal proportional bar scaled to the max.
+    def _bars(items, label_key, value_key, accent):
+        if not items:
+            return "<div class='stats-empty'>No data in the last 7 days.</div>"
+        mx = max((int(i[value_key]) for i in items), default=0) or 1
+        parts = []
+        for i in items:
+            v = int(i[value_key])
+            pct = int(round(100 * v / mx))
+            parts.append(f"""
+        <div class="stats-bar-row">
+          <div class="stats-bar-label">{_esc(i[label_key])}</div>
+          <div class="stats-bar-track"><div class="stats-bar-fill stats-bar-fill--{accent}" style="width:{pct}%"></div></div>
+          <div class="stats-bar-val">{v}</div>
+        </div>""")
+        return "".join(parts)
+
+    noisiest_html = _bars(noisiest, "alert_name", "count", "blue")
+    escalated_html = _bars(escalated, "service", "escalates", "red")
+
+    # ── Verdict mix per family — compact table.
+    if families:
+        fam_rows = []
+        for f in families:
+            verds = f.get("verdicts", {})
+            mix = " &middot; ".join(
+                f"<span class='stats-pair'>{_esc(k)} <b>{v}</b></span>"
+                for k, v in sorted(verds.items(), key=lambda kv: kv[1], reverse=True)
+            ) or "<span class='stats-muted'>—</span>"
+            fam_rows.append(f"""
+        <tr>
+          <td class="stats-fam-name">{_esc(f["alert_name"])}</td>
+          <td class="stats-fam-total">{int(f.get("total", 0))}</td>
+          <td>{mix}</td>
+        </tr>""")
+        families_html = f"""
+    <table class="stats-table">
+      <thead><tr><th>Alert family</th><th>Fires</th><th>Verdict mix</th></tr></thead>
+      <tbody>{"".join(fam_rows)}
+      </tbody>
+    </table>"""
+    else:
+        families_html = "<div class='stats-empty'>No verdicts recorded in the last 7 days.</div>"
+
+    # ── False-positive proxy card.
+    if fp.get("wired"):
+        rate = fp.get("rate")
+        rate_disp = f"{rate * 100:.0f}%" if rate is not None else "—"
+        fp_html = f"""
+      <div class="stats-fp__big">{_esc(rate_disp)}</div>
+      <div class="stats-fp__sub">{int(fp.get("overrides", 0))} of {int(fp.get("rated", 0))} rated alerts had the verdict corrected by an operator (<code>verdict_was_right = 'no'</code>).</div>"""
+    else:
+        fp_html = """
+      <div class="stats-fp__big stats-muted">n/a</div>
+      <div class="stats-fp__sub">No operator ratings in the last 7 days, so the false-positive proxy isn't yet measurable. It wires up automatically once operators start grading alerts on the rate page (<code>feedback.verdict_was_right</code>).</div>"""
+
+    sidebar_html = """
+  <aside class="kpi-sidebar">
+    <div class="kpi-sidebar__brand">
+      <div class="kpi-sidebar__brand-mark"></div>
+      <div>
+        <div class="kpi-sidebar__brand-title">Observability</div>
+        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
+      </div>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Incident response</div>
+      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
+      <a class="kpi-sidebar__item" href="/dashboard/incidents">Incidents</a>
+      <a class="kpi-sidebar__item" href="/dashboard/anomalies">Anomalies</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Insights</div>
+      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/stats">Stats</a>
+      <a class="kpi-sidebar__item" href="/dashboard/services">Services</a>
+      <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Configuration</div>
+      <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
+      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
+    </div>
+  </aside>"""
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta http-equiv="refresh" content="60"/>
+<title>Observability &middot; Stats</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/design/tokens.css"/>
+{_CIRES_THEME_HEAD_SCRIPT}
+<style>
+  body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); min-height: 100vh; }}
+  .kpi-shell {{ display: flex; min-height: 100vh; }}
+  .kpi-sidebar {{ width: 224px; flex-shrink: 0; background: var(--bg-soft, #13151e); border-right: 1px solid var(--border, #2a2d3a); padding: 0 0 14px; display: flex; flex-direction: column; }}
+  .kpi-sidebar__brand {{ display: flex; align-items: center; gap: 10px; padding: 14px 14px 14px 16px; border-bottom: 1px solid var(--border); height: 60px; }}
+  .kpi-sidebar__brand-mark {{ width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, #4ea8de, #b07ee8); flex-shrink: 0; }}
+  .kpi-sidebar__brand-title {{ font-size: 13.5px; font-weight: 600; color: var(--text); }}
+  .kpi-sidebar__brand-sub {{ font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }}
+  .kpi-sidebar__group {{ padding: 12px; margin-bottom: 6px; }}
+  .kpi-sidebar__group-label {{ font-size: 10px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.12em; padding: 0 12px 6px; font-weight: 600; }}
+  .kpi-sidebar__item {{ display: block; padding: 8px 12px; border-radius: 8px; text-decoration: none; color: var(--text-soft); font-size: 13px; transition: background .12s; }}
+  .kpi-sidebar__item:hover {{ background: var(--card-hi); color: var(--text); }}
+  .kpi-sidebar__item--active {{ background: var(--card-hi); color: var(--text); border: 1px solid var(--border-hi); font-weight: 500; box-shadow: inset 2.5px 0 0 var(--accent-blue); }}
+  .kpi-banner {{ background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02)); border-bottom: 1px solid rgba(176,126,232,.35); padding: 8px 22px; font-size: 12.5px; color: var(--text-soft); display: flex; align-items: center; gap: 14px; }}
+  .kpi-banner strong {{ color: var(--accent-purple); }}
+  .kpi-banner a {{ color: var(--accent-cyan); text-decoration: none; }}
+  .kpi-banner a:hover {{ text-decoration: underline; }}
+  .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
+  .kpi-header {{ padding: 18px 22px 8px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; justify-content: space-between; }}
+  .kpi-header__title {{ font-size: 18px; font-weight: 600; color: var(--text); }}
+  .kpi-header__sub {{ font-size: 12.5px; color: var(--muted); margin-top: 4px; }}
+  .kpi-header__time {{ font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); letter-spacing: 0.02em; }}
+
+  .stats-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 18px 22px 22px; }}
+  @media (max-width: 980px) {{ .stats-grid {{ grid-template-columns: 1fr; }} }}
+  .stats-card {{ background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px 18px; }}
+  .stats-card--wide {{ grid-column: 1 / -1; }}
+  .stats-card__title {{ font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }}
+  .stats-card__q {{ font-size: 11.5px; color: var(--muted); margin-bottom: 12px; }}
+
+  .stats-bar-row {{ display: grid; grid-template-columns: 190px 1fr 44px; align-items: center; gap: 10px; margin-bottom: 8px; }}
+  .stats-bar-label {{ font-size: 12.5px; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .stats-bar-track {{ background: var(--bg-soft); border-radius: 5px; height: 14px; overflow: hidden; }}
+  .stats-bar-fill {{ height: 100%; border-radius: 5px; }}
+  .stats-bar-fill--blue {{ background: var(--accent-blue); }}
+  .stats-bar-fill--red  {{ background: var(--accent-red); }}
+  .stats-bar-val {{ font-family: var(--font-mono); font-size: 12.5px; color: var(--text); font-weight: 600; text-align: right; }}
+
+  .stats-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  .stats-table thead th {{ text-align: left; padding: 8px 10px; background: var(--bg-soft); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }}
+  .stats-table tbody td {{ padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text-soft); }}
+  .stats-table tbody tr:last-child td {{ border-bottom: none; }}
+  .stats-fam-name {{ color: var(--text); font-weight: 500; }}
+  .stats-fam-total {{ font-family: var(--font-mono); color: var(--text); font-weight: 600; }}
+  .stats-pair {{ color: var(--muted); }}
+  .stats-pair b {{ color: var(--text); }}
+  .stats-muted {{ color: var(--muted-2); }}
+
+  .stats-fp__big {{ font-family: var(--font-mono); font-size: 34px; font-weight: 600; color: var(--accent-red); line-height: 1.1; margin: 4px 0 8px; }}
+  .stats-fp__sub {{ font-size: 12px; color: var(--muted); line-height: 1.5; }}
+  .stats-fp__sub code, .stats-card__q code {{ font-family: var(--font-mono); background: var(--bg-soft); padding: 1px 5px; border-radius: 4px; font-size: 11px; }}
+  .stats-empty {{ font-size: 12.5px; color: var(--muted-2); padding: 8px 0; }}
+  .kpi-foot {{ padding: 12px 22px 22px; font-size: 11.5px; color: var(--muted-2); border-top: 1px solid var(--border); }}
+  .kpi-foot strong {{ color: var(--muted); }}
+</style>
+</head>
+<body>
+
+<div class="kpi-banner">
+  <strong>Stats</strong>
+  <span>Aggregate insights &mdash; last 7 days, reads from local rca_history + feedback.</span>
+  <span style="flex: 1"></span>
+  <a href="/dashboard">&larr; back to triage feed</a>
+  <a href="/dashboard/kpi">KPI overview</a>
+</div>
+
+<div class="kpi-shell">
+  {sidebar_html}
+  <main class="kpi-main">
+    <div class="kpi-header">
+      <div>
+        <div class="kpi-header__title">Stats &middot; aggregate insights</div>
+        <div class="kpi-header__sub">Read-only rollups over the last 7 days &middot; auto-refreshing every 60 s &middot; Casablanca timezone.</div>
+      </div>
+      <div class="kpi-header__time">
+        <span class="live-dot"></span>{_esc(now_tng)} GMT+1
+      </div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stats-card">
+        <div class="stats-card__title">Noisiest alerts</div>
+        <div class="stats-card__q">Top 10 alert rules by total fires.</div>
+        {noisiest_html}
+      </div>
+      <div class="stats-card">
+        <div class="stats-card__title">Most-escalated services</div>
+        <div class="stats-card__q">Top 5 services by <code>escalate</code> verdict count.</div>
+        {escalated_html}
+      </div>
+      <div class="stats-card stats-card--wide">
+        <div class="stats-card__title">Verdict mix per alert family</div>
+        <div class="stats-card__q">How each alert family was triaged (top 10 by fires).</div>
+        {families_html}
+      </div>
+      <div class="stats-card">
+        <div class="stats-card__title">False-positive proxy</div>
+        <div class="stats-card__q">Operator verdict overrides from the feedback table.</div>
+        {fp_html}
+      </div>
+    </div>
+
+    <div class="kpi-foot">
+      <strong>What you are looking at:</strong> every number is a pure aggregate over the local <code>rca_history</code> (and <code>feedback</code>) tables &mdash; no external calls, MCP-invariant clean. The false-positive proxy is the closest honest signal the store can give until operators grade more alerts.
+    </div>
+  </main>
+</div>
+
+</body>
+</html>""")
 
 
 @app.get("/dashboard/drain3", response_class=HTMLResponse)

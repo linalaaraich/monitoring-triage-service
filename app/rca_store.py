@@ -1474,6 +1474,124 @@ class RCAStore:
             })
         return out
 
+    async def get_stats_aggregates(self, days: int = 7) -> dict:
+        """S5-INC-03 — pure read aggregation over rca_history (+ feedback) for
+        the /dashboard/stats insight page. No new schema.
+
+        Returns:
+          {
+            "days": int,
+            "noisiest_alerts":   [{"alert_name", "count"}, ...]   # top 10 by count
+            "escalated_services":[{"service", "escalates"}, ...]  # top 5 by escalate verdict
+            "verdict_by_family": [{"alert_name", "verdicts": {v:n}}, ...]
+            "false_positive": {
+                "wired": bool,
+                "overrides": int,        # feedback verdict_was_right='no' in window
+                "rated": int,            # total 'rate' feedback rows in window
+                "rate": float | None,    # overrides / rated, or None if not measurable
+            }
+          }
+
+        Operator-facing read: excluded_from_lookup is deliberately IGNORED
+        here (this is the audit/insight surface, not an LLM-context lookup) —
+        matches get_service_summary / get_alert_summary semantics.
+
+        Escalate verdict token is the lowercased 'escalate' (pipeline writes
+        decision.decision.value.lower()). False-positive proxy uses the
+        feedback table's verdict_was_right='no' rows (operator said the verdict
+        was wrong) — these are SF-7 'rate' feedback rows. If the feedback table
+        carries no rating rows at all in the window, we report wired=False so
+        the page can say the signal isn't yet exercised rather than show 0/0.
+        """
+        since = (_utc_now() - timedelta(days=days)).isoformat()
+
+        # 1) Noisiest alerts — top 10 by total fires.
+        cur = await self._db.execute(
+            """SELECT COALESCE(NULLIF(TRIM(alert_name), ''), '(unknown)') AS alert_name,
+                      COUNT(*) AS count
+               FROM rca_history
+               WHERE timestamp > ?
+               GROUP BY alert_name
+               ORDER BY count DESC
+               LIMIT 10""",
+            (since,),
+        )
+        noisiest = [
+            {"alert_name": r["alert_name"], "count": int(r["count"])}
+            for r in await cur.fetchall()
+        ]
+
+        # 2) Most-escalated services — top 5 by escalate-verdict count.
+        cur = await self._db.execute(
+            """SELECT affected_service AS service, COUNT(*) AS escalates
+               FROM rca_history
+               WHERE timestamp > ?
+                 AND affected_service IS NOT NULL AND affected_service != ''
+                 AND LOWER(COALESCE(llm_verdict, '')) = 'escalate'
+               GROUP BY affected_service
+               ORDER BY escalates DESC
+               LIMIT 5""",
+            (since,),
+        )
+        escalated_services = [
+            {"service": r["service"], "escalates": int(r["escalates"])}
+            for r in await cur.fetchall()
+        ]
+
+        # 3) Verdict mix per alert family (top 10 families by total fires,
+        #    then bucket their non-null verdicts in Python).
+        cur = await self._db.execute(
+            """SELECT COALESCE(NULLIF(TRIM(alert_name), ''), '(unknown)') AS alert_name,
+                      LOWER(COALESCE(llm_verdict, '')) AS verdict,
+                      COUNT(*) AS n
+               FROM rca_history
+               WHERE timestamp > ?
+               GROUP BY alert_name, verdict""",
+            (since,),
+        )
+        fam: dict[str, dict] = {}
+        for r in await cur.fetchall():
+            name = r["alert_name"]
+            entry = fam.setdefault(name, {"alert_name": name, "total": 0, "verdicts": {}})
+            entry["total"] += int(r["n"])
+            v = r["verdict"] or "(none)"
+            entry["verdicts"][v] = entry["verdicts"].get(v, 0) + int(r["n"])
+        verdict_by_family = sorted(
+            fam.values(), key=lambda d: d["total"], reverse=True
+        )[:10]
+
+        # 4) False-positive proxy from the feedback table. verdict_was_right='no'
+        #    rows are explicit operator overrides of a verdict. Denominator is
+        #    the count of 'rate' feedback rows (the operator graded the alert).
+        cur = await self._db.execute(
+            """SELECT COUNT(*) AS n FROM feedback
+               WHERE feedback_type = 'rate' AND created_at > ?""",
+            (since,),
+        )
+        rated = int((await cur.fetchone())["n"] or 0)
+        cur = await self._db.execute(
+            """SELECT COUNT(*) AS n FROM feedback
+               WHERE feedback_type = 'rate'
+                 AND LOWER(COALESCE(verdict_was_right, '')) = 'no'
+                 AND created_at > ?""",
+            (since,),
+        )
+        overrides = int((await cur.fetchone())["n"] or 0)
+        false_positive = {
+            "wired": rated > 0,
+            "overrides": overrides,
+            "rated": rated,
+            "rate": (overrides / rated) if rated > 0 else None,
+        }
+
+        return {
+            "days": days,
+            "noisiest_alerts": noisiest,
+            "escalated_services": escalated_services,
+            "verdict_by_family": verdict_by_family,
+            "false_positive": false_positive,
+        }
+
     # ------------------------------------------------------------------
     # US-5.8 recurrence gate support
     # ------------------------------------------------------------------
