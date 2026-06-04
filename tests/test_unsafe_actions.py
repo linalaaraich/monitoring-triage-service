@@ -33,11 +33,58 @@ def test_has_named_cause_picks_up_deploy_correlation():
 
 
 def test_has_named_cause_picks_up_causal_phrase():
-    """Generic 'because', 'caused by', 'due to' are recognised — these
-    are the linguistic shape of a cause-of-cause claim even when no
-    specific subsystem is named."""
+    """A causal connective grounds the cause ONLY when it introduces a
+    concrete subject ('because a background worker ...', 'due to upstream
+    timeout ...'). The connective alone is not enough (see the bare-connective
+    tests below)."""
     assert has_named_cause("Memory pressure because a background worker leaked references.") is True
     assert has_named_cause("Errors due to upstream timeout from the payment API.") is True
+
+
+# --- DA-2 bare-connective false-allow fix (2026-06-04) ---------------
+
+def test_has_named_cause_rejects_bare_because():
+    """A bare 'because of load' / 'due to something' names no concrete
+    subject — it must NOT count as a named cause (false-allow fix)."""
+    assert has_named_cause("CPU is high, possibly because of load.") is False
+    assert has_named_cause("Elevated latency, could be due to something.") is False
+    assert has_named_cause("May be caused by high traffic.") is False
+    assert has_named_cause("Errors due to issues on the node.") is False
+
+
+def test_has_named_cause_rejects_hedged_connective_with_subject():
+    """Even with a concrete-looking subject, a hedge prefix ('possibly due
+    to X') is a hypothesis, not a named root cause."""
+    assert has_named_cause("Latency, possibly due to a slow database somewhere.") is False
+    assert has_named_cause("Could be because the cache is cold.") is False
+
+
+def test_has_named_cause_keeps_grounded_connective():
+    """A non-hedged connective + concrete subject still grounds."""
+    assert has_named_cause("Failure because the connection pool was exhausted.") is True
+    assert has_named_cause("Outage caused by a kernel panic on the host.") is True
+
+
+def test_strip_unsafe_actions_clamps_on_bare_because():
+    """The core fix: a bare-'because' RCA with no concrete subject must NOT
+    shield a destructive action from the DA-2 clamp."""
+    bare_rca = "CPU usage is critically high, possibly because of load."
+    kept, stripped = strip_unsafe_actions(
+        ["systemctl restart k3s-node.service"], bare_rca,
+    )
+    assert kept == []
+    assert stripped == ["systemctl restart k3s-node.service"]
+
+
+def test_strip_unsafe_actions_keeps_on_grounded_because():
+    """Contrast: a connective that DOES name a concrete subject grounds the
+    cause and the action survives."""
+    grounded = "High CPU because the JDBC connection pool was exhausted."
+    kept, stripped = strip_unsafe_actions(
+        ["systemctl restart k3s-node.service"], grounded,
+    )
+    assert kept == ["systemctl restart k3s-node.service"]
+    assert stripped == []
 
 
 def test_has_named_cause_rejects_symptom_restatement():

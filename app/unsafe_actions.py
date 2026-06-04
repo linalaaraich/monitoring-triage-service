@@ -74,20 +74,86 @@ _CAUSE_KEYWORDS: tuple[str, ...] = (
     # App-layer
     "saturation", "rate limit", "circuit breaker", "retry storm",
     "upstream timeout", "downstream timeout", "cascade",
-    # Specific cause-of-cause shapes
-    "because", "caused by", "due to", "triggered by", "resulting from",
 )
+# NOTE (DA-2 tightening, 2026-06-04): bare causal connectives
+# ("because", "due to", "caused by", "triggered by", "resulting from") and
+# the generic token "deploy" were REMOVED from _CAUSE_KEYWORDS. A connective
+# is not itself a cause — "high CPU, possibly because of load" or "could be
+# due to something" contains "because"/"due to" yet names no concrete subject,
+# and was false-allowing destructive actions (e.g. `systemctl restart`) past
+# the safety clamp. Connectives now only count when followed by a CONCRETE
+# subject (see _connective_names_subject) and not inside a hedge.
+
+
+# A connective grounds a cause only when it introduces a concrete subject.
+# These patterns match "<connective> <subject>" where the subject begins with
+# a real noun token (3+ alpha chars), explicitly EXCLUDING vague fillers that
+# carry no diagnostic content. A hedge like "possibly due to load" or
+# "could be because of something" therefore does NOT register as a named cause.
+_CONNECTIVE_RE = re.compile(
+    r"\b(?:because\s+of|because|caused\s+by|due\s+to|triggered\s+by|"
+    r"resulting\s+from|stemming\s+from|attributable\s+to)\s+"
+    r"(?:the\s+|a\s+|an\s+|some\s+)?"
+    r"(?P<subject>[a-z][a-z0-9\-]{2,})",
+    re.IGNORECASE,
+)
+
+# Hedge prefixes that void grounding even if a connective+subject follows:
+# "possibly due to X", "may be because Y", "could be caused by Z" are
+# hypotheses, not a named root cause.
+_HEDGE_BEFORE_CONNECTIVE_RE = re.compile(
+    r"\b(?:possibly|perhaps|maybe|may\s+be|might\s+be|could\s+be|"
+    r"could|likely|probably|seems?\s+to\s+be|appears?\s+to\s+be|"
+    r"potentially|presumably|suspected|suspect)\b\s*"
+    r"(?:.{0,20}?)?"
+    r"(?:because|caused\s+by|due\s+to|triggered\s+by|resulting\s+from)\b",
+    re.IGNORECASE,
+)
+
+# Vague subjects that, even when introduced by a connective, do not name a
+# concrete cause. "due to load", "because of issues" etc. are still symptom-
+# level restatements.
+_VAGUE_SUBJECTS: frozenset[str] = frozenset({
+    "load", "loads", "issue", "issues", "problem", "problems", "error",
+    "errors", "something", "factors", "factor", "conditions", "condition",
+    "activity", "usage", "traffic", "demand", "stress", "pressure",
+    "anomaly", "anomalies", "behaviour", "behavior", "spike", "spikes",
+    "this", "that", "it", "them", "various", "multiple", "several",
+    "unknown", "unclear", "high", "elevated", "increased", "excessive",
+})
+
+
+def _connective_names_subject(rca_lower: str) -> bool:
+    """True when a causal connective in the prose introduces a CONCRETE
+    subject (not a vague filler) and is not part of a hedge."""
+    if _HEDGE_BEFORE_CONNECTIVE_RE.search(rca_lower):
+        return False
+    for m in _CONNECTIVE_RE.finditer(rca_lower):
+        subject = m.group("subject").lower()
+        if subject not in _VAGUE_SUBJECTS:
+            return True
+    return False
 
 
 def has_named_cause(rca_text: str) -> bool:
-    """True when the RCA prose contains at least one cause-of-cause
-    keyword — i.e. the LLM grounded the diagnosis on something specific
-    rather than restating the alert symptom.
+    """True when the RCA prose grounds the diagnosis on something specific.
+
+    Two ways to ground:
+      1. A concrete cause-of-cause keyword (heap / jdbc pool / deadlock / ...).
+      2. A causal connective that introduces a CONCRETE subject (e.g.
+         "because the connection pool was exhausted") — but NOT a bare
+         connective ("possibly due to load") which names nothing.
+
+    A bare connective alone no longer counts (DA-2 false-allow fix
+    2026-06-04): it was letting destructive actions pass the safety clamp
+    on hedged, ungrounded RCAs.
     """
     if not rca_text:
         return False
     rca_lower = rca_text.lower()
-    return any(kw in rca_lower for kw in _CAUSE_KEYWORDS)
+    if any(kw in rca_lower for kw in _CAUSE_KEYWORDS):
+        return True
+    return _connective_names_subject(rca_lower)
 
 
 def strip_unsafe_actions(
