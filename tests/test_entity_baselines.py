@@ -2,8 +2,8 @@
 
 Uses an httpx mock transport to stub prometheus-mcp responses, so tests
 don't depend on a live Prometheus or MCP server. Post-S3-HF-04 the
-baseline path goes through prometheus-mcp (`/query?expr=`) not direct
-Prometheus (`/api/v1/query?query=`).
+baseline path goes through prometheus-mcp (`/tools/query_instant?promql=`)
+not direct Prometheus (`/api/v1/query?query=`).
 """
 from __future__ import annotations
 
@@ -18,8 +18,9 @@ from app.entity_baselines import clear_cache, get_baseline
 class _FakeProm:
     """Minimal prometheus-mcp stub — captures queries, returns canned values.
 
-    Asserts each request hits the MCP `/query?expr=` surface, not the
-    legacy direct-Prometheus `/api/v1/query?query=` surface (S3-HF-04).
+    Asserts each request hits the MCP `/tools/query_instant?promql=` surface,
+    not the legacy direct-Prometheus `/api/v1/query?query=` surface (S3-HF-04)
+    nor the bare `/query?expr=` route (which 404s on the deployed MCP image).
     Test failure here means a regression of the MCP-only invariant.
     """
 
@@ -31,19 +32,21 @@ class _FakeProm:
     def transport(self) -> httpx.MockTransport:
         def handler(request: httpx.Request) -> httpx.Response:
             params = dict(request.url.params)
-            # Post-S3-HF-04: MCP uses `expr` param, not `query`.
-            q = params.get("expr", "")
+            # Deployed MCP /tools/query_instant uses `promql` param and lifts
+            # `result` to the top level of the response.
+            q = params.get("promql", "")
             self.captured.append(q)
             self.captured_paths.append(request.url.path)
             for needle, val in self.by_query.items():
                 if needle in q:
                     if val is None:
-                        return httpx.Response(200, json={"status": "success", "data": {"result": []}})
+                        return httpx.Response(200, json={"status": "success", "result": []})
                     return httpx.Response(200, json={
                         "status": "success",
-                        "data": {"result": [{"metric": {}, "value": [0, str(val)]}]},
+                        "result_type": "vector",
+                        "result": [{"metric": {}, "value": [0, str(val)]}],
                     })
-            return httpx.Response(200, json={"status": "success", "data": {"result": []}})
+            return httpx.Response(200, json={"status": "success", "result": []})
         return httpx.MockTransport(handler)
 
 
@@ -182,9 +185,10 @@ async def test_cache_expiry(fake_prom, monkeypatch):
 @pytest.mark.asyncio
 async def test_baseline_routes_through_prometheus_mcp_surface(fake_prom):
     """S3-HF-04 regression guard: every baseline read must hit the MCP
-    `/query?expr=` surface, never the direct-Prometheus `/api/v1/query?query=`
-    surface. If this test ever fails, the MCP-only invariant has regressed
-    on the baseline path."""
+    `/tools/query_instant` surface, never the direct-Prometheus
+    `/api/v1/query?query=` surface nor the bare `/query?expr=` route (which
+    404s on the deployed MCP image). If this test ever fails, the MCP-only
+    invariant has regressed on the baseline path."""
     fake_prom.by_query = {
         "avg_over_time": 850.0, "stddev_over_time": 250.0,
         "quantile_over_time(0.5,": 800.0, "quantile_over_time(0.95,": 1100.0,
@@ -194,8 +198,8 @@ async def test_baseline_routes_through_prometheus_mcp_surface(fake_prom):
 
     # Five parallel queries — mean, stddev, p50, p95, count.
     assert len(fake_prom.captured) == 5
-    # All hits must be the MCP /query endpoint, never /api/v1/query.
-    assert all(p == "/query" for p in fake_prom.captured_paths), (
+    # All hits must be the MCP /tools/query_instant endpoint.
+    assert all(p == "/tools/query_instant" for p in fake_prom.captured_paths), (
         f"unexpected paths: {fake_prom.captured_paths}"
     )
     # The PromQL expressions themselves are unchanged — only the transport differs.

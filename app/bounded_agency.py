@@ -218,9 +218,11 @@ async def execute_tool(
 
     MCPs are called via direct HTTP against the settings URLs — same pattern
     as context.ContextGatherer._mcp_call but without the metrics wrappers
-    (this is retry-only traffic, not the primary path). Each MCP has a
-    straightforward REST surface: prometheus-mcp exposes /query,
-    loki-mcp /query_range, jaeger-mcp /traces.
+    (this is retry-only traffic, not the primary path). Routes MUST mirror
+    the deployed MCP surface, which is /tools/* only: prometheus-mcp exposes
+    /tools/query_instant, loki-mcp /tools/query_logs, jaeger-mcp
+    /tools/find_traces (the bare /query, /query_range, /traces routes do not
+    exist on the MCP image and 404 — see context.py for the canonical paths).
     """
     import httpx
     name = request.name
@@ -228,31 +230,43 @@ async def execute_tool(
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             if name == "prometheus.query":
+                # prometheus-mcp /tools/query_instant takes `promql` (our
+                # schema names it `expr`).
                 r = await client.get(
-                    f"{settings.prometheus_mcp_url}/query",
-                    params={"expr": args["expr"]},
+                    f"{settings.prometheus_mcp_url}/tools/query_instant",
+                    params={"promql": args["expr"]},
                 )
                 r.raise_for_status()
                 return {"tool": name, "args": args, "result": r.json()}
             elif name == "loki.query_range":
+                # loki-mcp /tools/query_logs takes `logql` + a relative `start`
+                # string ("Nm"); our schema gives a LogQL `query` and an
+                # integer `lookback_seconds`.
+                lookback = args.get("lookback_seconds", 300)
                 r = await client.get(
-                    f"{settings.loki_mcp_url}/query_range",
+                    f"{settings.loki_mcp_url}/tools/query_logs",
                     params={
-                        "query": args["query"],
-                        "lookback_seconds": args.get("lookback_seconds", 300),
+                        "logql": args["query"],
+                        "start": f"{max(1, lookback // 60)}m",
+                        "limit": 50,
                     },
                 )
                 r.raise_for_status()
                 return {"tool": name, "args": args, "result": r.json()}
             elif name == "jaeger.get_traces":
+                # jaeger-mcp /tools/find_traces takes service/operation/limit.
+                # It has no min_duration_ms filter (the MCP surface exposes a
+                # `tags` filter instead), so that schema arg is accepted from
+                # the LLM but not forwarded.
+                params = {
+                    "service": args["service"],
+                    "limit": args.get("limit", 5),
+                }
+                if args.get("operation"):
+                    params["operation"] = args["operation"]
                 r = await client.get(
-                    f"{settings.jaeger_mcp_url}/traces",
-                    params={
-                        "service": args["service"],
-                        "operation": args.get("operation") or "",
-                        "min_duration_ms": args.get("min_duration_ms", 0),
-                        "limit": args.get("limit", 5),
-                    },
+                    f"{settings.jaeger_mcp_url}/tools/find_traces",
+                    params=params,
                 )
                 r.raise_for_status()
                 return {"tool": name, "args": args, "result": r.json()}

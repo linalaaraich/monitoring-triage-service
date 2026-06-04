@@ -145,8 +145,9 @@ async def _query_prom_mcp(
 ) -> Optional[float]:
     """Run an instant query against prometheus-mcp; return scalar or None.
 
-    Routes through prometheus-mcp's /query?expr= endpoint (same surface as
-    bounded_agency.py uses for retry-path Prom queries). Emits standard
+    Routes through prometheus-mcp's /tools/query_instant endpoint (the
+    deployed MCP surface — the bare /query?expr= route does not exist and
+    404s; see context.py for the canonical /tools/* paths). Emits standard
     MCP metrics (triage_mcp_requests_total + triage_mcp_duration_seconds,
     server=prometheus) so this path is observable alongside the
     context-gathering MCP traffic.
@@ -155,8 +156,8 @@ async def _query_prom_mcp(
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             resp = await client.get(
-                f"{prometheus_mcp_url.rstrip('/')}/query",
-                params={"expr": promql},
+                f"{prometheus_mcp_url.rstrip('/')}/tools/query_instant",
+                params={"promql": promql},
             )
             elapsed = time.monotonic() - start
             triage_mcp_duration_seconds.labels(server="prometheus").observe(elapsed)
@@ -168,8 +169,9 @@ async def _query_prom_mcp(
                 return None
             triage_mcp_requests_total.labels(server="prometheus", status="success").inc()
             data = resp.json()
-            # MCP passes Prometheus JSON through unchanged: {"data": {"result": [...]}}.
-            result = data.get("data", {}).get("result", [])
+            # /tools/query_instant lifts the result to the top level:
+            # {"status":..., "result_type":..., "result": [...]}.
+            result = data.get("result", [])
             if not result:
                 return None
             value = result[0].get("value", [None, None])[1]
