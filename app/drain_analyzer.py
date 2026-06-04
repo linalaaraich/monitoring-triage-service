@@ -50,6 +50,10 @@ class AnalyzeResult:
     is_new_pattern: bool
     match_count: int
     service: str = "_unknown"
+    # BE-B3 — True if this line was dropped by the source-exclusion denylist
+    # (observability/infra service). Skipped lines never touch a miner, are
+    # never counted, and can never produce a novel-template anomaly.
+    excluded: bool = False
 
 
 # Regex matchers for extracting service from a stream's label dict.
@@ -71,6 +75,47 @@ def _service_from_stream_labels(labels: dict[str, Any]) -> str:
             if sanitized:
                 return sanitized
     return "_unknown"
+
+
+def is_excluded_service(service: str) -> bool:
+    """BE-B3 — True if `service` belongs to the observability/infra stack and
+    must NOT be fed into the Drain3 miners.
+
+    Matched defensively (the analyzer's ingestion boundary calls this for every
+    resolved service before any miner is touched):
+
+      - case-insensitive exact match against settings.drain3_excluded_services
+      - container-name forms: a leading `ai-` / `ai-mcp-` prefix is stripped so
+        e.g. `ai-mcp-prometheus`, `ai-otel-collector`, `ai-grafana` all match
+      - any `*-exporter` (node-exporter, blackbox-exporter, ...) is excluded
+      - separators normalised (`_` ↔ `-`) so `kube_system` == `kube-system`
+
+    Pure string logic — no data reads (MCP-only invariant preserved).
+    """
+    if not service:
+        return False
+
+    def _norm(s: str) -> str:
+        # Lowercase, unify separators so `otel_collector` == `otel-collector`.
+        return re.sub(r"[_\s]+", "-", str(s).strip().lower())
+
+    svc = _norm(service)
+    if not svc or svc == "-unknown":
+        return False
+
+    # Container-name forms: strip an `ai-mcp-` or `ai-` prefix used by the
+    # platform's container names (ai-mcp-prometheus, ai-otel-collector, ...).
+    candidates = {svc}
+    for prefix in ("ai-mcp-", "ai-"):
+        if svc.startswith(prefix):
+            candidates.add(svc[len(prefix):])
+
+    # Any exporter is infra noise.
+    if any(c.endswith("-exporter") or c == "exporter" for c in candidates):
+        return True
+
+    denylist = {_norm(s) for s in settings.drain3_excluded_services}
+    return any(c in denylist for c in candidates)
 
 
 class DrainAnalyzer:
@@ -138,7 +183,21 @@ class DrainAnalyzer:
         Defaults to `_unknown` if the caller doesn't have a service
         label — that's the safe bucket for cross-service or unlabelled
         traffic.
+
+        BE-B3: if `service` is on the observability/infra exclusion denylist
+        the line is dropped at this boundary — NO miner is created, NO line is
+        counted, NO anomaly can be produced. Returns an `excluded` sentinel so
+        callers can tally skipped lines.
         """
+        if is_excluded_service(service):
+            return AnalyzeResult(
+                cluster_id=None,
+                template="",
+                is_new_pattern=False,
+                match_count=0,
+                service=service,
+                excluded=True,
+            )
         with self._lock:
             miner = self._get_or_create_miner(service)
             result = miner.add_log_message(log_line)
@@ -175,7 +234,19 @@ class DrainAnalyzer:
         All lines in this batch are attributed to the same service.
         Used by the per-alert context-gather path where the alert IS
         scoped to a specific service.
+
+        BE-B3: if `service` is on the observability/infra exclusion denylist
+        the whole batch is dropped from the miner (no annotation, no anomaly).
         """
+        if is_excluded_service(service):
+            logger.debug(
+                "Drain3 BE-B3: skipped %d line(s) for excluded service=%s",
+                len(lines), service,
+            )
+            return [], (
+                f"Anomaly Summary: service={service} is an excluded "
+                f"observability/infra source; {len(lines)} line(s) not ingested."
+            )
         annotated = []
         anomaly_count = 0
         new_patterns = 0
@@ -299,12 +370,20 @@ class DrainAnalyzer:
 
     def _seed_streams_sync(self, streams: list[tuple[str, list[str]]]) -> None:
         """Process all streams sync — one helper for both seed + ingest paths."""
+        skipped = 0
         for svc, lines in streams:
+            # BE-B3 — drop whole excluded streams up front (cheaper, and avoids
+            # a per-line denylist check for the common infra-flood case).
+            if is_excluded_service(svc):
+                skipped += len(lines)
+                continue
             for line in lines:
                 try:
                     self.analyze(line, service=svc)
                 except Exception as e:
                     logger.debug("Drain3 analyze failed (non-fatal): %s", e)
+        if skipped:
+            logger.debug("Drain3 BE-B3 seed: skipped %d excluded infra line(s)", skipped)
 
     async def start_background_ingestion(self):
         self._background_task = asyncio.create_task(self._ingest_loop())
@@ -360,7 +439,12 @@ class DrainAnalyzer:
         lines + new templates across all services in this batch."""
         anomalous_lines: list[str] = []
         new_templates_seen: dict[int, str] = {}
+        skipped = 0
         for svc, lines in streams:
+            # BE-B3 — observability/infra streams never enter the miner.
+            if is_excluded_service(svc):
+                skipped += len(lines)
+                continue
             for line in lines:
                 try:
                     result = self.analyze(line, service=svc)
@@ -375,6 +459,8 @@ class DrainAnalyzer:
                         )
                 except Exception as e:
                     logger.debug("Drain3 analyze failed for one line (non-fatal): %s", e)
+        if skipped:
+            logger.debug("Drain3 BE-B3 ingest: skipped %d excluded infra line(s)", skipped)
         return anomalous_lines, list(new_templates_seen.values())
 
     # Backwards-compat shim for any callers still using the flat-list shape.

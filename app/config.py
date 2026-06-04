@@ -154,6 +154,43 @@ class Settings(BaseSettings):
     drain3_noise_suppress_enabled: bool = True
     drain3_noise_suppress_rate_floor: float = 0.05  # < 5% anomalous AND no new templates
 
+    # BE-B3 (2026-06-04) — drain3 SOURCE-EXCLUSION denylist. The Drain3 template
+    # miner must only learn templates for MONITORED APPLICATIONS, never for the
+    # observability/infra stack itself (Grafana, Loki, Prometheus, the OTel
+    # collector, the MCP bridges, exporters, kube-system, ...). Those internal
+    # services emit high-cardinality / rotating content that looks "novel" on
+    # essentially every batch, so feeding them into the miner produced a flood of
+    # duplicate "Novel log-template anomaly" alerts for infra noise. This denylist
+    # is enforced at the analyzer's ingestion boundary (DrainAnalyzer._is_excluded):
+    # any line whose resolved service matches is dropped — no miner created, no
+    # line counted, no anomaly emitted. Matching is case-insensitive and ALSO
+    # catches the `ai-mcp-*` / `ai-*` container-name forms, any `*-exporter`, and
+    # namespace-style buckets (kube-system / observability / monitoring).
+    # This treats the SOURCE; the dedup fingerprint in app/dedup.py only treated
+    # the symptom. NOTE: filtering only what already flows in — no new data reads
+    # (MCP-only data-access invariant preserved).
+    drain3_excluded_services: list[str] = [
+        "grafana",
+        "loki",
+        "prometheus",
+        "promtail",
+        "otel-collector",
+        "ai-otel-collector",
+        "node-exporter",
+        "cadvisor",
+        "kube-state-metrics",
+        # MCP bridges (logical names + ai-mcp-* container forms caught by prefix)
+        "mcp-prometheus",
+        "mcp-loki",
+        "mcp-jaeger",
+        "mcp-drain3",
+        "mcp-rca-history",
+        # namespace-style buckets
+        "kube-system",
+        "observability",
+        "monitoring",
+    ]
+
     # Issue #2 (2026-06-04) — data-starved early-exit gate. When context-gather
     # comes back with NOTHING actionable (all three MCP pillars empty AND no
     # Drain3 anomaly_summary AND no observed value AND no correlated alerts AND

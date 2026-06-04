@@ -157,3 +157,103 @@ def test_service_label_extraction():
     assert _service_from_stream_labels({"unrelated": "x"}) == "_unknown"
     # Sanitization
     assert _service_from_stream_labels({"service_name": "weird/name@v2"}) == "weird_name_v2"
+
+
+# -----------------------------------------------------------------------------
+# BE-B3 — source-exclusion of the observability/infra stack's OWN logs
+# -----------------------------------------------------------------------------
+
+def test_is_excluded_service_matches_infra():
+    """The denylist matcher catches infra services defensively: exact names,
+    case-insensitive, ai-/ai-mcp- container prefixes, *-exporter, separator
+    normalisation, and namespace buckets."""
+    from app.drain_analyzer import is_excluded_service
+    # Exact denylist members
+    for svc in ("grafana", "loki", "prometheus", "promtail", "otel-collector",
+                "ai-otel-collector", "cadvisor", "kube-state-metrics",
+                "mcp-prometheus", "mcp-loki", "mcp-jaeger", "mcp-drain3",
+                "mcp-rca-history", "kube-system", "observability", "monitoring"):
+        assert is_excluded_service(svc) is True, svc
+    # Case-insensitive
+    assert is_excluded_service("Grafana") is True
+    assert is_excluded_service("LOKI") is True
+    # ai-mcp-* / ai-* container-name forms
+    assert is_excluded_service("ai-mcp-prometheus") is True
+    assert is_excluded_service("ai-grafana") is True
+    assert is_excluded_service("ai-otel-collector") is True
+    # any *-exporter
+    assert is_excluded_service("node-exporter") is True
+    assert is_excluded_service("blackbox-exporter") is True
+    # separator normalisation (_ vs -)
+    assert is_excluded_service("otel_collector") is True
+    assert is_excluded_service("kube_system") is True
+
+
+def test_is_excluded_service_allows_real_apps():
+    """Monitored application services are NOT excluded."""
+    from app.drain_analyzer import is_excluded_service
+    for svc in ("spring-boot", "employee-api", "kong", "frontend",
+                "payment-service", "_unknown", ""):
+        assert is_excluded_service(svc) is False, svc
+
+
+def test_excluded_service_line_is_skipped_no_miner_no_anomaly(drain):
+    """(a) A grafana/loki/prometheus/mcp-* line is skipped: no miner is
+    created, the line is not counted, and it can never be an anomaly."""
+    for svc in ("grafana", "loki", "prometheus", "ai-mcp-prometheus",
+                "mcp-loki", "node-exporter"):
+        # A line that WOULD be novel for a real service
+        result = drain.analyze(
+            "ERROR rotating token 9f3a-2b1c-novel-content connection churn",
+            service=svc,
+        )
+        assert result.excluded is True
+        assert result.is_new_pattern is False
+        assert result.cluster_id is None
+        # No miner created for the excluded service
+        assert svc not in drain._miners
+        # Not counted
+        assert svc not in drain._lines_per_service
+    # annotate_lines on an excluded service drops the whole batch
+    annotated, summary = drain.annotate_lines(
+        ["ERROR a", "ERROR b novel"], service="grafana"
+    )
+    assert annotated == []
+    assert "excluded" in summary.lower()
+    assert "grafana" not in drain._miners
+    # Aggregate stats see nothing from infra
+    assert drain.get_stats()["total_lines_processed"] == 0
+
+
+def test_real_app_service_still_produces_novel_anomaly(drain):
+    """(b) A real app service line is still ingested and CAN produce a
+    novel-template anomaly."""
+    result = drain.analyze(
+        "CRITICAL NullPointerException in PaymentService.processOrder()",
+        service="spring-boot",
+    )
+    assert result.excluded is False
+    assert result.is_new_pattern is True
+    assert "spring-boot" in drain._miners
+    assert drain._lines_per_service["spring-boot"] == 1
+    # And via the batch path
+    anomalous, new_templates = drain._ingest_batch_sync_streams(
+        [("employee-api", ["FATAL OutOfMemoryError in EmployeeController.list()"])]
+    )
+    assert len(anomalous) == 1
+    assert len(new_templates) == 1
+    assert "employee-api" in drain._miners
+
+
+def test_mixed_batch_ingests_apps_skips_infra(drain):
+    """A batch mixing infra + app streams ingests only the app stream."""
+    anomalous, new_templates = drain._ingest_batch_sync_streams([
+        ("grafana", ["INFO infra noise rotating-id-aaa", "INFO infra noise rotating-id-bbb"]),
+        ("loki", ["WARN compactor churn xyz"]),
+        ("spring-boot", ["ERROR brand new app failure template here"]),
+    ])
+    # Only the spring-boot line could be anomalous
+    assert len(new_templates) == 1
+    assert "grafana" not in drain._miners
+    assert "loki" not in drain._miners
+    assert "spring-boot" in drain._miners
