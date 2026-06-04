@@ -71,6 +71,52 @@ CREATE_FEEDBACK_INDEX_ACTIVE = """
 CREATE INDEX IF NOT EXISTS idx_feedback_active ON feedback(feedback_type, active_until)
 """
 
+# S5-INC-01 (Sprint 5 EPIC14) — first-class incident entity. One row per
+# distinct alert_fingerprint: the same flapping rule firing 40 times is ONE
+# incident, not 40 feed rows. fire_count + (last_seen − first_seen) give the
+# operator the "how long / how loud" answer at a glance. current_verdict /
+# current_severity / alert_name / affected_service are denormalized from the
+# most-RECENT contributing rca_history row so the /dashboard/incidents page
+# can render a row without re-joining back to rca_history.
+#
+# fingerprint is UNIQUE — the upsert (backfill + write-time maintenance)
+# keys on it. alert_name/affected_service are denormalized display columns,
+# not identity. id is a stable surrogate (we mint a uuid on first insert).
+CREATE_INCIDENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS incidents (
+    id TEXT PRIMARY KEY,
+    fingerprint TEXT UNIQUE NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    fire_count INTEGER NOT NULL DEFAULT 1,
+    current_verdict TEXT,
+    current_severity TEXT,
+    alert_name TEXT,
+    affected_service TEXT
+)
+"""
+
+CREATE_INCIDENTS_INDEX_FINGERPRINT = """
+CREATE INDEX IF NOT EXISTS idx_incidents_fingerprint ON incidents(fingerprint)
+"""
+
+CREATE_INCIDENTS_INDEX_LAST_SEEN = """
+CREATE INDEX IF NOT EXISTS idx_incidents_last_seen ON incidents(last_seen)
+"""
+
+
+def _duration_seconds(first_seen: str | None, last_seen: str | None) -> int:
+    """Whole-seconds span between two bare-ISO timestamps. 0 if either is
+    missing or unparseable (defensive — never raise into a render path)."""
+    if not first_seen or not last_seen:
+        return 0
+    try:
+        a = datetime.fromisoformat(first_seen)
+        b = datetime.fromisoformat(last_seen)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int((b - a).total_seconds()))
+
 
 def _is_empty_json_list(s) -> bool:
     """True if the value is missing, or represents an empty list.
@@ -192,6 +238,12 @@ class RCAStore:
             # default 0 means "include in lookups" - existing rows stay visible
             # unless explicitly marked.
             ("excluded_from_lookup", "INTEGER DEFAULT 0"),
+            # 2026-06-04 (S5-INC-01) — FK-ish back-reference to incidents.id.
+            # Nullable per the house pattern: rows with no fingerprint never
+            # get an incident, and pre-backfill historical rows stay NULL until
+            # backfill_incidents() links them. Set at save_decision write time
+            # for new rows that carry a fingerprint.
+            ("incident_id",         "TEXT"),
         ]
         for name, sql_type in new_columns:
             if name not in cols:
@@ -228,6 +280,12 @@ class RCAStore:
                 await self._db.execute(
                     f"ALTER TABLE feedback ADD COLUMN {name} {sql_type}"
                 )
+
+        # S5-INC-01: first-class incident entity. Created like the feedback
+        # table — additive, IF NOT EXISTS, plus its two indices.
+        await self._db.execute(CREATE_INCIDENTS_TABLE)
+        await self._db.execute(CREATE_INCIDENTS_INDEX_FINGERPRINT)
+        await self._db.execute(CREATE_INCIDENTS_INDEX_LAST_SEEN)
 
         await self._db.commit()
         logger.info("RCA history database initialized at %s", self.db_path)
@@ -299,11 +357,82 @@ class RCAStore:
                 int(getattr(record, "excluded_from_lookup", 0) or 0),
             ),
         )
+        # S5-INC-01 write-time maintenance: keep the incidents table live as
+        # new rows land, not just at backfill time. A row with no fingerprint
+        # has no incident identity — skip linkage gracefully (the row's
+        # incident_id stays NULL). Same connection / same commit below so the
+        # rca_history row + its incident upsert are atomic.
+        fp = record.alert_fingerprint
+        if fp:
+            ts_iso = record.timestamp.isoformat()
+            incident_id = await self._upsert_incident(
+                fingerprint=fp,
+                at_iso=ts_iso,
+                verdict=record.llm_verdict,
+                severity=record.severity,
+                alert_name=record.alert_name,
+                affected_service=record.affected_service,
+            )
+            await self._db.execute(
+                "UPDATE rca_history SET incident_id = ? WHERE id = ?",
+                (incident_id, record.id),
+            )
+
         await self._db.commit()
         logger.info(
             "Saved RCA decision %s for alert %s (quality=%s)",
             record.id, record.alert_name, record.rca_quality,
         )
+
+    async def _upsert_incident(
+        self,
+        fingerprint: str,
+        at_iso: str,
+        verdict: str | None,
+        severity: str | None,
+        alert_name: str | None,
+        affected_service: str | None,
+    ) -> str:
+        """Create-or-update the incident for `fingerprint`; return its id.
+
+        On first fire: insert a new incident (first_seen = last_seen = at_iso,
+        fire_count = 1) keyed by the fingerprint, minting a fresh uuid id.
+        On a repeat fire: bump fire_count, advance last_seen to the later of
+        the stored value and at_iso, and refresh current_verdict /
+        current_severity / alert_name / affected_service to this fire's values
+        (the "most recent wins" denormalization the page renders).
+
+        Idempotent-friendly: last_seen only moves forward (MAX), first_seen
+        only moves backward (MIN) — so re-applying an out-of-order historical
+        row never corrupts the bounds. Does NOT touch excluded_from_lookup or
+        rca_quality (those live on rca_history, not here). Caller commits.
+        """
+        import uuid as _uuid
+        new_id = str(_uuid.uuid4())
+        await self._db.execute(
+            """INSERT INTO incidents
+                   (id, fingerprint, first_seen, last_seen, fire_count,
+                    current_verdict, current_severity, alert_name, affected_service)
+               VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)
+               ON CONFLICT(fingerprint) DO UPDATE SET
+                   last_seen = MAX(incidents.last_seen, excluded.last_seen),
+                   first_seen = MIN(incidents.first_seen, excluded.first_seen),
+                   fire_count = incidents.fire_count + 1,
+                   current_verdict = excluded.current_verdict,
+                   current_severity = excluded.current_severity,
+                   alert_name = excluded.alert_name,
+                   affected_service = excluded.affected_service""",
+            (
+                new_id, fingerprint, at_iso, at_iso,
+                verdict, severity, alert_name, affected_service,
+            ),
+        )
+        cursor = await self._db.execute(
+            "SELECT id FROM incidents WHERE fingerprint = ?",
+            (fingerprint,),
+        )
+        row = await cursor.fetchone()
+        return row["id"] if row else new_id
 
     async def get_decisions(
         self,
@@ -474,6 +603,162 @@ class RCAStore:
             await self._db.commit()
         logger.info("backfill_env_from_service: updated %d rows", updated)
         return updated
+
+    async def backfill_incidents(self) -> dict:
+        """S5-INC-01 — one-off backfill of the incidents table from EXISTING
+        rca_history rows. Deliberate invocation only (NOT called on startup).
+
+        Groups every rca_history row by alert_fingerprint:
+          - rows with NULL/empty fingerprint are SKIPPED (no incident
+            identity) and counted into skipped_no_fingerprint.
+          - per fingerprint: first_seen = min(timestamp),
+            last_seen = max(timestamp), fire_count = COUNT(*),
+            current_verdict / current_severity / alert_name /
+            affected_service from the most-RECENT row in the group.
+        Upserts each group into incidents (INSERT ... ON CONFLICT(fingerprint)
+        DO UPDATE — only changed columns move), then back-links every
+        contributing row's rca_history.incident_id.
+
+        Idempotent: a second run recomputes the same aggregates and upserts
+        the same values (no duplicate incidents — fingerprint is UNIQUE), and
+        re-links the same incident_ids. Counts are stable across runs.
+
+        Does NOT touch excluded_from_lookup or rca_quality.
+
+        Returns {"incidents": N, "rows_linked": M, "skipped_no_fingerprint": K}.
+        """
+        import uuid as _uuid
+
+        # Count rows with no usable fingerprint first (for the honest report).
+        cursor = await self._db.execute(
+            """SELECT COUNT(*) AS n FROM rca_history
+               WHERE alert_fingerprint IS NULL OR TRIM(alert_fingerprint) = ''"""
+        )
+        skip_row = await cursor.fetchone()
+        skipped = int(skip_row["n"]) if skip_row else 0
+        if skipped:
+            logger.info(
+                "backfill_incidents: skipping %d rca_history rows with no fingerprint",
+                skipped,
+            )
+
+        # Per-fingerprint aggregates. The most-recent row's display columns are
+        # pulled with a correlated subquery so we don't need a second pass.
+        cursor = await self._db.execute(
+            """SELECT alert_fingerprint AS fp,
+                      MIN(timestamp) AS first_seen,
+                      MAX(timestamp) AS last_seen,
+                      COUNT(*) AS fire_count
+               FROM rca_history
+               WHERE alert_fingerprint IS NOT NULL
+                 AND TRIM(alert_fingerprint) != ''
+               GROUP BY alert_fingerprint"""
+        )
+        groups = await cursor.fetchall()
+
+        incidents_count = 0
+        for grp in groups:
+            fp = grp["fp"]
+            # Most-recent contributing row → denormalized display columns.
+            rcur = await self._db.execute(
+                """SELECT llm_verdict, severity, alert_name, affected_service
+                   FROM rca_history
+                   WHERE alert_fingerprint = ?
+                   ORDER BY timestamp DESC LIMIT 1""",
+                (fp,),
+            )
+            recent = await rcur.fetchone()
+            verdict = recent["llm_verdict"] if recent else None
+            severity = recent["severity"] if recent else None
+            alert_name = recent["alert_name"] if recent else None
+            affected_service = recent["affected_service"] if recent else None
+
+            new_id = str(_uuid.uuid4())
+            await self._db.execute(
+                """INSERT INTO incidents
+                       (id, fingerprint, first_seen, last_seen, fire_count,
+                        current_verdict, current_severity, alert_name, affected_service)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(fingerprint) DO UPDATE SET
+                       first_seen = excluded.first_seen,
+                       last_seen = excluded.last_seen,
+                       fire_count = excluded.fire_count,
+                       current_verdict = excluded.current_verdict,
+                       current_severity = excluded.current_severity,
+                       alert_name = excluded.alert_name,
+                       affected_service = excluded.affected_service""",
+                (
+                    new_id, fp, grp["first_seen"], grp["last_seen"],
+                    int(grp["fire_count"]), verdict, severity,
+                    alert_name, affected_service,
+                ),
+            )
+            incidents_count += 1
+
+        # Back-link every fingerprinted row to its incident. One UPDATE keyed
+        # on the shared fingerprint covers all rows in the group at once.
+        link_cursor = await self._db.execute(
+            """UPDATE rca_history
+               SET incident_id = (
+                   SELECT i.id FROM incidents i
+                   WHERE i.fingerprint = rca_history.alert_fingerprint
+               )
+               WHERE alert_fingerprint IS NOT NULL
+                 AND TRIM(alert_fingerprint) != ''"""
+        )
+        rows_linked = link_cursor.rowcount if link_cursor.rowcount is not None else 0
+
+        await self._db.commit()
+        result = {
+            "incidents": incidents_count,
+            "rows_linked": int(rows_linked),
+            "skipped_no_fingerprint": skipped,
+        }
+        logger.info("backfill_incidents: %s", result)
+        return result
+
+    async def get_incidents(
+        self,
+        limit: int = 200,
+        exclude_dismissed: bool = True,
+    ) -> list[dict]:
+        """S5-INC-02 reader — one row per incident for /dashboard/incidents.
+
+        Operator-facing read: returns incidents ORDER BY last_seen DESC. By
+        default hides incidents whose current verdict is a dismiss (the
+        canonical llm_verdict token is the lowercased 'dismiss' — see
+        pipeline.py decision.decision.value.lower()). Pass
+        exclude_dismissed=False to see everything.
+
+        Each row carries the stored columns plus a derived duration_seconds
+        (last_seen − first_seen) so the page can render "how long" without
+        re-parsing timestamps in the template.
+        """
+        clauses: list[str] = []
+        if exclude_dismissed:
+            # current_verdict may be NULL (cheap-path incidents never reached
+            # the LLM) — those are NOT dismisses, keep them visible.
+            clauses.append("LOWER(COALESCE(current_verdict, '')) != 'dismiss'")
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        cursor = await self._db.execute(
+            f"""SELECT id, fingerprint, first_seen, last_seen, fire_count,
+                       current_verdict, current_severity, alert_name,
+                       affected_service
+                FROM incidents
+                {where_sql}
+                ORDER BY last_seen DESC
+                LIMIT ?""",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        out: list[dict] = []
+        for row in rows:
+            d = dict(row)
+            d["duration_seconds"] = _duration_seconds(
+                d.get("first_seen"), d.get("last_seen")
+            )
+            out.append(d)
+        return out
 
     async def get_recent_decision_for_alert(
         self, alert_name: str, affected_service: str, lookback_minutes: int
