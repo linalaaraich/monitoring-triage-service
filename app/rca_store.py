@@ -183,6 +183,15 @@ class RCAStore:
             # at pipeline write time so dashboard / email / filter all read
             # one persisted value. "unknown" is the explicit gap value.
             ("env",               "TEXT"),
+            # 2026-06-04 (Stage E) - soft-quarantine flag. When set to 1 the
+            # row is HIDDEN from every LLM-context lookup (DA-3 prior, similar
+            # decisions, high-value feedback, low-rated examples, ...). Operator-
+            # facing reads (get_decisions, count_decisions, get_service_summary,
+            # get_alert_summary, KPI rollups) deliberately IGNORE this flag so
+            # the dashboard + audit trail still show the full history. The
+            # default 0 means "include in lookups" - existing rows stay visible
+            # unless explicitly marked.
+            ("excluded_from_lookup", "INTEGER DEFAULT 0"),
         ]
         for name, sql_type in new_columns:
             if name not in cols:
@@ -537,6 +546,7 @@ class RCAStore:
                  AND triage_decision NOT IN ('spike_shelved')
                  AND (rca_quality IS NULL
                       OR rca_quality NOT IN ('data_starved', 'needs_review'))
+                 AND COALESCE(excluded_from_lookup, 0) = 0
                ORDER BY timestamp DESC LIMIT 1""",
             (fingerprint, since),
         )
@@ -597,6 +607,7 @@ class RCAStore:
                   AND (alert_fingerprint IS NULL
                        OR (alert_fingerprint NOT LIKE 'audit-live-%'
                            AND alert_fingerprint NOT LIKE 'chaos-%'))
+                  AND COALESCE(excluded_from_lookup, 0) = 0
                 ORDER BY timestamp DESC LIMIT 1""",
             tuple(params),
         )
@@ -682,6 +693,7 @@ class RCAStore:
                WHERE alert_name = ?
                  AND affected_service = ?
                  AND rca_quality = 'data_starved'
+                 AND COALESCE(excluded_from_lookup, 0) = 0
                ORDER BY timestamp DESC
                LIMIT ?""",
             (alert_name, affected_service, limit),
@@ -941,6 +953,7 @@ class RCAStore:
                 WHERE r.alert_name = ?
                   AND r.affected_service = ?
                   AND f.created_at > ?
+                  AND COALESCE(r.excluded_from_lookup, 0) = 0
                   AND (
                        f.verdict_was_right = 'no'
                     OR (f.actual_cause IS NOT NULL AND LENGTH(TRIM(f.actual_cause)) > 5)
@@ -960,6 +973,7 @@ class RCAStore:
                 INNER JOIN rca_history r ON r.id = f.decision_id
                 WHERE r.alert_name = ?
                   AND f.created_at > ?
+                  AND COALESCE(r.excluded_from_lookup, 0) = 0
                   AND (
                        f.verdict_was_right = 'no'
                     OR (f.actual_cause IS NOT NULL AND LENGTH(TRIM(f.actual_cause)) > 5)
