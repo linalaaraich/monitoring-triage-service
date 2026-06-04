@@ -782,10 +782,48 @@ class LLMClient:
             "alert's observed metric (the Observed value above is the only "
             "authoritative signal).\n\n"
         )
+        # Issue #2 (2026-06-04, prompt grounding). The `drain_summary`
+        # (== ctx.anomaly_summary) is the richest log evidence we have for
+        # log-signal alerts and Drain3 self-fires — for the latter it carries
+        # the verbatim anomalous lines + new templates, ~900 chars of real
+        # signal. The PRIOR layout rendered it as a bare `### {drain_summary}`
+        # header AFTER an empty `### Logs … [Loki] returned 0 lines` block, so
+        # the small model anchored on "0 lines" and hedged "insufficient data"
+        # while ignoring the anomaly evidence sitting right below it. Two fixes:
+        #   (1) Promote the anomaly evidence to a clearly-LABELLED PRIMARY block
+        #       rendered BEFORE Loki, so it's read first and weighted as the
+        #       evidence it is.
+        #   (2) When that primary evidence exists, the empty-Loki section is
+        #       reframed as a benign non-signal ("expected — the anomalous lines
+        #       are above") instead of a headline "0 lines" the model fixates on.
+        _drain_summary = (drain_summary or "").strip()
+        has_anomaly_evidence = len(_drain_summary) > 30
+        if has_anomaly_evidence:
+            anomaly_block = (
+                "\n### Anomalous log lines (PRIMARY log evidence — reason FROM these)\n"
+                "These ARE the alert's log evidence. They were extracted/annotated for THIS "
+                "alert; do NOT say 'insufficient data' or 'no logs' while this block is "
+                "non-empty. Name the failure mode they describe.\n\n"
+                f"{_drain_summary}\n"
+            )
+        else:
+            anomaly_block = ""
+
         if context.annotated_logs and context.loki_is_fallback:
             loki_block = _AMBIENT_LOKI_PREAMBLE + "\n".join(context.annotated_logs)
         elif context.annotated_logs:
             loki_block = "\n".join(context.annotated_logs)
+        elif has_anomaly_evidence:
+            # Empty service-scoped Loki re-query, but we DO have the primary
+            # anomaly evidence above. Reframe so "0 lines" is not read as the
+            # headline — point the model UP at the evidence it already has.
+            loki_block = (
+                f"[Loki] the service-scoped re-query for service={alert.service} returned "
+                "no additional lines — EXPECTED, and NOT a data gap: the alert's log "
+                "evidence is in the 'Anomalous log lines (PRIMARY log evidence)' section "
+                "above. Reason from THAT block; do not treat this empty re-query as "
+                "'insufficient data'."
+            )
         else:
             loki_block = (
                 f"[Loki] returned 0 lines for service={alert.service}. If this "
@@ -822,11 +860,9 @@ The observed value above is ground-truth signal from Prometheus at the moment th
 
 ### Metrics (Prometheus, last {settings.prometheus_range_minutes}min)
 {json.dumps(context.metrics, indent=2) if context.metrics else "[Prometheus] returned no series for service=" + alert.service + " — rare-but-possible, treat as MCP miss not app silence. The alert value above is still authoritative."}
-
+{anomaly_block}
 ### Logs ({"⚠ AMBIENT FALLBACK — NOT ALERT-SPECIFIC" if context.loki_is_fallback else "Loki, service-scoped, Drain3-annotated"}, last {settings.loki_log_limit} lines)
 {loki_block}
-
-### {drain_summary}
 
 ### Traces (Jaeger, last {settings.jaeger_trace_limit} traces)
 {json.dumps(context.traces, indent=2, default=str) if context.traces else "[Jaeger] returned 0 traces for service=" + alert.service + ". Likely normal for infrastructure alerts; a traced request-path would have surfaced a spring-boot/kong service here."}
