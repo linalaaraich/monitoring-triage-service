@@ -5001,9 +5001,252 @@ def _render_sprint5_placeholder(slug: str) -> HTMLResponse:
 </html>""")
 
 
+def _fmt_duration(seconds: int) -> str:
+    """Human-readable span: '3d 4h', '2h 15m', '45m', '30s'. 0 → 'just now'.
+
+    Used by the incidents page to render last_seen − first_seen prominently.
+    Coarse on purpose — two units max so the operator gets a glanceable
+    'how long has this been flapping' answer, not a stopwatch.
+    """
+    s = int(seconds or 0)
+    if s <= 0:
+        return "just now"
+    d, rem = divmod(s, 86400)
+    h, rem = divmod(rem, 3600)
+    m, sec = divmod(rem, 60)
+    if d:
+        return f"{d}d {h}h" if h else f"{d}d"
+    if h:
+        return f"{h}h {m}m" if m else f"{h}h"
+    if m:
+        return f"{m}m"
+    return f"{sec}s"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# /dashboard/incidents — S5-INC-02 — one row per incident (fingerprint)
+# ──────────────────────────────────────────────────────────────────────
+# Grouped twin of the triage feed: the same flapping rule that produces 40
+# feed rows is ONE incident here. Reads the first-class incidents table
+# (S5-INC-01) via RCAStore.get_incidents — current DISMISS incidents are
+# hidden by default (the canonical lowercased 'dismiss' verdict token).
+# fire_count + duration (last_seen − first_seen) are the prominent columns.
+# Server-rendered in the same chrome as /dashboard/services. Read-only,
+# all data via RCAStore (the canonical writer) — MCP-invariant clean.
 @app.get("/dashboard/incidents", response_class=HTMLResponse)
 async def dashboard_sprint5_incidents():
-    return _render_sprint5_placeholder("incidents")
+    """Incident surface — one row per alert_fingerprint, sorted by recency."""
+    import urllib.parse as _urllib
+    from datetime import datetime, timezone, timedelta
+
+    incidents: list[dict] = []
+    if _store is not None:
+        try:
+            incidents = await _store.get_incidents(limit=200, exclude_dismissed=True)
+        except Exception as exc:
+            logger.warning("incidents query failed (non-fatal): %s", exc)
+            incidents = []
+
+    now_tng = datetime.now(timezone.utc).astimezone(
+        timezone(timedelta(hours=1))
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _esc(s) -> str:
+        return _html.escape(str(s)) if s is not None else ""
+
+    # ── Headline chips.
+    n_incidents = len(incidents)
+    total_fires = sum(int(i.get("fire_count") or 0) for i in incidents)
+    noisiest = max(
+        (int(i.get("fire_count") or 0) for i in incidents), default=0
+    )
+    chips_html = f"""
+    <div class="svc-chips">
+      <div class="svc-chip"><span class="svc-chip__n">{n_incidents}</span><span class="svc-chip__l">open incidents</span></div>
+      <div class="svc-chip"><span class="svc-chip__n">{total_fires}</span><span class="svc-chip__l">total fires</span></div>
+      <div class="svc-chip"><span class="svc-chip__n">{noisiest}</span><span class="svc-chip__l">noisiest (fires)</span></div>
+    </div>"""
+
+    if incidents:
+        row_html_parts = []
+        for inc in incidents:
+            name = inc.get("alert_name") or "(unknown)"
+            svc = inc.get("affected_service") or ""
+            q_param = _urllib.quote_plus(svc) if svc else ""
+            svc_cell = (
+                f'<a href="/dashboard?q={q_param}">{_esc(svc)}</a>'
+                if svc else "<span class='svc-muted'>—</span>"
+            )
+            verdict = inc.get("current_verdict") or "(none)"
+            severity = inc.get("current_severity") or "(unknown)"
+            fire_count = int(inc.get("fire_count") or 0)
+            duration = _fmt_duration(inc.get("duration_seconds") or 0)
+            last_fire = inc.get("last_seen") or "—"
+            if last_fire and last_fire != "—":
+                last_fire = last_fire[:16].replace("T", " ")
+            first_fire = inc.get("first_seen") or "—"
+            if first_fire and first_fire != "—":
+                first_fire = first_fire[:16].replace("T", " ")
+            row_html_parts.append(f"""
+        <tr>
+          <td class="svc-cell-name">{_esc(name)}</td>
+          <td>{svc_cell}</td>
+          <td class="inc-cell-fires">{fire_count}</td>
+          <td class="inc-cell-dur">{_esc(duration)}</td>
+          <td>{_esc(verdict)}</td>
+          <td>{_esc(severity)}</td>
+          <td class="svc-cell-mono">{_esc(first_fire)}</td>
+          <td class="svc-cell-mono">{_esc(last_fire)}</td>
+        </tr>""")
+        table_body_html = "".join(row_html_parts)
+        table_html = f"""
+    <table class="svc-table">
+      <thead>
+        <tr>
+          <th>Alert</th>
+          <th>Service</th>
+          <th>Fires</th>
+          <th>Duration</th>
+          <th>Verdict</th>
+          <th>Severity</th>
+          <th>First seen</th>
+          <th>Last seen</th>
+        </tr>
+      </thead>
+      <tbody>{table_body_html}
+      </tbody>
+    </table>"""
+    else:
+        table_html = """
+    <div class="svc-empty">
+      <div class="svc-empty__title">No open incidents</div>
+      <div class="svc-empty__sub">No incidents are currently open. As alerts with a fingerprint flow through the pipeline they are grouped one-per-fingerprint here. (Dismissed incidents are hidden.) If this is a fresh DB, run <code>backfill_incidents()</code> to populate from history.</div>
+    </div>"""
+
+    sidebar_html = """
+  <aside class="kpi-sidebar">
+    <div class="kpi-sidebar__brand">
+      <div class="kpi-sidebar__brand-mark"></div>
+      <div>
+        <div class="kpi-sidebar__brand-title">Observability</div>
+        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
+      </div>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Incident response</div>
+      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
+      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/incidents">Incidents</a>
+      <a class="kpi-sidebar__item" href="/dashboard/anomalies">Anomalies</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Insights</div>
+      <a class="kpi-sidebar__item" href="/dashboard/stats">Stats</a>
+      <a class="kpi-sidebar__item" href="/dashboard/services">Services</a>
+      <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Configuration</div>
+      <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
+      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
+    </div>
+  </aside>"""
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta http-equiv="refresh" content="60"/>
+<title>Observability &middot; Incidents</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/design/tokens.css"/>
+{_CIRES_THEME_HEAD_SCRIPT}
+<style>
+  body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); min-height: 100vh; }}
+  .kpi-shell {{ display: flex; min-height: 100vh; }}
+  .kpi-sidebar {{ width: 224px; flex-shrink: 0; background: var(--bg-soft, #13151e); border-right: 1px solid var(--border, #2a2d3a); padding: 0 0 14px; display: flex; flex-direction: column; }}
+  .kpi-sidebar__brand {{ display: flex; align-items: center; gap: 10px; padding: 14px 14px 14px 16px; border-bottom: 1px solid var(--border); height: 60px; }}
+  .kpi-sidebar__brand-mark {{ width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, #4ea8de, #b07ee8); flex-shrink: 0; }}
+  .kpi-sidebar__brand-title {{ font-size: 13.5px; font-weight: 600; color: var(--text); }}
+  .kpi-sidebar__brand-sub {{ font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }}
+  .kpi-sidebar__group {{ padding: 12px; margin-bottom: 6px; }}
+  .kpi-sidebar__group-label {{ font-size: 10px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.12em; padding: 0 12px 6px; font-weight: 600; }}
+  .kpi-sidebar__item {{ display: block; padding: 8px 12px; border-radius: 8px; text-decoration: none; color: var(--text-soft); font-size: 13px; transition: background .12s; }}
+  .kpi-sidebar__item:hover {{ background: var(--card-hi); color: var(--text); }}
+  .kpi-sidebar__item--active {{ background: var(--card-hi); color: var(--text); border: 1px solid var(--border-hi); font-weight: 500; box-shadow: inset 2.5px 0 0 var(--accent-blue); }}
+  .kpi-banner {{ background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02)); border-bottom: 1px solid rgba(176,126,232,.35); padding: 8px 22px; font-size: 12.5px; color: var(--text-soft); display: flex; align-items: center; gap: 14px; }}
+  .kpi-banner strong {{ color: var(--accent-purple); }}
+  .kpi-banner a {{ color: var(--accent-cyan); text-decoration: none; }}
+  .kpi-banner a:hover {{ text-decoration: underline; }}
+  .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
+  .kpi-header {{ padding: 18px 22px 8px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; justify-content: space-between; }}
+  .kpi-header__title {{ font-size: 18px; font-weight: 600; color: var(--text); }}
+  .kpi-header__sub {{ font-size: 12.5px; color: var(--muted); margin-top: 4px; }}
+  .kpi-header__time {{ font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); letter-spacing: 0.02em; }}
+  .svc-chips {{ display: flex; gap: 14px; padding: 18px 22px 6px; flex-wrap: wrap; }}
+  .svc-chip {{ background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--accent-purple); border-radius: 10px; padding: 10px 16px; display: flex; flex-direction: column; gap: 2px; min-width: 140px; }}
+  .svc-chip__n {{ font-family: var(--font-mono); font-size: 22px; font-weight: 600; color: var(--text); line-height: 1.1; }}
+  .svc-chip__l {{ font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }}
+  .svc-table-wrap {{ padding: 14px 22px 22px; }}
+  .svc-table {{ width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; font-size: 13px; }}
+  .svc-table thead th {{ text-align: left; padding: 10px 14px; background: var(--bg-soft); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }}
+  .svc-table tbody td {{ padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--text-soft); vertical-align: top; }}
+  .svc-table tbody tr:last-child td {{ border-bottom: none; }}
+  .svc-table tbody tr:hover td {{ background: var(--card-hi); }}
+  .svc-cell-name {{ color: var(--text); font-weight: 500; }}
+  .svc-cell-name a {{ color: var(--accent-cyan); text-decoration: none; font-weight: 500; }}
+  .svc-cell-name a:hover {{ text-decoration: underline; }}
+  .inc-cell-fires {{ font-family: var(--font-mono); color: var(--accent-yellow); font-weight: 600; }}
+  .inc-cell-dur {{ font-family: var(--font-mono); color: var(--text); font-weight: 600; }}
+  .svc-cell-mono {{ font-family: var(--font-mono); color: var(--muted); font-size: 12px; white-space: nowrap; }}
+  .svc-muted {{ color: var(--muted-2); }}
+  .svc-empty {{ margin: 18px 22px; padding: 36px 28px; background: var(--card); border: 1px dashed var(--border); border-radius: 12px; text-align: center; color: var(--muted); }}
+  .svc-empty__title {{ font-size: 15px; font-weight: 600; color: var(--text-soft); margin-bottom: 6px; }}
+  .svc-empty__sub {{ font-size: 12.5px; }}
+  .svc-empty code {{ font-family: var(--font-mono); background: var(--bg-soft); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }}
+  .kpi-foot {{ padding: 12px 22px 22px; font-size: 11.5px; color: var(--muted-2); border-top: 1px solid var(--border); }}
+  .kpi-foot strong {{ color: var(--muted); }}
+</style>
+</head>
+<body>
+
+<div class="kpi-banner">
+  <strong>Incidents</strong>
+  <span>One row per alert fingerprint &mdash; grouped from the triage feed. Reads the local incidents table.</span>
+  <span style="flex: 1"></span>
+  <a href="/dashboard">&larr; back to triage feed</a>
+  <a href="/dashboard/kpi">KPI overview</a>
+</div>
+
+<div class="kpi-shell">
+  {sidebar_html}
+  <main class="kpi-main">
+    <div class="kpi-header">
+      <div>
+        <div class="kpi-header__title">Incidents &middot; grouped by fingerprint</div>
+        <div class="kpi-header__sub">One row per <code>alert_fingerprint</code> &middot; dismissed hidden &middot; auto-refreshing every 60 s &middot; Casablanca timezone.</div>
+      </div>
+      <div class="kpi-header__time">
+        <span class="live-dot"></span>{_esc(now_tng)} GMT+1
+      </div>
+    </div>
+
+    {chips_html}
+
+    <div class="svc-table-wrap">{table_html}
+    </div>
+
+    <div class="kpi-foot">
+      <strong>What you are looking at:</strong> each row is one incident &mdash; the same flapping rule that produces dozens of feed rows collapses to a single line. <em>Fires</em> is the total contributing alerts; <em>Duration</em> is last seen minus first seen. Verdict / severity reflect the most-recent fire. Currently-dismissed incidents are hidden.
+    </div>
+  </main>
+</div>
+
+</body>
+</html>""")
 
 
 @app.get("/dashboard/anomalies", response_class=HTMLResponse)
