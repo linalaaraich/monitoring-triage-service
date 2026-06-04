@@ -154,6 +154,29 @@ class Settings(BaseSettings):
     drain3_noise_suppress_enabled: bool = True
     drain3_noise_suppress_rate_floor: float = 0.05  # < 5% anomalous AND no new templates
 
+    # Issue #2 (2026-06-04) — data-starved early-exit gate. When context-gather
+    # comes back with NOTHING actionable (all three MCP pillars empty AND no
+    # Drain3 anomaly_summary AND no observed value AND no correlated alerts AND
+    # no prior decision / operator feedback to anchor on), the LLM has nothing
+    # to ground a cause in — it will spend a full ~100s cold inference (+retry +
+    # bounded-agency = a second inference) only to hedge "Cannot determine the
+    # root cause / insufficient data", and clutter the operator feed with a
+    # noisy `investigate` row. This gate short-paths such an alert BEFORE the LLM
+    # call to a cheap, QUIET `data_starved_suppressed` record: no LLM, no email,
+    # no escalate, recorded as `suppressed` so it does not appear as a full
+    # investigate row in the feed. Mirrors the drain3 noise-suppression gate.
+    #
+    # CONSERVATIVE BY DESIGN — every one of the bypass conditions below keeps an
+    # alert on the full LLM path. CRITICAL-severity alerts ALWAYS bypass the
+    # gate (a critical alert with thin context still deserves a human-readable
+    # investigation + page, not a quiet suppression). A genuinely data-starved
+    # NON-critical alert is cheap + quiet here instead of a 100s "cannot
+    # determine" page. Disable via DATA_STARVED_EARLY_EXIT_ENABLED=false.
+    data_starved_early_exit_enabled: bool = True
+    # Severities that ALWAYS bypass the early-exit gate (always get the full
+    # LLM investigation even on thin context). Match is case-insensitive.
+    data_starved_early_exit_bypass_severities: list[str] = ["critical"]
+
     # Public UIs for deep-links in the escalation email + dashboard.
     # Defaults assume the tailnet/MagicDNS layout; override per-deployment
     # via env (GRAFANA_URL, JAEGER_URL, LOKI_URL).

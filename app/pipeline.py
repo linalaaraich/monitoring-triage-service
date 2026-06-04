@@ -61,6 +61,56 @@ def _is_shelved_in_disguise(decision, quality: str) -> bool:
     return False
 
 
+def _context_is_data_starved(
+    ctx,
+    alert: GrafanaAlert,
+    anomaly_summary: str,
+    correlated: list[dict] | None,
+    prior_decision: dict | None,
+    corrective_feedback: list[dict] | None,
+    metric_facts=None,
+) -> bool:
+    """Issue #2 (2026-06-04) — return True when context-gather produced NOTHING
+    the LLM could ground a root cause in, so calling the model would only burn a
+    ~100s cold inference (+retry) to hedge "Cannot determine / insufficient
+    data" and emit a noisy investigate row.
+
+    CONSERVATIVE: any one signal below keeps the alert on the full LLM path.
+    The alert is "data-starved" ONLY when ALL of these hold:
+      - no Prometheus metrics, no logs / annotated logs, no traces, no deep
+        trace (sources_available == 0 is the canonical signal, double-checked
+        against the raw fields in case a pillar returned an empty container),
+      - no Drain3 anomaly_summary (the rich verbatim-lines evidence),
+      - no observed value on the alert (the metric value is itself groundable
+        evidence — an alert that carries a value is never data-starved),
+      - no correlated neighbouring alerts (a cascade is groundable evidence),
+      - no prior decision for this fingerprint (DA-3 coherence anchor),
+      - no high-value operator corrective feedback for this family.
+
+    Critical-severity bypass is handled by the caller (a critical alert with
+    thin context still earns the full investigation + page).
+    """
+    # Any pillar with content → groundable, not starved.
+    if getattr(ctx, "sources_available", 0) and ctx.sources_available > 0:
+        return False
+    if ctx.metrics or ctx.logs or ctx.annotated_logs or ctx.traces or ctx.deep_trace:
+        return False
+    if (anomaly_summary or "").strip():
+        return False
+    # An observed metric value is itself authoritative, groundable evidence.
+    if alert.values:
+        return False
+    if metric_facts is not None and getattr(metric_facts, "observed_value", None) is not None:
+        return False
+    if correlated:
+        return False
+    if prior_decision:
+        return False
+    if corrective_feedback:
+        return False
+    return True
+
+
 class TriagePipeline:
     def __init__(
         self,
@@ -693,6 +743,73 @@ class TriagePipeline:
                 "Phase 6: injecting %d high-value operator feedback row(s) for %s/%s",
                 len(corrective_feedback), alert.alertname, alert.service,
             )
+
+        # Step 6.0 (Issue #2, 2026-06-04) — data-starved early-exit gate.
+        # Runs AFTER all context-gather + anchor lookups (so the predicate sees
+        # every groundable signal: pillars, anomaly_summary, observed value,
+        # correlations, prior decision, operator feedback) and IMMEDIATELY
+        # BEFORE the LLM call. When NOTHING actionable came back, calling the
+        # model would only burn a ~100s cold inference (+retry +bounded-agency =
+        # a second inference) to hedge "Cannot determine the root cause", then
+        # emit a noisy `investigate` row the operator has to triage. Instead,
+        # short-path to a cheap, QUIET `data_starved_suppressed` record: no LLM,
+        # no email, no escalate, recorded as `suppressed` so it does NOT clutter
+        # the feed as a full investigate row. Mirrors the drain3 noise gate.
+        #
+        # CRITICAL-severity alerts ALWAYS bypass — thin context on a critical
+        # alert still earns a human-readable investigation + page. Disable the
+        # whole gate via DATA_STARVED_EARLY_EXIT_ENABLED=false.
+        if (
+            settings.data_starved_early_exit_enabled
+            and (alert.severity or "").lower()
+            not in {s.lower() for s in settings.data_starved_early_exit_bypass_severities}
+            and _context_is_data_starved(
+                ctx, alert, anomaly_summary, correlated,
+                prior_decision, corrective_feedback, metric_facts,
+            )
+        ):
+            elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
+            pipeline_duration.observe(elapsed_ms / 1000)
+            alerts_suppressed.labels(reason="data_starved_context").inc()
+            logger.info(
+                "Alert %s/%s short-pathed by data-starved early-exit gate "
+                "(all pillars empty, no observed value, no correlation/anchor) "
+                "— cheap quiet row, no LLM (%dms)",
+                alert.alertname, alert.service, elapsed_ms,
+            )
+            record = RCARecord(
+                alert_source=source,
+                alert_name=alert.alertname,
+                alert_fingerprint=alert.fingerprint,
+                affected_service=alert.service,
+                severity=alert.severity,
+                triage_decision="data_starved_suppressed",
+                llm_verdict=None,
+                rca_report=(
+                    f"Data-starved alert suppressed pre-LLM: all three MCP pillars "
+                    f"(Prometheus/Loki/Jaeger) returned nothing for service="
+                    f"{alert.service}, the webhook carried no observed value, and "
+                    f"there are no correlated alerts or prior decisions to anchor on. "
+                    f"There is no evidence to ground a root cause, so this was NOT sent "
+                    f"to the LLM (which would only hedge 'cannot determine') and was "
+                    f"NOT escalated. If this recurs, check that the alert rule emits an "
+                    f"observed value and that the service label matches a logging/metrics "
+                    f"source."
+                ),
+                llm_reasoning=None,
+                action_taken="suppressed",
+                investigation_duration_ms=elapsed_ms,
+                rca_quality="data_starved",
+                alert_instance=alert.instance,
+                alert_component=alert.labels.get("component"),
+                alert_signal=alert.labels.get("signal"),
+                env=env,
+            )
+            try:
+                await self.store.save_decision(record)
+            except Exception as exc:
+                logger.warning("Failed to persist data_starved_suppressed record: %s", exc)
+            return
 
         decision, llm_ms = await self.llm.investigate(
             alert, ctx, anomaly_summary, history_context,

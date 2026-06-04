@@ -64,6 +64,11 @@ def _make_alert(
         annotations={"summary": "p95 high", "description": "latency p95 over 1s"},
         startsAt="2026-05-26T10:30:00Z",
         fingerprint=fingerprint,
+        # A real latency webhook always carries an observed value; including it
+        # keeps the fixture realistic so the issue-#2 data-starved early-exit
+        # gate (which only fires on a value-less alert with empty context) does
+        # not intercept the no-prior-decision cases these tests exercise.
+        values={"B": 1820.0},
     )
 
 

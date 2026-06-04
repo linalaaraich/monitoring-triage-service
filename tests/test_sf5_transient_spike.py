@@ -75,6 +75,13 @@ def _make_alert(
         annotations={"summary": "cpu high", "description": "cpu over 80%"},
         startsAt="2026-05-31T10:30:00Z",
         fingerprint=fingerprint,
+        # A real Grafana CPU/metric webhook always carries an observed value.
+        # Including it keeps these fixtures realistic and means the issue-#2
+        # data-starved early-exit gate (which only fires when the alert has NO
+        # observed value AND empty context) does not intercept them — these
+        # tests exercise the SF-5 + normal-investigate paths, not the
+        # data-starved gate.
+        values={"B": 87.0},
     )
 
 
