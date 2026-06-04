@@ -1,4 +1,5 @@
 import html as _html
+import json as _json
 import logging
 import re as _re
 import time
@@ -6,6 +7,26 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+
+def _safe_script_json(obj) -> str:
+    """json.dumps for embedding inside an inline <script> block.
+
+    Plain json.dumps does NOT escape < > & — so any payload value containing
+    `</script>` (or `<script>`) breaks out of the tag = XSS. This matters for
+    window.CIRES_* which embed user/URL input (the `q` filter) AND
+    attacker-influenceable content (alert/log/RCA text). Escape the HTML-special
+    chars + the JS line/paragraph separators to their \\uXXXX forms, which are
+    valid in a JS string literal and inert in HTML. (2026-06-04 security fix.)
+    """
+    return (
+        _json.dumps(obj, default=str)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
 
 
 # All DB timestamps are stored as bare-UTC ISO strings (see app.rca_store._utc_now). The
@@ -2972,7 +2993,7 @@ async def dashboard_v2(
             drain3_stats=drain3_stats,
             now_utc=now_utc,
         ))
-    alerts_json = _json2.dumps(alerts, default=str)
+    alerts_json = _safe_script_json(alerts)
 
     # ─── TopBar + sidebar stats (computed from the same slab; no new DB hits) ───
     # Use the wider history_slab (up to 200 most-recent rows in window) for the
@@ -3186,10 +3207,10 @@ async def dashboard_v2(
 <script>
   window.CIRES_ALERTS = {alerts_json};
   window.CIRES_NOW_LOCAL = "{now_tng}";
-  window.CIRES_PAGINATION = {_json2.dumps(pagination)};
-  window.CIRES_DASHBOARD_STATS = {_json2.dumps(dashboard_stats)};
-  window.CIRES_SIDEBAR_BADGES = {_json2.dumps(sidebar_badges)};
-  window.CIRES_FILTERS = {_json2.dumps(filters_payload)};
+  window.CIRES_PAGINATION = {_safe_script_json(pagination)};
+  window.CIRES_DASHBOARD_STATS = {_safe_script_json(dashboard_stats)};
+  window.CIRES_SIDEBAR_BADGES = {_safe_script_json(sidebar_badges)};
+  window.CIRES_FILTERS = {_safe_script_json(filters_payload)};
 
   // 2026-06-02 - partial-refresh poll. Replaces the previous
   // meta-refresh full-page reload so the operator's expanded-row +
@@ -4551,7 +4572,7 @@ async def dashboard_v2_alert(short_id: str):
         "anomalies": (drain3_stats.get("total_anomalies") or 0),
     }
     now_tng = now_utc.astimezone(timezone(timedelta(hours=1))).strftime("%Y-%m-%d %H:%M:%S")
-    alert_json = _json2.dumps(alert, default=str)
+    alert_json = _safe_script_json(alert)
 
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="en">
@@ -4583,8 +4604,8 @@ async def dashboard_v2_alert(short_id: str):
 <script>
   window.CIRES_ALERT = {alert_json};
   window.CIRES_NOW_LOCAL = "{now_tng}";
-  window.CIRES_DASHBOARD_STATS = {_json2.dumps(dashboard_stats)};
-  window.CIRES_SIDEBAR_BADGES = {_json2.dumps(sidebar_badges)};
+  window.CIRES_DASHBOARD_STATS = {_safe_script_json(dashboard_stats)};
+  window.CIRES_SIDEBAR_BADGES = {_safe_script_json(sidebar_badges)};
   // 2026-06-04 (WS-2) - real Grafana/Loki/Jaeger deep-links for
   // DetailHeader buttons. detail.jsx reads window.CIRES_LINKS with a
   // "#" fallback so the design canvas page still renders standalone.
@@ -4594,7 +4615,7 @@ async def dashboard_v2_alert(short_id: str):
   // Explore prefiltered to {{service_name="<svc>"}}; Jaeger opens
   // /search prefiltered to ?service=<svc>&lookback=1h. See
   // `_build_cires_links` for the routing table.
-  window.CIRES_LINKS = {_json2.dumps(_build_cires_links(alert))};
+  window.CIRES_LINKS = {_safe_script_json(_build_cires_links(alert))};
 </script>
 
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
@@ -4639,7 +4660,7 @@ async def dashboard_v2_alert_rate(short_id: str):
 
     drain3_stats = _drain.get_stats() if _drain is not None else {}
     alert = _v2_transform_row(target, drain3_stats=drain3_stats, now_utc=now_utc)
-    alert_json = _json2.dumps(alert, default=str)
+    alert_json = _safe_script_json(alert)
     now_tng = now_utc.astimezone(timezone(timedelta(hours=1))).strftime("%Y-%m-%d %H:%M:%S")
 
     # 2026-06-04 (WS-2 F-008): rate page now wraps the form in the
@@ -4727,9 +4748,9 @@ async def dashboard_v2_alert_rate(short_id: str):
   window.CIRES_ALERTS = [{alert_json}];
   window.CIRES_ALERT = {alert_json};
   window.CIRES_NOW_LOCAL = "{now_tng}";
-  window.CIRES_RATE_SHORT_ID = {_json2.dumps(short)};
-  window.CIRES_DASHBOARD_STATS = {_json2.dumps(dashboard_stats)};
-  window.CIRES_SIDEBAR_BADGES = {_json2.dumps(sidebar_badges)};
+  window.CIRES_RATE_SHORT_ID = {_safe_script_json(short)};
+  window.CIRES_DASHBOARD_STATS = {_safe_script_json(dashboard_stats)};
+  window.CIRES_SIDEBAR_BADGES = {_safe_script_json(sidebar_badges)};
 
   // Submit handler — POST to /feedback/rate/{{short_id}}, on success
   // re-render with the submitted state.

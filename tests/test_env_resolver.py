@@ -387,20 +387,21 @@ async def test_dashboard_env_filter_narrows(env_dashboard_client):
     assert "prod-row" in body
     assert "stg-row" not in body
     assert "unknown-row" not in body
-    # The Env <select> has prod marked selected
-    assert '<option value="prod" selected>' in body
+    # The active env filter is exposed to the React layer via CIRES_FILTERS
+    # (the server-rendered filter bar was removed 2026-06-04; env filtering is
+    # unchanged — still applied server-side via get_decisions(env=...)).
+    assert '"env": "prod"' in body
 
 
 @pytest.mark.asyncio
-async def test_dashboard_env_dropdown_present(env_dashboard_client):
-    """The Env filter dropdown is rendered in the filter bar."""
-    resp = await env_dashboard_client.get("/dashboard")
+async def test_dashboard_env_filter_exposed_to_react(env_dashboard_client):
+    """The resolved env filter reaches the React layer through CIRES_FILTERS
+    (replaces the removed server-rendered Env <select> dropdown)."""
+    resp = await env_dashboard_client.get("/dashboard?env=stg")
     assert resp.status_code == 200
     body = resp.text
-    assert 'name="env"' in body
-    # All canonical env tokens appear as <option> values in the dropdown
-    for token in ("prod", "stg", "dev", "unknown"):
-        assert f'value="{token}"' in body
+    assert "window.CIRES_FILTERS" in body
+    assert '"env": "stg"' in body
 
 
 # ---------------------------------------------------------------------------

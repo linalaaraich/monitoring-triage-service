@@ -31,7 +31,6 @@ from app.main import (
     _V2_FILTER_FAMILIES,
     _V2_FILTER_RANGES,
     _parse_v2_filters,
-    _render_v2_filter_bar,
 )
 from app.models import RCARecord
 from app.rca_store import RCAStore
@@ -256,18 +255,22 @@ async def test_store_count_decisions_honors_new_filters(filter_store):
 # /dashboard route — integration tests
 # ---------------------------------------------------------------------------
 
+# 2026-06-04: the server-rendered v2 filter BAR was removed (it was a duplicate
+# dark bar stacked above the React app, which owns the filter UI). Server-side
+# filtering by query param is UNCHANGED — the route still parses the params and
+# calls get_decisions(verdict=, severity=, alert_name_like=, env=, since_hours=)
+# and injects the filtered set as window.CIRES_ALERTS / window.CIRES_FILTERS for
+# the React layer. These tests now assert that SURVIVING contract (the payload
+# narrows + the active set is exposed to JS), not the removed bar's markup.
+
 @pytest.mark.asyncio
 async def test_v2_empty_query_renders_default(filter_client):
-    """No query params → 200 + filter bar renders with defaults selected."""
+    """No query params → 200 + all fixture rows present (default 15d range)."""
     resp = await filter_client.get("/dashboard")
     assert resp.status_code == 200
     body = resp.text
-    # Filter bar present
-    assert 'data-v2-filter-bar' in body
-    # The default range is the selected one
-    assert f'<option value="{_V2_FILTER_DEFAULT_RANGE}" selected>' in body
-    # "any" is selected for verdict + severity + family (active count = 0)
-    assert body.count('<option value="" selected>') >= 3
+    assert "recent-esc-cpu" in body
+    assert "twelve-d-esc-net" in body  # the 12d row is visible at the 15d default
 
 
 @pytest.mark.asyncio
@@ -276,9 +279,7 @@ async def test_v2_verdict_filter_restricts_payload(filter_client):
     resp = await filter_client.get("/dashboard?verdict=escalate&range=15d")
     assert resp.status_code == 200
     body = resp.text
-    # The escalate option is selected in the verdict <select>
-    assert '<option value="escalate" selected>' in body
-    # The dismiss-only fixture rows must not appear by id in the embedded JSON
+    # Dismiss-only fixture rows must not appear by id in the embedded JSON
     assert "recent-dis-cpu" not in body
     assert "ten-h-dis-lat" not in body
     # An escalate row IS visible
@@ -291,11 +292,8 @@ async def test_v2_range_24h_excludes_older_rows(filter_client):
     resp = await filter_client.get("/dashboard?range=24h")
     assert resp.status_code == 200
     body = resp.text
-    assert '<option value="24h" selected>' in body
-    # Recent / 5h / 10h rows must appear
     assert "recent-esc-cpu" in body
     assert "ten-h-dis-lat" in body
-    # 3d / 12d rows must NOT
     assert "three-d-esc-disk" not in body
     assert "twelve-d-esc-net" not in body
 
@@ -308,7 +306,6 @@ async def test_v2_multiple_filters_compose(filter_client):
     )
     assert resp.status_code == 200
     body = resp.text
-    # Only the matching row is in the payload
     assert "recent-esc-cpu" in body
     assert "recent-esc-mem" not in body  # different family
     assert "recent-dis-cpu" not in body  # different verdict
@@ -316,120 +313,59 @@ async def test_v2_multiple_filters_compose(filter_client):
 
 
 @pytest.mark.asyncio
+async def test_v2_dismiss_filter_restricts_payload(filter_client):
+    """?verdict=dismiss → only dismiss rows; escalate rows filtered out."""
+    resp = await filter_client.get("/dashboard?verdict=dismiss&range=15d")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "recent-dis-cpu" in body
+    assert "recent-esc-cpu" not in body
+
+
+@pytest.mark.asyncio
 async def test_v2_bad_values_dont_500(filter_client):
-    """Crafted URL with junk values → 200, fall back to default render."""
+    """Crafted URL with junk values → 200, junk does not echo into the page."""
     resp = await filter_client.get(
         "/dashboard?verdict=DROP&severity='OR'1=1&family=../../etc/passwd&range=999d"
     )
     assert resp.status_code == 200
     body = resp.text
-    # All filters fell back: "any" selected on the three select boxes
-    # and the default range selected.
-    assert f'<option value="{_V2_FILTER_DEFAULT_RANGE}" selected>' in body
-    # No SQL-injection echo bypassing the escape — the junk strings should
-    # NOT round-trip into the verdict/severity <option selected> markers.
-    assert '<option value="DROP" selected>' not in body
-    assert "OR\"1=1" not in body
-
-
-@pytest.mark.asyncio
-async def test_v2_html_reflects_active_filter_selections(filter_client):
-    """The selected <option> markers in the rendered HTML must match the URL."""
-    resp = await filter_client.get(
-        "/dashboard?verdict=dismiss&severity=warning&family=memory&range=7d"
-    )
-    body = resp.text
-    assert '<option value="dismiss" selected>' in body
-    assert '<option value="warning" selected>' in body
-    assert '<option value="memory" selected>' in body
-    assert '<option value="7d" selected>' in body
-
-
-@pytest.mark.asyncio
-async def test_v2_search_value_round_trips(filter_client):
-    """?q=... renders the value back in the search input (XSS-escaped)."""
-    resp = await filter_client.get("/dashboard?q=spring-boot")
-    body = resp.text
-    assert 'value="spring-boot"' in body
+    # Bad filters fall back to defaults (no 500); the junk must not appear.
+    assert "../../etc/passwd" not in body
+    assert "OR'1=1" not in body
 
 
 @pytest.mark.asyncio
 async def test_v2_search_value_escapes_html(filter_client):
-    """Crafted search value must be HTML-escaped — no script injection."""
+    """A crafted ?q= must never echo unescaped into the page (XSS guard) —
+    q is parsed + exposed via window.CIRES_FILTERS, so it must be encoded."""
     resp = await filter_client.get(
         "/dashboard?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
     )
+    assert resp.status_code == 200
     body = resp.text
-    # The raw < / > must NOT survive untouched inside the value="..."
-    assert 'value="<script>alert(1)</script>"' not in body
-    # The escaped form IS expected
-    assert "&lt;script&gt;" in body
+    assert "<script>alert(1)</script>" not in body
 
 
 @pytest.mark.asyncio
-async def test_v2_url_persistence_refresh_identical_render(filter_client):
-    """Calling the same URL twice must produce a structurally identical
-    filter bar — the acceptance criterion's 'refresh page → filters
-    survive' check."""
+async def test_v2_url_persistence_identical_render(filter_client):
+    """Same URL twice → identical status + identical injected filter set
+    (shareable/bookmarkable URL — filters survive a refresh)."""
     url = "/dashboard?verdict=escalate&severity=critical&family=cpu&range=24h"
     r1 = await filter_client.get(url)
     r2 = await filter_client.get(url)
     assert r1.status_code == r2.status_code == 200
-    # Extract the form bar from each body and compare. They must match
-    # (apart from time-varying bits which the filter bar doesn't contain).
-    def _bar(body: str) -> str:
-        start = body.index('<form class="v2-filter-bar"')
-        end = body.index("</form>", start)
-        return body[start:end]
-    assert _bar(r1.text) == _bar(r2.text)
-
-
-@pytest.mark.asyncio
-async def test_v2_filter_form_uses_method_get(filter_client):
-    """The form must use method=get so filters land in the URL — the
-    bookmark/share affordance is the whole point of this story."""
-    resp = await filter_client.get("/dashboard")
-    body = resp.text
-    assert 'method="get"' in body
-    assert 'action="/dashboard"' in body
-
-
-@pytest.mark.asyncio
-async def test_v2_filter_form_has_clear_affordance(filter_client):
-    """The 'clear all' link routes back to the unfiltered page."""
-    resp = await filter_client.get("/dashboard?verdict=escalate")
-    body = resp.text
-    # Anchor that resets to /dashboard (no query)
-    assert 'href="/dashboard"' in body
+    # The active-filter set the React layer reads is identical across refreshes.
+    assert '"verdict": "escalate"' in r1.text
+    assert ('"verdict": "escalate"' in r2.text) and ('"range": "24h"' in r2.text)
 
 
 @pytest.mark.asyncio
 async def test_v2_filters_payload_exposed_to_js(filter_client):
-    """window.CIRES_FILTERS is the React layer's read of the active set."""
+    """window.CIRES_FILTERS is the React layer's read of the active set —
+    this is how filters now reach the UI (the server bar is gone)."""
     resp = await filter_client.get("/dashboard?verdict=escalate&range=24h")
     body = resp.text
     assert "window.CIRES_FILTERS" in body
     assert '"verdict": "escalate"' in body
     assert '"range": "24h"' in body
-
-
-# ---------------------------------------------------------------------------
-# _render_v2_filter_bar — direct render-helper smoke
-# ---------------------------------------------------------------------------
-
-def test_filter_bar_renders_with_no_active_filters():
-    f = _parse_v2_filters(None, None, None, None, None)
-    html = _render_v2_filter_bar(f, page=1, size=20)
-    assert "<form" in html
-    assert 'method="get"' in html
-    # "any" option must be selected on each filterable <select>
-    assert html.count('<option value="" selected>') >= 3
-
-
-def test_filter_bar_marks_active_options_selected():
-    f = _parse_v2_filters("escalate", "critical", "cpu", "24h", None)
-    html = _render_v2_filter_bar(f, page=1, size=20)
-    assert '<option value="escalate" selected>' in html
-    assert '<option value="critical" selected>' in html
-    assert '<option value="cpu" selected>' in html
-    assert '<option value="24h" selected>' in html
