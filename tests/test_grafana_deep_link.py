@@ -112,6 +112,22 @@ def test_loki_explore_range_is_one_hour():
     assert left["range"] == {"from": "now-1h", "to": "now"}
 
 
+def test_loki_link_is_hosted_on_grafana_origin():
+    """Loki has no web UI - /explore is a Grafana page. The Open Loki
+    button must point at the Grafana origin (with the loki datasource
+    preselected), NOT at the Loki HTTP API port 3100 where /explore
+    would 404."""
+    from app.config import settings
+    url = _build_cires_links({
+        "alertName": "Drain3AnomalyDetected",
+        "component": "spring-boot",
+    })["loki"]
+    grafana_origin = settings.grafana_url.rstrip("/")
+    assert url.startswith(grafana_origin + "/explore"), (
+        f"Loki link must live on the Grafana origin (got {url!r})"
+    )
+
+
 # -------------------------------------------------------------------------
 # Jaeger — /search deep link must carry the service param
 # -------------------------------------------------------------------------

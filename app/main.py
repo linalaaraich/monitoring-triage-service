@@ -2325,14 +2325,25 @@ def _grafana_deep_link_for_alert(alert_name: str, service: str) -> str:
 
 
 def _loki_deep_link_for_alert(service: str) -> str:
-    """Open Loki Explore prefiltered to {service_name="<service>"} for ~1h."""
+    """Open Grafana Explore (Loki datasource) prefiltered to {service_name="<service>"} for ~1h.
+
+    Loki itself has no web UI - /explore is a Grafana page that picks
+    the Loki datasource. So this URL is built off settings.grafana_url,
+    not settings.loki_url. The settings.loki_url field is kept for
+    contexts that talk to the Loki HTTP API directly (Drain3 background
+    ingestion uses loki_api_url, which is the same target host but a
+    separate field; loki_url is a UI fallback only when there is no
+    Grafana to point at).
+    """
     import urllib.parse as _u
     import json as _j
-    base = (settings.loki_url or "").rstrip("/")
-    if not base:
-        return "#"
+    grafana_base = (settings.grafana_url or "").rstrip("/")
+    if not grafana_base:
+        # No Grafana to deep-link into - fall back to the bare Loki host
+        # so the operator at least sees the upstream is reachable.
+        return (settings.loki_url or "").rstrip("/") or "#"
     if not service or service == "—":
-        return base
+        return f"{grafana_base}/explore?orgId=1&left=%7B%22datasource%22%3A%22loki%22%7D"
     expr = f'{{service_name="{service}"}}'
     left = {
         "datasource": "loki",
@@ -2340,7 +2351,7 @@ def _loki_deep_link_for_alert(service: str) -> str:
         "range": {"from": "now-1h", "to": "now"},
     }
     qs = _u.urlencode({"orgId": "1", "left": _j.dumps(left, separators=(",", ":"))})
-    return f"{base}/explore?{qs}"
+    return f"{grafana_base}/explore?{qs}"
 
 
 def _jaeger_deep_link_for_alert(service: str) -> str:
