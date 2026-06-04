@@ -241,9 +241,7 @@ function ExpandedDetail({ a }) {
                 <span className="cmd-prefix">$</span>
                 {a.actions[0].cmd}
               </span>
-              <button className="btn sm ghost" style={{ color: "var(--muted)" }}>
-                <Icon.copy2/> Copy
-              </button>
+              <CopyBtn text={a.actions[0].cmd} className="btn sm ghost"/>
             </div>
           ) : (
             <div style={{ fontSize: 13, color: "var(--muted)" }}>No safe action — see detail page.</div>

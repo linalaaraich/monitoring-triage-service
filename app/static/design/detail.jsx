@@ -1,4 +1,4 @@
-/* global React, EnvPill, VerdictPill, SeverityPill, NsPill, CompPill, ServiceIcon, StateIcon, Icon, TopBar */
+/* global React, EnvPill, VerdictPill, SeverityPill, NsPill, CompPill, ServiceIcon, StateIcon, Icon, TopBar, CopyBtn */
 // CIRES — Alert detail page
 
 const { useState: useDetailState } = React;
@@ -98,7 +98,7 @@ function ActionSection({ a }) {
                 <span className="cmd-prefix">$</span>
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{act.cmd}</span>
               </span>
-              <button className="btn sm"><Icon.copy2/> Copy</button>
+              <CopyBtn text={act.cmd} className="btn sm"/>
               <button className="btn sm primary">Run in shell</button>
             </div>
             {act.why && <div style={{ fontSize: 13, color: "var(--text-soft)", lineHeight: 1.5 }}>
@@ -159,7 +159,17 @@ function Drain3Section({ a }) {
   const d = a.drain3;
   if (!d) return null;
 
-  const fmt = (n) => n >= 1_000_000 ? (n/1_000_000).toFixed(1)+"M" : n >= 1000 ? (n/1000).toFixed(1)+"k" : String(n);
+  const fmt = (n) => (n == null || isNaN(n)) ? "—" : n >= 1_000_000 ? (n/1_000_000).toFixed(1)+"M" : n >= 1000 ? (n/1000).toFixed(1)+"k" : String(n);
+  // The live server payload is sparser than the design mock: matchedTemplate
+  // can be "" (no specific template captured) and relatedTemplates []; the
+  // lines field is `linesIngested`, not `linesIngested24h`. Guard every access
+  // so the section degrades gracefully instead of throwing (which blanked the
+  // whole detail page — 2026-06-04). matchedTemplate is only a rich object when
+  // a template was actually matched.
+  const mt = (d.matchedTemplate && typeof d.matchedTemplate === "object") ? d.matchedTemplate : null;
+  const related = Array.isArray(d.relatedTemplates) ? d.relatedTemplates : [];
+  const linesIngested = d.linesIngested24h != null ? d.linesIngested24h : d.linesIngested;
+  const anomalyRate = typeof d.anomalyRate === "number" ? d.anomalyRate : 0;
 
   return (
     <section style={{ marginBottom: 24 }}>
@@ -177,23 +187,24 @@ function Drain3Section({ a }) {
       {/* Stat strip */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 12 }}>
         <D3Stat label="Templates learned" value={fmt(d.learnedTotal)} accent="var(--accent-purple)"/>
-        <D3Stat label="Lines ingested 24h" value={fmt(d.linesIngested24h)} accent="var(--accent-cyan)"/>
-        <D3Stat label="Anomaly rate" value={(d.anomalyRate*100).toFixed(2)+"%"}
-          accent={d.anomalyRate > 0.05 ? "var(--accent-orange)" : "var(--accent-green)"}/>
-        <D3Stat label="Matched template" value={d.matchedTemplate.id} mono accent="var(--accent-yellow)"/>
+        <D3Stat label="Lines ingested 24h" value={fmt(linesIngested)} accent="var(--accent-cyan)"/>
+        <D3Stat label="Anomaly rate" value={(anomalyRate*100).toFixed(2)+"%"}
+          accent={anomalyRate > 0.05 ? "var(--accent-orange)" : "var(--accent-green)"}/>
+        <D3Stat label="Matched template" value={mt ? mt.id : "—"} mono accent="var(--accent-yellow)"/>
       </div>
 
-      {/* Matched template card */}
+      {/* Matched template card — only when a rich template object was captured */}
+      {mt && mt.pattern ? (
       <div className="card" style={{ padding: 16, marginBottom: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-          <span className="pill pill-yellow" style={{ fontFamily: "var(--font-mono)" }}>{d.matchedTemplate.id}</span>
+          <span className="pill pill-yellow" style={{ fontFamily: "var(--font-mono)" }}>{mt.id}</span>
           <span className="pill pill-red">anomaly</span>
           <span style={{ fontSize: 12, color: "var(--muted)" }}>
-            {d.matchedTemplate.nowPerHour}/h now · baseline {d.matchedTemplate.usuallyPerHour}/h · <span style={{ color: "var(--accent-orange)" }}>{d.matchedTemplate.deltaX}× above</span>
+            {mt.nowPerHour}/h now · baseline {mt.usuallyPerHour}/h · <span style={{ color: "var(--accent-orange)" }}>{mt.deltaX}× above</span>
           </span>
           <div style={{ flex: 1 }}></div>
           <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
-            First seen <span className="mono" style={{ color: "var(--text-soft)" }}>{d.matchedTemplate.firstSeen}</span>
+            First seen <span className="mono" style={{ color: "var(--text-soft)" }}>{mt.firstSeen}</span>
           </span>
         </div>
 
@@ -204,25 +215,32 @@ function Drain3Section({ a }) {
           color: "var(--text)", overflowX: "auto",
         }}>
           <span style={{ color: "var(--muted)" }}>pattern  </span>
-          <TemplateText text={d.matchedTemplate.pattern}/>
-          <div style={{ marginTop: 6 }}>
+          <TemplateText text={mt.pattern}/>
+          {mt.sample && <div style={{ marginTop: 6 }}>
             <span style={{ color: "var(--muted)" }}>sample   </span>
-            <span style={{ color: "var(--accent-cyan)" }}>{d.matchedTemplate.sample}</span>
-          </div>
+            <span style={{ color: "var(--accent-cyan)" }}>{mt.sample}</span>
+          </div>}
         </div>
 
         {/* Sparkline */}
         <D3Sparkline data={[2,3,4,5,8,12,28,52,98,180,260,312]}/>
       </div>
+      ) : (
+      <div className="card" style={{ padding: 16, marginBottom: 12, fontSize: 13, color: "var(--muted)" }}>
+        No single log template was pinned to this anomaly — drain3 flagged a
+        distributional shift across templates rather than one novel line.
+      </div>
+      )}
 
       {/* Related templates */}
+      {related.length > 0 && (
       <div className="card" style={{ padding: 14 }}>
         <div style={{
           fontSize: 11, color: "var(--muted)", textTransform: "uppercase",
           letterSpacing: 0.1, fontWeight: 600, marginBottom: 10,
         }}>Related templates in this window</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {d.relatedTemplates.map((t) => (
+          {related.map((t) => (
             <div key={t.id} style={{
               display: "flex", alignItems: "center", gap: 12,
               padding: "7px 10px", borderRadius: 8,
@@ -244,6 +262,7 @@ function Drain3Section({ a }) {
           ))}
         </div>
       </div>
+      )}
     </section>
   );
 }

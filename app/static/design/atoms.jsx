@@ -333,9 +333,51 @@ function Stat({ label, value, accent }) {
 }
 
 // Make available globally to other Babel scripts
+// ────────────────────────────────────────────────────────────
+// Clipboard copy. The dashboard is served over plain HTTP on the tailnet,
+// where navigator.clipboard is undefined (Clipboard API is secure-context
+// only). Fall back to a hidden textarea + execCommand so copy works there.
+// (2026-06-04 — the copy buttons were dead: no handler AND no fallback.)
+function ciresCopy(text) {
+  const s = String(text == null ? "" : text);
+  try {
+    if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(s);
+      return true;
+    }
+  } catch (e) { /* fall through to legacy path */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = s;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) { return false; }
+}
+
+// Shared copy button with transient "Copied" feedback. Used by the detail
+// page suggested-actions and the dashboard expanded-row action.
+function CopyBtn({ text, className = "btn sm", label = "Copy" }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button type="button" className={className}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (ciresCopy(text)) { setDone(true); setTimeout(() => setDone(false), 1400); }
+      }}>
+      <Icon.copy2/> {done ? "Copied" : label}
+    </button>
+  );
+}
+
 Object.assign(window, {
   EnvPill, VerdictPill, SeverityPill, NsPill, CompPill,
   ServiceIcon, StateIcon, Icon, TopBar, Stat,
   ENV_STYLES, VERDICT_STYLES, SEVERITY_STYLES, VERDICT_DOT,
   useTheme, ThemeToggle, useSidebarCollapsed,
+  ciresCopy, CopyBtn,
 });
