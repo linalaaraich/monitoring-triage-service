@@ -84,11 +84,11 @@ services:
       # --- Direct Loki for Drain3 background ingestion (bulk path, not a tool call) ---
       # Tailscale MagicDNS resolves on the docker host; bridge containers inherit
       # the host resolver, so this works without extra_hosts hacks.
-      LOKI_API_URL: "http://observability-rca-monitoring:3100"
+      LOKI_API_URL: "http://observability-rca-newacct-monitoring:3100"
 
       # --- Email links + dashboard ---
-      GRAFANA_DASHBOARD_URL: "http://observability-rca-monitoring:3000"
-      GRAFANA_URL: "http://observability-rca-monitoring:3000"
+      GRAFANA_DASHBOARD_URL: "http://observability-rca-newacct-monitoring:3000"
+      GRAFANA_URL: "http://observability-rca-newacct-monitoring:3000"
       GRAFANA_API_USER: admin
       GRAFANA_API_PASSWORD: admin
 
@@ -142,7 +142,7 @@ services:
     hostname: prometheus-mcp
     networks: [ai-stack]
     environment:
-      PROMETHEUS_URL: "http://observability-rca-monitoring:9090"
+      PROMETHEUS_URL: "http://observability-rca-newacct-monitoring:9090"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8091/health"]
@@ -160,7 +160,7 @@ services:
     hostname: loki-mcp
     networks: [ai-stack]
     environment:
-      LOKI_URL: "http://observability-rca-monitoring:3100"
+      LOKI_URL: "http://observability-rca-newacct-monitoring:3100"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8092/health"]
@@ -178,7 +178,7 @@ services:
     hostname: jaeger-mcp
     networks: [ai-stack]
     environment:
-      JAEGER_URL: "http://observability-rca-monitoring:16686"
+      JAEGER_URL: "http://observability-rca-newacct-monitoring:16686"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8093/health"]
