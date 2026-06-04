@@ -1592,6 +1592,35 @@ class RCAStore:
             "false_positive": false_positive,
         }
 
+    async def get_recurrence_gate_fires(self, hours: int = 24, limit: int = 20) -> dict:
+        """S5-INC-04 — recurrence-gate fires persisted on rca_history.
+
+        Pre-LLM recurrence gate rows carry triage_decision
+        ='recurrence_gated_pre_llm' (see recurrence_gate.GateResult / pipeline).
+        These ARE persisted, so unlike the other detective signals this one
+        has a real historical view. Returns a total count plus a per-alert
+        breakdown over the last `hours`.
+
+        Returns {"total": int, "by_alert": [{"alert_name", "count"}, ...]}.
+        """
+        since = (_utc_now() - timedelta(hours=hours)).isoformat()
+        cur = await self._db.execute(
+            """SELECT COALESCE(NULLIF(TRIM(alert_name), ''), '(unknown)') AS alert_name,
+                      COUNT(*) AS count
+               FROM rca_history
+               WHERE triage_decision = 'recurrence_gated_pre_llm'
+                 AND timestamp > ?
+               GROUP BY alert_name
+               ORDER BY count DESC
+               LIMIT ?""",
+            (since, limit),
+        )
+        rows = await cur.fetchall()
+        by_alert = [
+            {"alert_name": r["alert_name"], "count": int(r["count"])} for r in rows
+        ]
+        return {"total": sum(b["count"] for b in by_alert), "by_alert": by_alert}
+
     # ------------------------------------------------------------------
     # US-5.8 recurrence gate support
     # ------------------------------------------------------------------

@@ -151,10 +151,24 @@ async def test_dashboard_partial_honors_filters(overhaul_client):
 # 2. Sprint 5 placeholder routes
 # ---------------------------------------------------------------------------
 
+# Every Sprint-5 sidebar item lands on a real page (not a 404). Three of
+# them (incidents/anomalies/stats) became real pages in Sprint 5 EPIC14;
+# the remaining two are still placeholders carrying the "coming Sprint 5" copy.
 SPRINT5_ROUTES = [
     "/dashboard/incidents",
     "/dashboard/anomalies",
     "/dashboard/stats",
+    "/dashboard/drain3",
+    "/dashboard/integrations",
+]
+# EPIC14 shipped these as real pages — they no longer carry placeholder copy.
+SPRINT5_BUILT_ROUTES = [
+    "/dashboard/incidents",
+    "/dashboard/anomalies",
+    "/dashboard/stats",
+]
+# Out-of-EPIC14 scope — still placeholders.
+SPRINT5_PLACEHOLDER_ROUTES = [
     "/dashboard/drain3",
     "/dashboard/integrations",
 ]
@@ -170,20 +184,28 @@ async def test_sprint5_placeholder_returns_200(overhaul_client, route):
 
 @pytest.mark.parametrize("route", SPRINT5_ROUTES)
 @pytest.mark.asyncio
-async def test_sprint5_placeholder_has_cta_back_to_dashboard(overhaul_client, route):
-    """Every placeholder must link back to /dashboard so the operator can
-    return to a working surface without using the browser back button."""
+async def test_sprint5_route_links_back_to_dashboard(overhaul_client, route):
+    """Every Sprint-5 route (real page or placeholder) must link back to
+    /dashboard so the operator can return to a working surface without using
+    the browser back button."""
     r = await overhaul_client.get(route)
-    body = r.text
-    assert 'href="/dashboard"' in body, f"{route} missing back-to-feed CTA"
-    assert "Sprint 5" in body, f"{route} missing 'Sprint 5' messaging"
+    assert 'href="/dashboard"' in r.text, f"{route} missing back-to-feed CTA"
 
 
+@pytest.mark.parametrize("route", SPRINT5_PLACEHOLDER_ROUTES)
 @pytest.mark.asyncio
-async def test_sprint5_placeholder_uses_design_tokens(overhaul_client):
-    """The placeholder must load tokens.css so the look matches the rest
+async def test_sprint5_placeholder_carries_sprint5_copy(overhaul_client, route):
+    """Out-of-scope routes are still placeholders carrying 'Sprint 5' copy."""
+    r = await overhaul_client.get(route)
+    assert "Sprint 5" in r.text, f"{route} missing 'Sprint 5' messaging"
+
+
+@pytest.mark.parametrize("route", SPRINT5_ROUTES)
+@pytest.mark.asyncio
+async def test_sprint5_route_uses_design_tokens(overhaul_client, route):
+    """Every Sprint-5 route must load tokens.css so the look matches the rest
     of the dashboard rather than rendering as a bare unstyled page."""
-    r = await overhaul_client.get("/dashboard/incidents")
+    r = await overhaul_client.get(route)
     assert "/static/design/tokens.css" in r.text
 
 

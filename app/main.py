@@ -5249,9 +5249,248 @@ async def dashboard_sprint5_incidents():
 </html>""")
 
 
+# ──────────────────────────────────────────────────────────────────────
+# /dashboard/anomalies — S5-INC-04 — detective-signal aggregation
+# ──────────────────────────────────────────────────────────────────────
+# Surfaces the four detective signals that already exist in the pipeline.
+# Aggregate, do NOT recompute:
+#   (a) Drain3 novel templates  — live, from DrainAnalyzer.get_stats()
+#       (in-memory miner state; not persisted for a historical view).
+#   (b) Entity-baseline σ-claims — computed on-demand from Prometheus via the
+#       MCP bridge inside the pipeline (app/entity_baselines.py). NOT persisted
+#       and not queryable here without a Prometheus read, which would violate
+#       the MCP-only-read invariant for these pages → honest "not persisted".
+#   (c) Recurrence-gate fires    — PERSISTED on rca_history
+#       (triage_decision='recurrence_gated_pre_llm'); real historical view.
+#   (d) Adaptive-threshold widened-but-not-fired ratio — no persisted store
+#       (only referenced in the LLM prompt text; no widen/fire counters are
+#       written anywhere) → honest "not persisted".
+# Read-only. Drain3 stats are in-process miner state (not an external read);
+# recurrence fires come via RCAStore. MCP-invariant clean.
 @app.get("/dashboard/anomalies", response_class=HTMLResponse)
 async def dashboard_sprint5_anomalies():
-    return _render_sprint5_placeholder("anomalies")
+    """Detective-signal surface — aggregates the four existing signals."""
+    import asyncio as _asyncio
+    from datetime import datetime, timezone, timedelta
+
+    def _esc(s) -> str:
+        return _html.escape(str(s)) if s is not None else ""
+
+    # (a) Drain3 novel templates — live miner state.
+    drain_stats = {}
+    if _drain is not None:
+        try:
+            drain_stats = await _asyncio.to_thread(_drain.get_stats)
+        except Exception as exc:
+            logger.warning("drain3 stats for anomalies page failed (non-fatal): %s", exc)
+            drain_stats = {}
+    novel_templates = (drain_stats.get("top_new_patterns") or [])[:10]
+    anomaly_rate = drain_stats.get("recent_anomaly_rate", 0)
+    total_clusters = drain_stats.get("total_clusters", 0)
+
+    if novel_templates:
+        novel_html = "".join(
+            f"<li class='anom-tmpl'>{_esc(t)}</li>" for t in novel_templates
+        )
+        novel_html = f"<ul class='anom-list'>{novel_html}</ul>"
+    else:
+        novel_html = "<div class='anom-empty'>No novel templates in the current miner window.</div>"
+
+    # (c) Recurrence-gate fires — persisted, real historical view.
+    rec = {"total": 0, "by_alert": []}
+    if _store is not None:
+        try:
+            rec = await _store.get_recurrence_gate_fires(hours=24, limit=20)
+        except Exception as exc:
+            logger.warning("recurrence-gate query for anomalies page failed (non-fatal): %s", exc)
+            rec = {"total": 0, "by_alert": []}
+    if rec["by_alert"]:
+        rec_rows = "".join(
+            f"<tr><td class='anom-fam'>{_esc(b['alert_name'])}</td><td class='anom-num'>{int(b['count'])}</td></tr>"
+            for b in rec["by_alert"]
+        )
+        rec_html = f"""
+      <table class="anom-table">
+        <thead><tr><th>Alert family</th><th>Gated fires (24h)</th></tr></thead>
+        <tbody>{rec_rows}</tbody>
+      </table>"""
+    else:
+        rec_html = "<div class='anom-empty'>No pre-LLM recurrence-gate fires in the last 24 h.</div>"
+
+    now_tng = datetime.now(timezone.utc).astimezone(
+        timezone(timedelta(hours=1))
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    sidebar_html = """
+  <aside class="kpi-sidebar">
+    <div class="kpi-sidebar__brand">
+      <div class="kpi-sidebar__brand-mark"></div>
+      <div>
+        <div class="kpi-sidebar__brand-title">Observability</div>
+        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
+      </div>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Incident response</div>
+      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
+      <a class="kpi-sidebar__item" href="/dashboard/incidents">Incidents</a>
+      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/anomalies">Anomalies</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Insights</div>
+      <a class="kpi-sidebar__item" href="/dashboard/stats">Stats</a>
+      <a class="kpi-sidebar__item" href="/dashboard/services">Services</a>
+      <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Configuration</div>
+      <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
+      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
+    </div>
+  </aside>"""
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta http-equiv="refresh" content="60"/>
+<title>Observability &middot; Anomalies</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/design/tokens.css"/>
+{_CIRES_THEME_HEAD_SCRIPT}
+<style>
+  body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); min-height: 100vh; }}
+  .kpi-shell {{ display: flex; min-height: 100vh; }}
+  .kpi-sidebar {{ width: 224px; flex-shrink: 0; background: var(--bg-soft, #13151e); border-right: 1px solid var(--border, #2a2d3a); padding: 0 0 14px; display: flex; flex-direction: column; }}
+  .kpi-sidebar__brand {{ display: flex; align-items: center; gap: 10px; padding: 14px 14px 14px 16px; border-bottom: 1px solid var(--border); height: 60px; }}
+  .kpi-sidebar__brand-mark {{ width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, #4ea8de, #b07ee8); flex-shrink: 0; }}
+  .kpi-sidebar__brand-title {{ font-size: 13.5px; font-weight: 600; color: var(--text); }}
+  .kpi-sidebar__brand-sub {{ font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }}
+  .kpi-sidebar__group {{ padding: 12px; margin-bottom: 6px; }}
+  .kpi-sidebar__group-label {{ font-size: 10px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.12em; padding: 0 12px 6px; font-weight: 600; }}
+  .kpi-sidebar__item {{ display: block; padding: 8px 12px; border-radius: 8px; text-decoration: none; color: var(--text-soft); font-size: 13px; transition: background .12s; }}
+  .kpi-sidebar__item:hover {{ background: var(--card-hi); color: var(--text); }}
+  .kpi-sidebar__item--active {{ background: var(--card-hi); color: var(--text); border: 1px solid var(--border-hi); font-weight: 500; box-shadow: inset 2.5px 0 0 var(--accent-blue); }}
+  .kpi-banner {{ background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02)); border-bottom: 1px solid rgba(176,126,232,.35); padding: 8px 22px; font-size: 12.5px; color: var(--text-soft); display: flex; align-items: center; gap: 14px; }}
+  .kpi-banner strong {{ color: var(--accent-purple); }}
+  .kpi-banner a {{ color: var(--accent-cyan); text-decoration: none; }}
+  .kpi-banner a:hover {{ text-decoration: underline; }}
+  .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
+  .kpi-header {{ padding: 18px 22px 8px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; justify-content: space-between; }}
+  .kpi-header__title {{ font-size: 18px; font-weight: 600; color: var(--text); }}
+  .kpi-header__sub {{ font-size: 12.5px; color: var(--muted); margin-top: 4px; }}
+  .kpi-header__time {{ font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); letter-spacing: 0.02em; }}
+
+  .anom-sections {{ padding: 18px 22px 22px; display: flex; flex-direction: column; gap: 16px; }}
+  .anom-card {{ background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px 18px; border-left: 3px solid var(--accent-cyan); }}
+  .anom-card--soft {{ border-left-color: var(--border-hi); }}
+  .anom-card__head {{ display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }}
+  .anom-card__title {{ font-size: 14px; font-weight: 600; color: var(--text); }}
+  .anom-card__src {{ font-size: 11px; color: var(--muted-2); font-family: var(--font-mono); }}
+  .anom-card__q {{ font-size: 11.5px; color: var(--muted); margin-bottom: 12px; }}
+  .anom-stat-row {{ display: flex; gap: 18px; margin-bottom: 12px; }}
+  .anom-stat {{ display: flex; flex-direction: column; gap: 2px; }}
+  .anom-stat__n {{ font-family: var(--font-mono); font-size: 20px; font-weight: 600; color: var(--text); }}
+  .anom-stat__l {{ font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }}
+  .anom-list {{ margin: 0; padding: 0; list-style: none; }}
+  .anom-tmpl {{ font-family: var(--font-mono); font-size: 12px; color: var(--text-soft); padding: 5px 8px; background: var(--bg-soft); border-radius: 6px; margin-bottom: 5px; word-break: break-word; }}
+  .anom-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  .anom-table thead th {{ text-align: left; padding: 7px 10px; background: var(--bg-soft); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }}
+  .anom-table tbody td {{ padding: 7px 10px; border-bottom: 1px solid var(--border); color: var(--text-soft); }}
+  .anom-table tbody tr:last-child td {{ border-bottom: none; }}
+  .anom-fam {{ color: var(--text); font-weight: 500; }}
+  .anom-num {{ font-family: var(--font-mono); color: var(--accent-yellow); font-weight: 600; }}
+  .anom-empty {{ font-size: 12.5px; color: var(--muted-2); padding: 6px 0; }}
+  .anom-note {{ font-size: 12.5px; color: var(--muted); line-height: 1.5; background: var(--bg-soft); border: 1px dashed var(--border); border-radius: 8px; padding: 12px 14px; }}
+  .anom-note strong {{ color: var(--text-soft); }}
+  .anom-note code {{ font-family: var(--font-mono); background: var(--card); padding: 1px 5px; border-radius: 4px; font-size: 11px; }}
+  .kpi-foot {{ padding: 12px 22px 22px; font-size: 11.5px; color: var(--muted-2); border-top: 1px solid var(--border); }}
+  .kpi-foot strong {{ color: var(--muted); }}
+</style>
+</head>
+<body>
+
+<div class="kpi-banner">
+  <strong>Anomalies</strong>
+  <span>Detective-signal surface &mdash; aggregates the four pipeline signals. Honest about what isn't persisted yet.</span>
+  <span style="flex: 1"></span>
+  <a href="/dashboard">&larr; back to triage feed</a>
+  <a href="/dashboard/kpi">KPI overview</a>
+</div>
+
+<div class="kpi-shell">
+  {sidebar_html}
+  <main class="kpi-main">
+    <div class="kpi-header">
+      <div>
+        <div class="kpi-header__title">Anomalies &middot; detective signals</div>
+        <div class="kpi-header__sub">Four pipeline signals, aggregated not recomputed &middot; auto-refreshing every 60 s &middot; Casablanca timezone.</div>
+      </div>
+      <div class="kpi-header__time">
+        <span class="live-dot"></span>{_esc(now_tng)} GMT+1
+      </div>
+    </div>
+
+    <div class="anom-sections">
+
+      <div class="anom-card">
+        <div class="anom-card__head">
+          <span class="anom-card__title">(a) Drain3 novel templates</span>
+          <span class="anom-card__src">DrainAnalyzer.get_stats()</span>
+        </div>
+        <div class="anom-card__q">Newest low-frequency log templates the miner is tracking right now.</div>
+        <div class="anom-stat-row">
+          <div class="anom-stat"><span class="anom-stat__n">{_esc(total_clusters)}</span><span class="anom-stat__l">total clusters</span></div>
+          <div class="anom-stat"><span class="anom-stat__n">{_esc(anomaly_rate)}</span><span class="anom-stat__l">recent anomaly rate</span></div>
+        </div>
+        {novel_html}
+        <div class="anom-note" style="margin-top:12px"><strong>Live signal, not persisted:</strong> these come from the in-memory Drain3 miner state. They reflect the current window only; there is no historical store of novel-template counts over time yet.</div>
+      </div>
+
+      <div class="anom-card">
+        <div class="anom-card__head">
+          <span class="anom-card__title">(c) Recurrence-gate fires</span>
+          <span class="anom-card__src">rca_history.triage_decision</span>
+        </div>
+        <div class="anom-card__q">Pre-LLM recurrence-gate fires in the last 24 h (<code>recurrence_gated_pre_llm</code>). The one detective signal with a real historical view.</div>
+        <div class="anom-stat-row">
+          <div class="anom-stat"><span class="anom-stat__n">{int(rec["total"])}</span><span class="anom-stat__l">gated fires (24h)</span></div>
+        </div>
+        {rec_html}
+      </div>
+
+      <div class="anom-card anom-card--soft">
+        <div class="anom-card__head">
+          <span class="anom-card__title">(b) Entity-baseline &sigma;-claims</span>
+          <span class="anom-card__src">entity_baselines.py</span>
+        </div>
+        <div class="anom-card__q">How many &sigma; a metric sits above its 7-day per-service baseline.</div>
+        <div class="anom-note"><strong>Signal present in pipeline; not yet persisted for historical view.</strong> Baselines are computed on-demand from Prometheus through the MCP bridge at fire time and rendered into the LLM prompt &mdash; they are never written to <code>rca_history</code>. Surfacing a live value here would require a direct Prometheus read, which would violate the MCP-only-read invariant for these read-aggregation pages. Persisting the &sigma;-claim per decision is a future schema add.</div>
+      </div>
+
+      <div class="anom-card anom-card--soft">
+        <div class="anom-card__head">
+          <span class="anom-card__title">(d) Adaptive-threshold widened-but-not-fired ratio</span>
+          <span class="anom-card__src">(no persisted store)</span>
+        </div>
+        <div class="anom-card__q">Fraction of adaptive-threshold evaluations that widened but did not fire.</div>
+        <div class="anom-note"><strong>Signal present in pipeline; not yet persisted for historical view.</strong> Adaptive-threshold behaviour is only referenced in the LLM reasoning prompt &mdash; there are no widen/fire counters written to any store, so the widened-but-not-fired ratio is not computable here without fabricating numbers. This section is intentionally honest rather than showing a made-up value.</div>
+      </div>
+
+    </div>
+
+    <div class="kpi-foot">
+      <strong>What you are looking at:</strong> the four detective signals the platform already produces. (a) Drain3 and (c) recurrence-gate are surfaced from real data; (b) entity-baseline and (d) adaptive-threshold are flagged honestly as not-yet-persisted rather than fabricated.
+    </div>
+  </main>
+</div>
+
+</body>
+</html>""")
 
 
 # ──────────────────────────────────────────────────────────────────────
