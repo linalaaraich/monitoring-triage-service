@@ -3439,6 +3439,7 @@ async def dashboard_v2_kpi():
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/design/tokens.css"/>
+{_CIRES_THEME_HEAD_SCRIPT}
 <style>
   body {{
     margin: 0;
@@ -3769,6 +3770,7 @@ async def dashboard_v2_services():
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/design/tokens.css"/>
+{_CIRES_THEME_HEAD_SCRIPT}
 <style>
   body {{
     margin: 0;
@@ -4178,6 +4180,7 @@ async def dashboard_v2_alerts():
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/design/tokens.css"/>
+{_CIRES_THEME_HEAD_SCRIPT}
 <style>
   body {{
     margin: 0;
@@ -4929,6 +4932,7 @@ def _render_sprint5_placeholder(slug: str) -> HTMLResponse:
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/design/tokens.css"/>
+{_CIRES_THEME_HEAD_SCRIPT}
 <style>
   body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); }}
   .sprint5-wrap {{
