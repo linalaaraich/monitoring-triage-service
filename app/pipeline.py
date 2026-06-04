@@ -411,6 +411,17 @@ class TriagePipeline:
         # really IS cheap. Composes with DA-5 via the family-scope lookup
         # and reuses DA-3's prior-decision-lookup pattern (canonical
         # rca_store reads — MCP-only invariant holds).
+        #
+        # DEPRECATED 2026-06-04 (audit issue #4, Lina-approved). This whole
+        # block is now DISABLED BY DEFAULT (sf5_transient_spike_enabled=False
+        # in config.py — see the rationale comment there). It is structurally
+        # unreachable in production: SF-5's "prior fire within 120s" window is
+        # a STRICT SUBSET of the 300s dedup window that runs FIRST above, so
+        # dedup always short-circuits before SF-5 can fire. Zero `spike_shelved`
+        # rows have ever been written. The recurrence-gate + dedup are the
+        # canonical noise absorbers. Kept (not deleted) as a safe deprecation:
+        # the flag gate below neutralises the path while preserving the code +
+        # unit tests for any future redesign that makes a spike gate reachable.
         if settings.sf5_transient_spike_enabled:
             from app.transient_spike import classify_family, is_transient_spike
             from app.metrics import transient_spikes_shelved_total

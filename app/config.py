@@ -79,7 +79,20 @@ class Settings(BaseSettings):
     # so the MCP-only invariant holds. False-negative bias is intentional —
     # a real sustained breach that accidentally gets shelved just re-fires
     # in 5 min, but a false-positive shelving would hide a real incident.
-    sf5_transient_spike_enabled: bool = True
+    # DEPRECATED 2026-06-04 (audit issue #4, Lina-approved). Default flipped
+    # True → False because SF-5 is STRUCTURALLY UNREACHABLE in production:
+    # SF-5's precondition is "a prior fire 0–120s ago" (window below), but
+    # that is a STRICT SUBSET of the 300s dedup window (dedup_window_seconds,
+    # which runs FIRST in the pipeline and short-circuits). Any prior fire
+    # within 120s is also within 300s → caught by dedup → SF-5 never sees it.
+    # Confirmed empirically: ZERO `spike_shelved` rows have EVER been written
+    # despite SF-5 being enabled since deploy. The canonical noise absorber is
+    # the recurrence-gate (US-5.8) + dedup; SF-5 added no coverage. Disabled
+    # rather than ripped out (safe deprecation) — the path is gated behind
+    # this flag, so the default flip neutralises it while keeping the code +
+    # unit tests available should a future redesign (e.g. SF-5 window > dedup
+    # window, or real duration data) make a "spike" gate reachable.
+    sf5_transient_spike_enabled: bool = False
     sf5_transient_spike_window_seconds: int = 120
     # Families that opt into transient-spike classification. Restricted to
     # archetypes where "duration above threshold" is a meaningful signal

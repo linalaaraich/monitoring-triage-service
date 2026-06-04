@@ -1,5 +1,20 @@
 """SF-5 — sustained-vs-spike verdict modifier.
 
+DEPRECATED 2026-06-04 (audit issue #4, Lina-approved)
+-----------------------------------------------------
+This gate is DISABLED BY DEFAULT (config.sf5_transient_spike_enabled=False)
+and is structurally unreachable in production. SF-5's precondition — a prior
+fire 0–120s ago (sf5_transient_spike_window_seconds) — is a STRICT SUBSET of
+the 300s dedup window (config.dedup_window_seconds) that runs FIRST in the
+pipeline. Any prior fire within 120s is therefore also within 300s, gets
+caught by dedup, and SF-5 never sees it. Confirmed empirically: ZERO
+`spike_shelved` rows have ever been written despite SF-5 being enabled since
+deploy. The canonical noise absorber is the recurrence-gate (US-5.8) + dedup,
+not SF-5. The code below is retained (safe deprecation, not a rip-out) so the
+unit tests stay green and a future redesign — e.g. an SF-5 window LARGER than
+the dedup window, or real "duration above threshold" data from Grafana — can
+revive a genuinely-reachable spike gate.
+
 Sprint 4 §14 W2 Fri stretch item. Direct response to the "too many useless
 emails" feedback (2026-05-31): short transient breaches that resolve within
 ~2 min are almost always noise (a 60 s CPU steal blip, a GC pause on a

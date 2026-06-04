@@ -466,10 +466,56 @@ async def test_pipeline_target_down_never_shelved(store, monkeypatch):
     assert llm.investigate.call_count >= 1
 
 
+def test_sf5_deprecated_disabled_by_default():
+    """DEPRECATED 2026-06-04 (audit issue #4): SF-5 is structurally
+    unreachable (120s window ⊂ 300s dedup window that runs first) and is
+    now DISABLED BY DEFAULT. This locks in the deprecation so a future
+    edit can't silently re-enable an unreachable gate.
+
+    The fresh-default value is asserted from a fresh Settings() instance
+    (not the process-global `settings`, which other tests monkeypatch).
+    """
+    from app.config import Settings
+
+    fresh = Settings()
+    assert fresh.sf5_transient_spike_enabled is False, (
+        "SF-5 transient_spike is deprecated (audit #4) and must default to "
+        "disabled — its 120s window is a strict subset of the 300s dedup "
+        "window, so it can never fire in production."
+    )
+    # The window field is retained (not removed) for the safe-deprecation
+    # path; it stays at its documented default.
+    assert fresh.sf5_transient_spike_window_seconds == 120
+
+
+@pytest.mark.asyncio
+async def test_pipeline_default_settings_never_shelves_spike(store, monkeypatch):
+    """With the SHIPPED default (sf5_transient_spike_enabled=False, NOT
+    monkeypatched True), even a fresh 30s prior in the window must NOT
+    produce a spike_shelved row — the deprecated gate stays inert and the
+    alert reaches the normal investigate path."""
+    monkeypatch.setattr(settings, "triage_suppression_enabled", False)
+    # NB: deliberately do NOT set sf5_transient_spike_enabled — exercise
+    # the real shipped default.
+
+    await _save_prior(store, seconds_ago=30, fingerprint="fp-deprecated-default")
+    pipeline, llm, notifier = _make_pipeline(store)
+    alert = _make_alert(name="HighCpuUsage", fingerprint="fp-deprecated-default-new")
+    await pipeline._process_alert(alert, source="grafana")
+
+    # LLM IS reached — SF-5 did not short-circuit.
+    assert llm.investigate.call_count >= 1
+    rows = await store.get_decisions(limit=10)
+    assert rows[0]["triage_decision"] != "spike_shelved"
+    assert rows[0]["rca_quality"] != "transient_spike"
+
+
 @pytest.mark.asyncio
 async def test_pipeline_disabled_knob_skips_shelving(store, monkeypatch):
     """Disabled-knob: even with a fresh prior in the window, SF-5 does
-    nothing → LLM called normally."""
+    nothing → LLM called normally. (Now also the shipped default — see
+    test_sf5_deprecated_disabled_by_default; this test pins the knob
+    explicitly to keep the explicit-disable contract covered.)"""
     monkeypatch.setattr(settings, "sf5_transient_spike_enabled", False)
     monkeypatch.setattr(settings, "sf5_transient_spike_window_seconds", 120)
     monkeypatch.setattr(settings, "triage_suppression_enabled", False)
