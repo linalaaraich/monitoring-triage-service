@@ -271,6 +271,80 @@ async def run_startup_backfill(
     return enqueued
 
 
+async def backfill_rca_quality(store) -> dict[str, int]:
+    """One-shot, idempotent recompute of rca_quality for ALL existing
+    rca_history rows.
+
+    WHY: the live recompute (pipeline.py Issue #3) is forward-only — it only
+    ever sets rca_quality at persist time. Rows written before that gate
+    landed (or by code paths that set a stale snapshot) still carry a
+    stale / never-computed rca_quality. Those poison the "actionable %" KPI
+    and the hedge/feedback loop. This sweep brings the whole table in line
+    with the SAME classifier the live pipeline uses.
+
+    REUSES app.rca_store._classify_rca_quality verbatim (the canonical rule —
+    no duplicated logic) over the SAME four input columns the pipeline feeds
+    it: rca_report, llm_reasoning, suggested_actions, evidence.
+
+    IDEMPOTENT + SAFE TO RE-RUN:
+      - recomputes every row, but only UPDATEs rows whose recomputed value
+        actually differs from the stored one (already-correct rows untouched)
+      - touches ONLY the rca_quality column. The excluded_from_lookup
+        quarantine flag and every other column (action_taken, triage_decision,
+        the data_starved / mcp-outage-escalated rows' other fields, ...) are
+        left exactly as they are. We re-tag quality; we do not re-quarantine,
+        re-escalate, or re-route anything.
+
+    Returns a small dict of counters for logging / assertions:
+      {"scanned": N, "changed": M, "unchanged": N-M}.
+
+    Does NOT run automatically — invoke deliberately (see module docstring on
+    schedule path; this is intentionally NOT wired into schedule_on_startup so
+    it can never fire against live without an explicit call).
+    """
+    # Local import to avoid any import cycle at module load and to make the
+    # canonical-rule reuse explicit.
+    from app.rca_store import _classify_rca_quality
+
+    db = store._db
+    cursor = await db.execute(
+        "SELECT id, rca_report, llm_reasoning, suggested_actions, evidence, "
+        "rca_quality FROM rca_history"
+    )
+    rows = await cursor.fetchall()
+
+    scanned = 0
+    changed = 0
+    to_update: list[tuple[str, str]] = []
+    for row in rows:
+        scanned += 1
+        recomputed = _classify_rca_quality(
+            row["rca_report"],
+            row["llm_reasoning"],
+            row["suggested_actions"],
+            row["evidence"],
+        )
+        if recomputed != (row["rca_quality"] or None):
+            to_update.append((recomputed, row["id"]))
+
+    for new_quality, row_id in to_update:
+        await db.execute(
+            "UPDATE rca_history SET rca_quality = ? WHERE id = ?",
+            (new_quality, row_id),
+        )
+        changed += 1
+
+    if changed:
+        await db.commit()
+
+    result = {"scanned": scanned, "changed": changed, "unchanged": scanned - changed}
+    logger.info(
+        "rca_quality backfill: scanned=%d changed=%d unchanged=%d",
+        result["scanned"], result["changed"], result["unchanged"],
+    )
+    return result
+
+
 def schedule_on_startup(app, store) -> None:
     """Register the backfill to run once, after the app finishes its other
     startup tasks. Non-blocking — if the backfill errors the service still
