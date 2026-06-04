@@ -24,7 +24,11 @@ function chipLabel(set) {
   return arr[0] + " +" + (arr.length - 1);
 }
 
-function FilterBar({ openFilter, onOpen, searchQuery, setSearchQuery, filters, toggleFilter, clearAllFilters }) {
+// Human label for the Range chip from the seeded CIRES_FILTERS.range token.
+const _RANGE_LABEL = { "1h": "last 1 h", "6h": "last 6 h", "24h": "last 24 h", "7d": "last 7 d", "15d": "last 15 d" };
+function FilterBar({ openFilter, onOpen, searchQuery, setSearchQuery, onSearchSubmit, filters, toggleFilter, clearAllFilters }) {
+  const cf = (typeof window !== "undefined" ? window.CIRES_FILTERS : null) || {};
+  const rangeLabel = _RANGE_LABEL[cf.range] || (cf.range ? String(cf.range) : "last 15 d");
   return (
     <div style={{
       background: "var(--bg)",
@@ -42,15 +46,20 @@ function FilterBar({ openFilter, onOpen, searchQuery, setSearchQuery, filters, t
         {openFilter === 'env' && <EnvDropdown selected={filters.env} onToggle={(v)=>toggleFilter('env', v)}/>}
       </div>
       <div style={{ position: "relative" }}>
-        <FilterChip label="Namespace" value={chipLabel(filters.namespace)} open={openFilter==='ns'} onClick={()=>onOpen(openFilter==='ns'?null:'ns')}/>
-        {openFilter === 'ns' && <NsDropdown selected={filters.namespace} onToggle={(v)=>toggleFilter('namespace', v)}/>}
-      </div>
-      <FilterChip label="Service" value={chipLabel(filters.service_type)}/>
-      <div style={{ position: "relative" }}>
         <FilterChip label="Verdict" value={chipLabel(filters.verdict)} open={openFilter==='verdict'} onClick={()=>onOpen(openFilter==='verdict'?null:'verdict')}/>
         {openFilter === 'verdict' && <VerdictDropdown selected={filters.verdict} onToggle={(v)=>toggleFilter('verdict', v)}/>}
       </div>
-      <FilterChip label="Range" value="last 24 h"/>
+      <div style={{ position: "relative" }}>
+        <FilterChip label="Severity" value={chipLabel(filters.severity)} open={openFilter==='severity'} onClick={()=>onOpen(openFilter==='severity'?null:'severity')}/>
+        {openFilter === 'severity' && <SeverityDropdown selected={filters.severity} onToggle={(v)=>toggleFilter('severity', v)}/>}
+      </div>
+      <div style={{ position: "relative" }}>
+        <FilterChip label="Family" value={chipLabel(filters.family)} open={openFilter==='family'} onClick={()=>onOpen(openFilter==='family'?null:'family')}/>
+        {openFilter === 'family' && <FamilyDropdown selected={filters.family} onToggle={(v)=>toggleFilter('family', v)}/>}
+      </div>
+      {/* Range reflects the active server window (CIRES_FILTERS.range); not yet
+          operator-editable in-place — change via ?range= deep-link. */}
+      <FilterChip label="Range" value={rangeLabel}/>
 
       <div style={{
         marginLeft: 6, display: "flex", alignItems: "center", gap: 8,
@@ -59,10 +68,11 @@ function FilterBar({ openFilter, onOpen, searchQuery, setSearchQuery, filters, t
       }}>
         <Icon.search style={{ color: "var(--muted)" }}/>
         <input className="input" style={{ background: "transparent", border: 0, padding: 0, flex: 1, fontSize: 13 }}
-          placeholder="Search alert, service, component, RCA text…"
+          placeholder="Search alert, service, component, RCA text… (Enter)"
           value={searchQuery}
-          onChange={e => setSearchQuery(e.target.value)}/>
-        <span className="mono" style={{ fontSize: 10.5, color: "var(--muted-2)" }}>⌘K</span>
+          onChange={e => setSearchQuery(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") onSearchSubmit(searchQuery); }}/>
+        <span className="mono" style={{ fontSize: 10.5, color: "var(--muted-2)" }}>⏎</span>
       </div>
 
       <div style={{ flex: 1 }}></div>
@@ -144,17 +154,46 @@ function NsDropdown({ selected, onToggle }) {
   </DropdownPanel>;
 }
 function VerdictDropdown({ selected, onToggle }) {
+  // Values are the lowercase server filter tokens (?verdict=…); _V2_FILTER_VERDICTS.
   const sel = selected || new Set();
   const opts = [
-    { color: "#e06070", label: "ESCALATE", count: "3" },
-    { color: "#f0a050", label: "SHELVED", count: "1" },
-    { color: "#8890a0", label: "DISMISS", count: "2" },
-    { color: "#4ea8de", label: "PENDING", count: "1" },
+    { color: "#e06070", label: "escalate" },
+    { color: "#f0a050", label: "shelve" },
+    { color: "#8890a0", label: "dismiss" },
+    { color: "#4ea8de", label: "investigate" },
   ];
   return <DropdownPanel>
     {opts.map(o => (
-      <DropdownRow key={o.label} checked={sel.has(o.label)} color={o.color} label={o.label} count={o.count}
+      <DropdownRow key={o.label} checked={sel.has(o.label)} color={o.color} label={o.label}
         onClick={onToggle ? () => onToggle(o.label) : undefined}/>
+    ))}
+  </DropdownPanel>;
+}
+function SeverityDropdown({ selected, onToggle }) {
+  // Values are the lowercase server filter tokens (?severity=…).
+  const sel = selected || new Set();
+  const opts = [
+    { color: "#e06070", label: "critical" },
+    { color: "#f0a050", label: "warning" },
+    { color: "#4ea8de", label: "info" },
+    { color: "#8890a0", label: "none" },
+  ];
+  return <DropdownPanel>
+    {opts.map(o => (
+      <DropdownRow key={o.label} checked={sel.has(o.label)} color={o.color} label={o.label}
+        onClick={onToggle ? () => onToggle(o.label) : undefined}/>
+    ))}
+  </DropdownPanel>;
+}
+function FamilyDropdown({ selected, onToggle }) {
+  // Values are the lowercase server family tokens (?family=…); _V2_FILTER_FAMILIES.
+  const sel = selected || new Set();
+  const opts = ["cpu", "memory", "latency", "disk", "network", "pod", "drain", "kong", "spring"];
+  return <DropdownPanel w={200}>
+    <div style={{ fontSize: 10.5, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.08, padding: "4px 8px 8px" }}>Alert family</div>
+    {opts.map(o => (
+      <DropdownRow key={o} checked={sel.has(o)} label={o} mono
+        onClick={onToggle ? () => onToggle(o) : undefined}/>
     ))}
   </DropdownPanel>;
 }
@@ -346,8 +385,8 @@ function Pagination(props) {
 
 // ─────────────────────────────────────────────────────────
 function DashboardChrome({ children, state, openFilter, setOpenFilter, active = "triage",
-  searchQuery = "", setSearchQuery = () => {},
-  filters = { env: new Set(), namespace: new Set(), service_type: new Set(), verdict: new Set() },
+  searchQuery = "", setSearchQuery = () => {}, onSearchSubmit = () => {},
+  filters = { env: new Set(), verdict: new Set(), severity: new Set(), family: new Set() },
   toggleFilter = () => {}, clearAllFilters = () => {} }) {
   const [theme] = window.useTheme();
   const [collapsed, setCollapsed] = window.useSidebarCollapsed();
@@ -362,7 +401,7 @@ function DashboardChrome({ children, state, openFilter, setOpenFilter, active = 
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
         <TopBar/>
         <FilterBar openFilter={openFilter} onOpen={setOpenFilter}
-          searchQuery={searchQuery} setSearchQuery={setSearchQuery}
+          searchQuery={searchQuery} setSearchQuery={setSearchQuery} onSearchSubmit={onSearchSubmit}
           filters={filters} toggleFilter={toggleFilter} clearAllFilters={clearAllFilters}/>
         <div style={{ padding: "16px 22px 0" }}>
           <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
@@ -418,14 +457,57 @@ function DashboardTable({ rows, expandedId, onToggle }) {
 }
 
 // Stateful dashboard wrapper — used inside artboards. Mode controls which state to show.
+// FE-H1 (2026-06-04) — the server (/dashboard?verdict=&severity=&family=&env=
+// &range=&q=) is the single source of truth for which rows arrive. The React
+// FilterBar SEEDS its chip state from window.CIRES_FILTERS (so a deep-link /
+// bookmark / partial-refresh stays coherent with the chips) and DRIVES the
+// server filters by round-tripping every change through the URL — same pattern
+// as Pagination's navTo. There is no second, client-only narrowing of the
+// already-server-filtered page.
+//
+// The chips that map 1:1 to a server filter param are env / verdict / severity
+// / family / range / q. (namespace + service_type have no server-side filter,
+// so they are not surfaced as live chips — keeping the UI honest.)
+function _seedFilterSet(scalar) {
+  return scalar ? new Set([String(scalar).toLowerCase()]) : new Set();
+}
+function _seedFiltersFromCIRES() {
+  const cf = (typeof window !== "undefined" ? window.CIRES_FILTERS : null) || {};
+  return {
+    env: _seedFilterSet(cf.env),
+    verdict: _seedFilterSet(cf.verdict),
+    severity: _seedFilterSet(cf.severity),
+    family: _seedFilterSet(cf.family),
+    // kept for back-compat with code that reads these keys; never URL-backed.
+    namespace: new Set(),
+    service_type: new Set(),
+  };
+}
+// Map a React chip key → its /dashboard URL query param.
+const _FILTER_PARAM = { env: "env", verdict: "verdict", severity: "severity", family: "family" };
+// Apply a {param: value|null} patch to the current URL and navigate. Clearing
+// a value (null/"") removes the param; any change resets pagination to page 1.
+function _navWithFilterPatch(patch) {
+  if (typeof window === "undefined" || !window.location) return;
+  const u = new URL(window.location.href);
+  Object.keys(patch).forEach((k) => {
+    const v = patch[k];
+    if (v === null || v === undefined || v === "") u.searchParams.delete(k);
+    else u.searchParams.set(k, String(v));
+  });
+  u.searchParams.delete("page");
+  window.location.href = u.toString();
+}
+
 function Dashboard({ mode = "default" }) {
   const [expandedId, setExpandedId] = useDashState(mode === "expanded" ? "8df8a37a" : null);
   const [openFilter, setOpenFilter] = useDashState(mode === "filters" ? "ns" : null);
   const [toast, setToast] = useDashState(null);
-  const [searchQuery, setSearchQuery] = useDashState("");
-  const [filters, setFilters] = useDashState({
-    env: new Set(), namespace: new Set(), service_type: new Set(), verdict: new Set(),
-  });
+  // Seed the search box + chips from the server-resolved filter set so the UI
+  // reflects the active URL (?q=…&verdict=… etc.), not a fresh empty state.
+  const _cf = (typeof window !== "undefined" ? window.CIRES_FILTERS : null) || {};
+  const [searchQuery, setSearchQuery] = useDashState(_cf.q || "");
+  const [filters, setFilters] = useDashState(_seedFiltersFromCIRES());
   // 2026-06-02 — alerts as state so partial-refresh swaps the rows
   // without remounting Dashboard (which would lose expandedId / filters).
   // Seeded from the server-injected window.CIRES_ALERTS, then updated by
@@ -440,16 +522,22 @@ function Dashboard({ mode = "default" }) {
     return () => window.removeEventListener("cires:refreshed", onRefresh);
   }, []);
 
+  // FE-H1: a chip toggle round-trips through the URL (server re-filters the
+  // whole dataset, not just the loaded page) instead of a client-only Set
+  // mutation. Single-select per dimension to match the server param. Clicking
+  // the already-active value clears that filter.
   function toggleFilter(key, value) {
-    setFilters(prev => {
-      const nextSet = new Set(prev[key]);
-      if (nextSet.has(value)) nextSet.delete(value); else nextSet.add(value);
-      return { ...prev, [key]: nextSet };
-    });
+    const param = _FILTER_PARAM[key];
+    if (!param) return; // non-URL-backed dimension — no-op (not surfaced)
+    const cur = filters[key] && filters[key].size ? Array.from(filters[key])[0] : null;
+    const nextVal = (cur === String(value).toLowerCase()) ? null : String(value).toLowerCase();
+    _navWithFilterPatch({ [param]: nextVal });
+  }
+  function setSearchAndNav(value) {
+    _navWithFilterPatch({ q: (value || "").trim() || null });
   }
   function clearAllFilters() {
-    setFilters({ env: new Set(), namespace: new Set(), service_type: new Set(), verdict: new Set() });
-    setSearchQuery("");
+    _navWithFilterPatch({ env: null, verdict: null, severity: null, family: null, q: null, range: null });
   }
 
   if (mode === "empty") {
@@ -531,23 +619,15 @@ function Dashboard({ mode = "default" }) {
     );
   }
 
-  const q = (searchQuery || "").trim().toLowerCase();
-  const visibleRows = (rows || []).filter(r => {
-    if (filters.env.size > 0 && !filters.env.has(r.env)) return false;
-    if (filters.namespace.size > 0 && !filters.namespace.has(r.namespace)) return false;
-    if (filters.service_type.size > 0 && !filters.service_type.has(r.serviceType)) return false;
-    if (filters.verdict.size > 0 && !filters.verdict.has(r.verdict)) return false;
-    if (q) {
-      const hay = [r.alertPlain, r.component, r.namespace, r.reason, r.id]
-        .filter(Boolean).join(" ").toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
-    return true;
-  });
+  // FE-H1: rows already arrive server-filtered (verdict/severity/family/env/
+  // range/q applied in SQL across the FULL dataset, not just this page), so we
+  // render them directly — no second client-side narrowing that would only see
+  // the loaded page.
+  const visibleRows = rows || [];
 
   return (
     <DashboardChrome openFilter={openFilter} setOpenFilter={setOpenFilter}
-      searchQuery={searchQuery} setSearchQuery={setSearchQuery}
+      searchQuery={searchQuery} setSearchQuery={setSearchQuery} onSearchSubmit={setSearchAndNav}
       filters={filters} toggleFilter={toggleFilter} clearAllFilters={clearAllFilters}>
       <DashboardTable rows={visibleRows} expandedId={expandedId} onToggle={(id) => setExpandedId(expandedId === id ? null : id)}/>
       {toast && <div className="toast">Copied {toast} to clipboard</div>}
