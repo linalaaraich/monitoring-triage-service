@@ -146,7 +146,7 @@ class Settings(BaseSettings):
     # Public URL of the triage's own /dashboard (used by the v2 escalation
     # email's "View on dashboard" button to deep-link into the alert's
     # detail page). Override per-deploy via TRIAGE_DASHBOARD_URL env.
-    triage_dashboard_url: str = "http://observability-gpu-uswest2:8090"
+    triage_dashboard_url: str = "http://observability-gpu-uswest2-newacct:8090"
 
     # Grafana read API auth, for the startup downtime backfill (see
     # app/startup_backfill.py). Empty defaults disable the backfill.
@@ -240,8 +240,8 @@ class Settings(BaseSettings):
     # resolution is a separate map below so we can combine into one display
     # string. Override via INSTANCE_HOSTS env (JSON) when the layout shifts.
     instance_hosts: dict[str, str] = {
-        "10.0.1.68": "observability-rca-monitoring",
-        "10.0.1.194": "observability-rca-k3s",
+        "10.0.1.105": "observability-rca-newacct-monitoring",
+        "10.0.1.152": "observability-rca-newacct-k3s",
         "127.0.0.1": "localhost",
     }
     instance_ports: dict[str, str] = {
