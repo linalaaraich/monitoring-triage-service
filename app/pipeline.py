@@ -129,6 +129,56 @@ class TriagePipeline:
                 webhook.service, webhook.new_templates, webhook.anomalous_lines,
             ),
         )
+
+        # Issue #1 (2026-06-04) — drain3 noise-suppression gate.
+        # A self-fire with NO new templates AND an anomaly_rate below the floor
+        # is a data-starved "cannot determine" fire (rare/under-threshold
+        # clusters, benign DEBUG jitter). Short-path it to a cheap visible row
+        # instead of paying a full ~100s LLM investigation that only re-hedges.
+        # CONSERVATIVE: any batch that introduces a brand-new template is never
+        # suppressed here — it always goes to the LLM. The stabilised
+        # fingerprint above means genuinely-recurring noise of the same shape
+        # also collapses via the normal dedup path on subsequent fires.
+        has_new_templates = any(
+            (t or "").strip() for t in (webhook.new_templates or [])
+        )
+        if (
+            settings.drain3_noise_suppress_enabled
+            and not has_new_templates
+            and webhook.anomaly_rate < settings.drain3_noise_suppress_rate_floor
+        ):
+            logger.info(
+                "Drain3 self-fire suppressed as noise (service=%s rate=%.4f, no new templates) "
+                "— persisting cheap row, no LLM",
+                webhook.service, webhook.anomaly_rate,
+            )
+            alerts_suppressed.labels(reason="drain3_noise").inc()
+            record = RCARecord(
+                alert_source="drain3",
+                alert_name=alert.alertname,
+                alert_fingerprint=alert.fingerprint,
+                affected_service=alert.service,
+                severity=alert.severity,
+                triage_decision="drain3_noise_suppressed",
+                llm_verdict=None,
+                rca_report=(
+                    f"Drain3 self-fire suppressed: no new log templates and "
+                    f"anomaly rate {webhook.anomaly_rate:.2%} below the "
+                    f"{settings.drain3_noise_suppress_rate_floor:.0%} noise floor "
+                    f"({len(webhook.anomalous_lines)} lines flagged). "
+                    f"Data-starved batch — not investigated to avoid a hedged RCA."
+                ),
+                llm_reasoning=None,
+                action_taken="suppressed",
+                investigation_duration_ms=0,
+                rca_quality="data_starved",
+            )
+            try:
+                await self.store.save_decision(record)
+            except Exception as exc:
+                logger.warning("Failed to persist drain3_noise_suppressed record: %s", exc)
+            return
+
         try:
             await self._process_alert(alert, source="drain3")
         except Exception as e:
@@ -1003,6 +1053,21 @@ class TriagePipeline:
             "rca": decision.rca or "",
             "schema": "v2",
         })
+
+        # Issue #3 (2026-06-04) — recompute rca_quality from the FINAL decision.
+        # `quality` above was a snapshot taken at first-pass (line ~694) and,
+        # on retry-success, hard-set to "actionable" (line ~820). Since then the
+        # confidence clamp (Step 6e) stripped suggested_actions and the DA-2
+        # gate may have stripped unsafe actions — both change the artifacts the
+        # classifier reads. Reclassify here, after all verdict-mutating gates
+        # and before persistence, so the stored rca_quality + the quarantine
+        # data_starved arm reflect what is actually being written (was ~24% of
+        # investigate rows persisting a stale "actionable"). Single source of
+        # truth at persist time.
+        quality = _classify_rca_quality(
+            decision.rca, decision.reason,
+            decision.suggested_actions, decision.evidence,
+        )
 
         # 2026-06-04 quarantine-on-save (Stage E follow-up). The validator
         # runs at first-pass and on retry, but if the LLM still parrots

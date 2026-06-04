@@ -130,6 +130,16 @@ class Settings(BaseSettings):
     drain3_alert_min_lines: int = 100              # minimum sample size per window
     drain3_alert_cooldown_seconds: int = 600       # 10 min between alerts
     drain3_self_webhook_url: str = "http://localhost:8090/webhook/drain3"
+    # Issue #1 (2026-06-04) — drain3 noise-suppression gate. A drain3 self-fire
+    # that carries NO new templates AND an anomaly_rate below this floor is a
+    # data-starved "cannot determine" self-fire (rare/under-threshold clusters,
+    # benign DEBUG jitter). These each used to spawn a full ~100s LLM
+    # `investigate` row that resolved to a hedge. When enabled, such a fire is
+    # short-pathed to a cheap `drain3_noise_suppressed` record with no LLM call.
+    # CONSERVATIVE: only fires with no novel templates qualify — any batch that
+    # actually introduces a new template is always investigated.
+    drain3_noise_suppress_enabled: bool = True
+    drain3_noise_suppress_rate_floor: float = 0.05  # < 5% anomalous AND no new templates
 
     # Public UIs for deep-links in the escalation email + dashboard.
     # Defaults assume the tailnet/MagicDNS layout; override per-deployment

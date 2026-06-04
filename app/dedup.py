@@ -1,10 +1,65 @@
 import asyncio
 import hashlib
 import logging
+import re
 import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Drain3 fingerprint stabilisation (issue #1, 2026-06-04 backend audit).
+#
+# The drain3 self-fire fingerprint used to hash the raw novel-template /
+# anomalous-line text. That text embeds high-cardinality, per-batch volatile
+# tokens — trace IDs, span IDs, entity IDs, timestamps, hex digests — so two
+# batches of the SAME underlying anomaly family hashed to DIFFERENT keys
+# every fire → never deduped, never recurrence-gated → a fresh `investigate`
+# row each time (21 distinct fingerprints / 18 fires in one day, live DB).
+#
+# Fix: normalise the content to its STABLE template identity before hashing
+# (mask the volatile tokens with <*>) so the same anomaly family collapses
+# while a genuinely new template still produces a distinct digest. This is
+# deliberately CONSERVATIVE — only obviously-volatile token shapes are
+# masked, so distinct anomalies are not merged.
+# ──────────────────────────────────────────────────────────────────────
+# Ordered most-specific → least-specific so e.g. a UUID isn't half-eaten by
+# the bare-number rule first.
+_DRAIN3_MASK_PATTERNS: list[re.Pattern] = [
+    re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"),  # UUID
+    re.compile(r"\b[0-9a-fA-F]{16,}\b"),          # long hex (trace/span IDs, digests)
+    re.compile(r"\b0x[0-9a-fA-F]+\b"),            # hex literals (0x…)
+    re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?"),  # ISO timestamps
+    re.compile(r"\b\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b"),  # bare clock times
+    re.compile(r"\b\d+(?:\.\d+)?\b"),              # decimals / dotted (IPs partially, ratios)
+    re.compile(r"\d+"),                            # any remaining digit run (incl. "1234ms", "id=42")
+]
+
+
+def _normalize_drain3_content(text: str) -> str:
+    """Collapse a drain3 template / anomalous line to its stable identity.
+
+    Replaces volatile high-cardinality tokens (UUIDs, trace/span IDs, hex
+    digests, timestamps, bare integers) with `<*>` so the SAME log template
+    masks to the SAME string across batches even when drain3's own masking
+    left an embedded id in the `new_templates` text or we fell back to a raw
+    `anomalous_lines` sample. Whitespace is squeezed so spacing jitter doesn't
+    change the digest.
+    """
+    masked = text
+    for pat in _DRAIN3_MASK_PATTERNS:
+        masked = pat.sub("<*>", masked)
+    # Collapse runs of the wildcard token (e.g. "<*>:<*>" timestamps) and
+    # surrounding whitespace so equivalent templates converge.
+    masked = re.sub(r"(?:<\*>[\s:.,/-]*){2,}", "<*> ", masked)
+    masked = re.sub(r"\s+", " ", masked).strip()
+    # If nothing but wildcards / punctuation survives, the line carried no
+    # stable identity (pure ids/timestamps) — treat as empty so the caller
+    # falls back to the service-scoped key rather than minting a fake digest.
+    if not re.search(r"[A-Za-z]", masked):
+        return ""
+    return masked
 
 
 # DA-5 — alertname families. Severity-tier alerts on the same resource
@@ -45,13 +100,26 @@ def drain3_fingerprint(
     Top-3 novel templates dominate the digest; if none are present we fall
     back to the first three anomalous lines so each visually-distinct
     batch still gets its own key.
+
+    Issue #1 (2026-06-04): the digest is now taken over the NORMALISED
+    template identity (`_normalize_drain3_content`), not the raw text, so
+    two batches of the same anomaly family — which differ only in embedded
+    trace/span/entity IDs and timestamps — produce the SAME fingerprint and
+    therefore dedup + recurrence-gate as intended. Genuinely distinct
+    templates still mask to distinct strings and stay split.
     """
     templates = [t for t in (new_templates or [])[:3] if t and t.strip()]
     if not templates:
         templates = [l for l in (anomalous_lines or [])[:3] if l and l.strip()]
     if not templates:
         return f"drain3-{service}"
-    normalized = "\n".join(t.strip() for t in templates)
+    # Normalise each entry to its stable identity, drop any that mask to
+    # nothing (pure-id lines), then sort so batch ordering jitter doesn't
+    # change the key. Sorting is safe: order carries no anomaly meaning.
+    normed = sorted({n for n in (_normalize_drain3_content(t) for t in templates) if n})
+    if not normed:
+        return f"drain3-{service}"
+    normalized = "\n".join(normed)
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
     return f"drain3-{service}-{digest}"
 

@@ -225,6 +225,49 @@ def test_drain3_fingerprint_ignores_whitespace_only_templates():
     assert fp1 == fp2
 
 
+# Issue #1 (2026-06-04 backend audit) — drain3 fingerprint stabilisation.
+# The digest used to be over the raw template/line text, which embeds volatile
+# trace/span/entity IDs and timestamps, so two batches of the SAME anomaly
+# family hashed differently every fire → never deduped. The fingerprint now
+# normalises to stable template identity before hashing.
+
+def test_drain3_fingerprint_stable_across_volatile_ids_in_lines():
+    """Two batches of the same anomaly family that differ only in embedded
+    entity IDs / timestamps must now produce the SAME fingerprint (line
+    fallback path) so the second fire dedups."""
+    fp1 = drain3_fingerprint("spring-boot", [], [
+        "Writing Employee record id=1 at 2026-06-04T10:00:01.123Z trace=a1b2c3d4e5f60718",
+    ])
+    fp2 = drain3_fingerprint("spring-boot", [], [
+        "Writing Employee record id=87 at 2026-06-04T10:05:42.998Z trace=99ffee0011223344",
+    ])
+    assert fp1 == fp2
+    assert fp1.startswith("drain3-spring-boot-")
+
+
+def test_drain3_fingerprint_stable_across_volatile_ids_in_templates():
+    """Same as above but on the new_templates path — an id that drain3's own
+    masking left embedded must not split the fingerprint."""
+    fp1 = drain3_fingerprint("kong", ["upstream 10.0.0.42 returned 502 in 1234ms"], [])
+    fp2 = drain3_fingerprint("kong", ["upstream 10.0.0.99 returned 502 in 88ms"], [])
+    assert fp1 == fp2
+
+
+def test_drain3_fingerprint_still_splits_genuinely_distinct_templates():
+    """Conservatism check: masking must NOT collapse semantically different
+    templates. OOM vs connection-storm stay distinct after normalisation."""
+    oom = drain3_fingerprint("spring-boot", ["OutOfMemoryError: Java heap space"], [])
+    conn = drain3_fingerprint("spring-boot", ["Connection refused: HikariPool timeout"], [])
+    assert oom != conn
+
+
+def test_drain3_fingerprint_id_only_lines_fall_back_to_service():
+    """A batch whose lines mask away to nothing (pure ids/timestamps) must
+    not produce a spurious unique digest — it degrades to the service key."""
+    fp = drain3_fingerprint("svc", [], ["2026-06-04T10:00:01Z 12345 0xdeadbeef"])
+    assert fp == "drain3-svc"
+
+
 @pytest.mark.asyncio
 async def test_dedup_collapses_family_siblings_end_to_end():
     """Integration: HighCpuUsage fires, then CriticalCpuUsage fires on the
