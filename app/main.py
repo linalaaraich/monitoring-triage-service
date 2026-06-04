@@ -2657,6 +2657,10 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
         # without null guards in places)
         "reasoning": reasoning_steps,
         "related": [],  # populated by the detail route, not the dashboard route
+        # Per-row Grafana/Loki/Jaeger deep-links so the dashboard expanded-row
+        # quick-action anchors (D2) point somewhere real — the same routing the
+        # detail route's CIRES_LINKS uses, computed per alert shape.
+        "links": _build_cires_links({"alertName": alert_name, "component": svc}),
         "deploy": None,  # SF-11 work — placeholder for deploy-correlation card
         "promql": r.get("promql_expr") or "",
         "ip": r.get("alert_instance") or "",
@@ -2848,9 +2852,26 @@ def _render_v2_filter_bar(filters: dict, page: int, size: int) -> str:
   <input type="hidden" name="size" value="{int(size)}"/>
   <noscript><button type="submit" class="v2-filter-bar__apply">Apply</button></noscript>
   <a class="v2-filter-bar__clear" href="/dashboard" title="Clear all filters">clear</a>
-  <button type="button" class="v2-filter-bar__share" onclick="navigator.clipboard&amp;&amp;navigator.clipboard.writeText(location.href);this.textContent='copied!';setTimeout(()=>this.textContent='copy URL',1200)" title="Copy filtered URL to clipboard">copy URL</button>
 </form>
 """
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Unified theme head-script for the React (.cires / tokens.css) pages.
+# The React layer persists the theme in localStorage under "obs-rca-theme"
+# and scopes its light tokens to `.cires[data-theme="light"]`. This inline
+# <head> script mirrors that persisted value onto <html data-theme> BEFORE
+# paint so the body background (tokens.css `html[data-theme="light"] body`)
+# tracks the active theme with no dark flash, and a short poll keeps <html>
+# in sync when the in-page ThemeToggle flips the value. Reading the SAME key
+# the React useTheme() hook uses is what unifies the two theme systems.
+_CIRES_THEME_HEAD_SCRIPT = (
+    '<script>(function(){try{'
+    'var apply=function(){var t=localStorage.getItem("obs-rca-theme")||"dark";'
+    'document.documentElement.setAttribute("data-theme",t);};'
+    'apply();setInterval(apply,500);'
+    '}catch(e){}})();</script>'
+)
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -3058,6 +3079,7 @@ async def dashboard_v2(
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/design/tokens.css"/>
+{_CIRES_THEME_HEAD_SCRIPT}
 <style>
   body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); }}
   #root {{ min-height: 100vh; }}
@@ -3224,8 +3246,14 @@ async def dashboard_v2(
 
 <script type="text/babel" data-presets="react">
   function App() {{
+    // Drive the wrapper's data-theme from the persisted obs-rca-theme
+    // (not a hardcoded "dark") so light mode actually applies: the
+    // tokens.css light overrides are scoped to `.cires[data-theme="light"]`.
+    // useTheme() also re-renders when the TopBar ThemeToggle flips the
+    // persisted value, keeping the wrapper in sync with the live toggle.
+    const [theme] = window.useTheme();
     return (
-      <div className="cires" data-theme="dark" style={{{{ minHeight: "100vh" }}}}>
+      <div className="cires" data-theme={{theme}} style={{{{ minHeight: "100vh" }}}}>
         <Dashboard mode="default"/>
       </div>
     );
@@ -3516,7 +3544,7 @@ async def dashboard_v2_kpi():
     </div>
 
     <div class="kpi-foot">
-      <strong>What you are looking at:</strong> each card answers one operator question. The big number is the answer; the muted line under it grounds the number in context. All data is computed live from the local <code>rca_history.db</code> &middot; no external dependencies, MCP-invariant clean.
+      <strong>What you are looking at:</strong> each card answers one operator question. The big number is the answer; the muted line under it grounds the number in context. The six metric cards are computed live from the local <code>rca_history.db</code> (no external dependencies, MCP-invariant clean); the <em>MCP firewall</em> and <em>Tests passing</em> cards are last-known stamped figures, not live-probed (see each card&rsquo;s sub-line).
     </div>
   </main>
 </div>
@@ -4529,6 +4557,7 @@ async def dashboard_v2_alert(short_id: str):
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/design/tokens.css"/>
+{_CIRES_THEME_HEAD_SCRIPT}
 <style>
   body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); }}
   #root {{ min-height: 100vh; }}
@@ -4671,6 +4700,7 @@ async def dashboard_v2_alert_rate(short_id: str):
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/design/tokens.css"/>
+{_CIRES_THEME_HEAD_SCRIPT}
 <style>
   body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); }}
   #root {{ min-height: 100vh; }}

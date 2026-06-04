@@ -226,7 +226,9 @@ function ExpandedDetail({ a }) {
       <div>
         <div className="section-label">Reason</div>
         <div style={{ fontSize: 14.5, color: "var(--text)", lineHeight: 1.5, maxWidth: 640 }}>
-          {a.reason.split(new RegExp(`(${a.boldSubject || '___NONE___'})`)).map((p, i) =>
+          {/* Guard against null/missing reason (C4): expanding such a row would
+              otherwise throw inside renderToString and blank the whole feed. */}
+          {(a.reason || "").split(new RegExp(`(${a.boldSubject || '___NONE___'})`)).map((p, i) =>
             p === a.boldSubject
               ? <strong key={i} className="mono" style={{ color: "var(--accent-yellow)", fontWeight: 600 }}>{p}</strong>
               : <React.Fragment key={i}>{p}</React.Fragment>
@@ -261,9 +263,9 @@ function ExpandedDetail({ a }) {
           <span>View full detail</span><Icon.chevR/>
         </a>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          <a className="btn lift" style={{ justifyContent: "space-between" }}>Grafana <Icon.ext/></a>
-          <a className="btn lift" style={{ justifyContent: "space-between" }}>Loki <Icon.ext/></a>
-          <a className="btn lift" style={{ justifyContent: "space-between" }}>Jaeger <Icon.ext/></a>
+          <a className="btn lift" href={(a.links && a.links.grafana) || "#"} target="_blank" rel="noopener noreferrer" style={{ justifyContent: "space-between", textDecoration: "none" }}>Grafana <Icon.ext/></a>
+          <a className="btn lift" href={(a.links && a.links.loki) || "#"} target="_blank" rel="noopener noreferrer" style={{ justifyContent: "space-between", textDecoration: "none" }}>Loki <Icon.ext/></a>
+          <a className="btn lift" href={(a.links && a.links.jaeger) || "#"} target="_blank" rel="noopener noreferrer" style={{ justifyContent: "space-between", textDecoration: "none" }}>Jaeger <Icon.ext/></a>
           <a className="btn lift" href={`/dashboard/alert/${a.id}/rate`} style={{ justifyContent: "space-between", textDecoration: "none" }}>Rate alert <Icon.ext/></a>
         </div>
         {a.fireCount > 1 && <div style={{

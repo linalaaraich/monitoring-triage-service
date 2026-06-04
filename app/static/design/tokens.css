@@ -16,6 +16,15 @@ body {
   color: #e4e6ee;
   overflow-x: hidden;    /* prevents accidental horizontal scroll on narrow viewports */
 }
+/* Light-mode body bleed fix: the .cires wrapper carries the light tokens for
+   its own subtree, but the <body> background is set on the element itself and
+   would stay dark on overscroll / any gap. The React route heads set
+   data-theme="light" on <html> (from the persisted obs-rca-theme) so the body
+   background tracks the active theme. */
+html[data-theme="light"] body {
+  background: #f4f6fa;
+  color: #1a1d27;
+}
 
 :root {
   --bg:           #0f1117;

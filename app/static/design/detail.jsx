@@ -67,19 +67,27 @@ function DetailHeader({ a }) {
 }
 
 function CauseSection({ a }) {
-  const parts = a.reason.split(new RegExp(`(${a.boldSubject || '___NONE___'})`));
+  // Guard against a null/missing `reason` (C1) and missing `tags` (C2): an
+  // unguarded `.split`/`.slice` throws synchronously inside renderToString and
+  // blanks the whole detail page. The transform currently always populates
+  // these, so this is defense-in-depth against a future producer regression.
+  const reason = a.reason || "";
+  const tags = (a.tags || []).slice(0, 3);
+  const parts = reason.split(new RegExp(`(${a.boldSubject || '___NONE___'})`));
   return (
     <section style={{ marginBottom: 24 }}>
       <div className="section-label">Cause</div>
       <div className="callout">
         <div style={{ fontSize: 18, lineHeight: 1.45, color: "var(--text)", maxWidth: 820 }}>
-          {parts.map((p, i) => p === a.boldSubject
-            ? <strong key={i} className="mono" style={{ color: "var(--accent-yellow)", fontWeight: 600, padding: "0 2px" }}>{p}</strong>
-            : <React.Fragment key={i}>{p}</React.Fragment>
-          )}
+          {reason
+            ? parts.map((p, i) => p === a.boldSubject
+                ? <strong key={i} className="mono" style={{ color: "var(--accent-yellow)", fontWeight: 600, padding: "0 2px" }}>{p}</strong>
+                : <React.Fragment key={i}>{p}</React.Fragment>
+              )
+            : "No plain-English cause was recorded for this alert."}
         </div>
         <div style={{ marginTop: 10, fontSize: 12.5, color: "var(--muted)" }}>
-          LLM confidence <span style={{ color: "var(--text-soft)" }}>{Math.round((a.confidence || 0)*100)}%</span> · quality <span style={{ color: "var(--accent-green)" }}>{a.quality}</span> · {a.tags.slice(0,3).map(t => <span key={t} style={{ marginRight: 6, color: "var(--text-soft)" }}>#{t}</span>)}
+          LLM confidence <span style={{ color: "var(--text-soft)" }}>{Math.round((a.confidence || 0)*100)}%</span> · quality <span style={{ color: "var(--accent-green)" }}>{a.quality}</span> · {tags.map(t => <span key={t} style={{ marginRight: 6, color: "var(--text-soft)" }}>#{t}</span>)}
         </div>
       </div>
     </section>
@@ -329,7 +337,7 @@ function EvidenceSection({ a }) {
                 color: meta.color, width: 80, flexShrink: 0,
               }}>{meta.name}</span>
               <span style={{ flex: 1, fontSize: 13.5, color: "var(--text)", lineHeight: 1.5 }}>{e.text}</span>
-              <a className="btn sm">View in {e.link} <Icon.ext/></a>
+              <a className="btn sm" href={e.link || "#"} target="_blank" rel="noopener noreferrer">View in {meta.name} <Icon.ext/></a>
             </div>
           );
         })}
@@ -339,6 +347,11 @@ function EvidenceSection({ a }) {
 }
 
 function ReasoningSection({ a, expanded, onToggle }) {
+  // Guard the optional `reasoning` array (C3): three unguarded accesses
+  // (.length ×2, .map) each throw and blank the page when reasoning is
+  // missing. Hide the section entirely when there are no steps.
+  const steps = a.reasoning || [];
+  if (!steps.length) return null;
   return (
     <section style={{ marginBottom: 24 }}>
       <button onClick={onToggle} style={{
@@ -353,7 +366,7 @@ function ReasoningSection({ a, expanded, onToggle }) {
         <span style={{ textTransform: "uppercase", letterSpacing: 0.1, fontSize: 11, fontWeight: 600, color: "var(--muted)" }}>
           {expanded ? "Hide" : "Show"} reasoning steps
         </span>
-        <span style={{ fontSize: 12, color: "var(--muted-2)" }}>· {a.reasoning.length} steps · LLM thought</span>
+        <span style={{ fontSize: 12, color: "var(--muted-2)" }}>· {steps.length} steps · LLM thought</span>
       </button>
       {expanded && (
         <ol style={{
@@ -361,10 +374,10 @@ function ReasoningSection({ a, expanded, onToggle }) {
           background: "var(--card)", border: "1px solid var(--border)", borderRadius: 10,
           listStyle: "none", counterReset: "step",
         }}>
-          {a.reasoning.map((step, i) => (
+          {steps.map((step, i) => (
             <li key={i} style={{
               counterIncrement: "step",
-              padding: "8px 0", borderBottom: i < a.reasoning.length - 1 ? "1px dashed var(--border)" : "none",
+              padding: "8px 0", borderBottom: i < steps.length - 1 ? "1px dashed var(--border)" : "none",
               display: "flex", gap: 14, alignItems: "baseline",
               color: "var(--text)", fontSize: 14, lineHeight: 1.5,
             }}>
@@ -567,7 +580,7 @@ function DetailPage({ a, openReasoning = false, openRaw = false }) {
     <div className="cires" data-theme={theme} style={{ background: "var(--bg)", minHeight: "100%", display: "flex" }}>
       <window.Sidebar active="triage" collapsed={collapsed} onToggleCollapse={() => setCollapsed(!collapsed)}/>
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-        <TopBar uptimeSec={47812} openAlerts={7} emailed24h={12} shelved24h={38} medianLatency={4.3} page="detail"/>
+        <TopBar page="detail"/>
         <DetailHeader a={a}/>
         <div style={{ padding: "24px 28px 40px", display: "grid", gridTemplateColumns: "1fr 320px", gap: 28, maxWidth: 1480, margin: "0 auto", width: "100%" }}>
           <main>
