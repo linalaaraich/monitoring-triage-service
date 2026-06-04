@@ -189,9 +189,17 @@ function FeedbackForm({ filled = false, submitted = false }) {
           <div style={{ fontSize: 14, color: "var(--text-soft)", maxWidth: 460, margin: "0 auto", lineHeight: 1.55 }}>
             This feedback is wired into the <span style={{ color: "var(--accent-cyan)" }}>suppression cache</span> and the <span style={{ color: "var(--accent-purple)" }}>exemplar library</span>. Future fires of this fingerprint will use it.
           </div>
+          {/* 2026-06-04 (WS-2 F-005): was two dead <button>s, which
+              trapped the operator on the confirmation screen after
+              submit. Anchors so middle-click + cmd-click work. The
+              detail href reads window.CIRES_RATE_SHORT_ID injected
+              by the /rate route handler. */}
           <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 24 }}>
-            <button className="btn primary">Back to dashboard</button>
-            <button className="btn ghost" style={{ color: "var(--muted)" }}>View this alert's detail</button>
+            <a className="btn primary" href="/dashboard"
+               style={{ textDecoration: "none" }}>Back to dashboard</a>
+            <a className="btn ghost"
+               href={`/dashboard/alert/${(typeof window !== "undefined" && window.CIRES_RATE_SHORT_ID) || a.id}`}
+               style={{ color: "var(--muted)", textDecoration: "none" }}>View this alert's detail</a>
           </div>
           <div style={{
             marginTop: 26, paddingTop: 18, borderTop: "1px solid var(--border)",

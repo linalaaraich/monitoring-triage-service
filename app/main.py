@@ -3183,20 +3183,20 @@ async def dashboard_v2_kpi():
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Incident response</div>
       <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
-      <a class="kpi-sidebar__item" href="/dashboard">Incidents</a>
-      <a class="kpi-sidebar__item" href="/dashboard">Anomalies</a>
+      <a class="kpi-sidebar__item" href="/dashboard/incidents">Incidents</a>
+      <a class="kpi-sidebar__item" href="/dashboard/anomalies">Anomalies</a>
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Insights</div>
-      <a class="kpi-sidebar__item" href="/dashboard">Stats</a>
-      <a class="kpi-sidebar__item" href="/dashboard">Services</a>
+      <a class="kpi-sidebar__item" href="/dashboard/stats">Stats</a>
+      <a class="kpi-sidebar__item" href="/dashboard/services">Services</a>
       <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/kpi">KPI &middot; Evaluation</a>
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Configuration</div>
-      <a class="kpi-sidebar__item" href="/dashboard">Alerts</a>
-      <a class="kpi-sidebar__item" href="/dashboard">Drain3 engine</a>
-      <a class="kpi-sidebar__item" href="/dashboard">Integrations</a>
+      <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
+      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
     </div>
   </aside>"""
 
@@ -3513,20 +3513,20 @@ async def dashboard_v2_services():
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Incident response</div>
       <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
-      <a class="kpi-sidebar__item" href="/dashboard">Incidents</a>
-      <a class="kpi-sidebar__item" href="/dashboard">Anomalies</a>
+      <a class="kpi-sidebar__item" href="/dashboard/incidents">Incidents</a>
+      <a class="kpi-sidebar__item" href="/dashboard/anomalies">Anomalies</a>
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Insights</div>
-      <a class="kpi-sidebar__item" href="/dashboard">Stats</a>
+      <a class="kpi-sidebar__item" href="/dashboard/stats">Stats</a>
       <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/services">Services</a>
       <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Configuration</div>
-      <a class="kpi-sidebar__item" href="/dashboard">Alerts</a>
-      <a class="kpi-sidebar__item" href="/dashboard">Drain3 engine</a>
-      <a class="kpi-sidebar__item" href="/dashboard">Integrations</a>
+      <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
+      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
     </div>
   </aside>"""
 
@@ -3916,20 +3916,20 @@ async def dashboard_v2_alerts():
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Incident response</div>
       <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
-      <a class="kpi-sidebar__item" href="/dashboard">Incidents</a>
-      <a class="kpi-sidebar__item" href="/dashboard">Anomalies</a>
+      <a class="kpi-sidebar__item" href="/dashboard/incidents">Incidents</a>
+      <a class="kpi-sidebar__item" href="/dashboard/anomalies">Anomalies</a>
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Insights</div>
-      <a class="kpi-sidebar__item" href="/dashboard">Stats</a>
+      <a class="kpi-sidebar__item" href="/dashboard/stats">Stats</a>
       <a class="kpi-sidebar__item" href="/dashboard/services">Services</a>
       <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
     </div>
     <div class="kpi-sidebar__group">
       <div class="kpi-sidebar__group-label">Configuration</div>
       <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/alerts">Alerts</a>
-      <a class="kpi-sidebar__item" href="/dashboard">Drain3 engine</a>
-      <a class="kpi-sidebar__item" href="/dashboard">Integrations</a>
+      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
     </div>
   </aside>"""
 
@@ -4396,32 +4396,16 @@ async def dashboard_v2_alert(short_id: str):
 <style>
   body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); }}
   #root {{ min-height: 100vh; }}
-  .page-banner {{
-    background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
-    border-bottom: 1px solid rgba(176,126,232,.35);
-    padding: 8px 22px;
-    font-size: 12.5px;
-    color: var(--text-soft, #c0c5d0);
-    display: flex; align-items: center; gap: 14px;
-  }}
-  .page-banner strong {{ color: var(--accent-purple, #b07ee8); }}
-  .page-banner a {{ color: var(--accent-cyan, #40d0d0); text-decoration: none; }}
-  .page-banner a:hover {{ text-decoration: underline; }}
+  /* 2026-06-04 (WS-2): removed the .page-banner chrome strip that
+     used to render "detail page | Alert {{id}} | back to feed" above
+     the React TopBar. It duplicated information already shown in
+     TopBar + DetailHeader and Lina explicitly called it useless. The
+     DetailHeader's back-arrow button (detail.jsx:15) now carries the
+     back-to-/dashboard nav. The full-UUID is reachable in the Raw
+     Data accordion at the bottom of the detail page. */
 </style>
 </head>
 <body>
-
-<div class="page-banner">
-  <strong>detail page</strong>
-  <span title="Click to copy full UUID"
-        onclick="navigator.clipboard.writeText('{target.get('id') or ''}').then(()=>{{const e=this.querySelector('em');if(e){{e.textContent='copied';setTimeout(()=>e.textContent='copy full',1800)}}}});"
-        style="cursor:pointer; padding:2px 8px; border:1px solid rgba(176,126,232,.3); border-radius:4px; user-select:none;">
-    Alert <code style="color:var(--accent-yellow)">{short_id}</code>
-    <em style="font-size:11px; opacity:.65; margin-left:6px; font-style:normal;">copy full</em>
-  </span>
-  <span style="flex: 1"></span>
-  <a href="/dashboard">back to feed</a>
-</div>
 
 <div id="root"></div>
 
@@ -4485,6 +4469,60 @@ async def dashboard_v2_alert_rate(short_id: str):
     alert_json = _json2.dumps(alert, default=str)
     now_tng = now_utc.astimezone(timezone(timedelta(hours=1))).strftime("%Y-%m-%d %H:%M:%S")
 
+    # 2026-06-04 (WS-2 F-008): rate page now wraps the form in the
+    # platform's Sidebar+TopBar chrome. Compute the same dashboard
+    # stats / sidebar badges the detail route computes so TopBar
+    # renders the same numbers and the operator does not feel
+    # stranded in a no-chrome focus mode.
+    midnight_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_ago = now_utc - timedelta(days=1)
+    def _ts_dt_rate(r):
+        try:
+            d = datetime.fromisoformat((r.get("timestamp") or "").replace("Z", "+00:00"))
+            return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d
+        except Exception:
+            return None
+    emailed_24h = 0; shelved_24h = 0; cheap_path_since_midnight = 0
+    llm_durations = []; open_fingerprints = set()
+    by_fp_count: dict[str, int] = {}
+    for r in scan:
+        ts = _ts_dt_rate(r)
+        if ts is None:
+            continue
+        act = (r.get("action_taken") or "").lower()
+        td = (r.get("triage_decision") or "").lower()
+        rfp = r.get("alert_fingerprint") or ""
+        if rfp:
+            by_fp_count[rfp] = by_fp_count.get(rfp, 0) + 1
+        if ts >= day_ago:
+            if act == "emailed":
+                emailed_24h += 1
+                if rfp: open_fingerprints.add(rfp)
+            if act == "shelved":
+                shelved_24h += 1
+            dur = r.get("investigation_duration_ms") or 0
+            if dur > 0:
+                llm_durations.append(dur / 1000.0)
+        if ts >= midnight_utc and td in ("triage_suppressed", "suppressed_duplicate", "recurrence_gated_pre_llm"):
+            cheap_path_since_midnight += 1
+    llm_durations.sort()
+    median_latency_s = round(llm_durations[len(llm_durations) // 2], 1) if llm_durations else 0.0
+    import time as _t
+    uptime_sec = int(_t.time() - _PROC_START_TIME)
+    dashboard_stats = {
+        "uptimeSec": uptime_sec,
+        "openAlerts": len(open_fingerprints),
+        "emailed24h": emailed_24h,
+        "shelved24h": shelved_24h,
+        "medianLatency": median_latency_s,
+        "cheap_path_since_midnight": cheap_path_since_midnight,
+    }
+    sidebar_badges = {
+        "triage": len(open_fingerprints),
+        "incidents": len(by_fp_count),
+        "anomalies": (drain3_stats.get("total_anomalies") or 0),
+    }
+
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4498,27 +4536,14 @@ async def dashboard_v2_alert_rate(short_id: str):
 <style>
   body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); }}
   #root {{ min-height: 100vh; }}
-  .page-banner {{
-    background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
-    border-bottom: 1px solid rgba(176,126,232,.35);
-    padding: 8px 22px;
-    font-size: 12.5px;
-    color: var(--text-soft, #c0c5d0);
-    display: flex; align-items: center; gap: 14px;
-  }}
-  .page-banner strong {{ color: var(--accent-purple, #b07ee8); }}
-  .page-banner a {{ color: var(--accent-cyan, #40d0d0); text-decoration: none; }}
+  /* 2026-06-04 (WS-2): removed the .page-banner chrome strip Lina
+     called useless; the form now lives inside the platform's
+     Sidebar+TopBar chrome (see <App/> below) so the operator can
+     navigate without browser-back. The form's own FeedbackHeader
+     already shows alert id + identity pills. */
 </style>
 </head>
 <body>
-
-<div class="page-banner">
-  <strong>rate alert</strong>
-  <span>Alert <code style="color:var(--accent-yellow)">{short_id}</code></span>
-  <span style="flex: 1"></span>
-  <a href="/dashboard/alert/{short_id}">← back to alert detail</a>
-  <a href="/dashboard">↩ feed</a>
-</div>
 
 <div id="root"></div>
 
@@ -4529,6 +4554,8 @@ async def dashboard_v2_alert_rate(short_id: str):
   window.CIRES_ALERT = {alert_json};
   window.CIRES_NOW_LOCAL = "{now_tng}";
   window.CIRES_RATE_SHORT_ID = {_json2.dumps(short)};
+  window.CIRES_DASHBOARD_STATS = {_json2.dumps(dashboard_stats)};
+  window.CIRES_SIDEBAR_BADGES = {_json2.dumps(sidebar_badges)};
 
   // Submit handler — POST to /feedback/rate/{{short_id}}, on success
   // re-render with the submitted state.
@@ -4552,8 +4579,23 @@ async def dashboard_v2_alert_rate(short_id: str):
 <script type="text/babel" src="/static/design/feedback.jsx"></script>
 
 <script type="text/babel" data-presets="react">
+  // 2026-06-04 (WS-2 F-008): wrap FeedbackEmpty in the platform's
+  // Sidebar + TopBar chrome so the operator has nav + theme + stats
+  // exactly like the detail page. Was previously a chrome-less form.
   function App() {{
-    return <FeedbackEmpty/>;
+    const [theme] = window.useTheme();
+    const [collapsed, setCollapsed] = window.useSidebarCollapsed();
+    return (
+      <div className="cires" data-theme={{theme}} style={{{{ background: "var(--bg)", minHeight: "100vh", display: "flex" }}}}>
+        <window.Sidebar active="triage" collapsed={{collapsed}} onToggleCollapse={{() => setCollapsed(!collapsed)}}/>
+        <div style={{{{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}}}>
+          <TopBar page="detail"/>
+          <div style={{{{ flex: 1, minWidth: 0 }}}}>
+            <FeedbackEmpty/>
+          </div>
+        </div>
+      </div>
+    );
   }}
   ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>

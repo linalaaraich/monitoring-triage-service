@@ -12,9 +12,14 @@ function DetailHeader({ a }) {
       display: "flex", alignItems: "flex-start", gap: 18,
       position: "sticky", top: 60, zIndex: 8,
     }}>
-      <button className="btn ghost" style={{ color: "var(--muted)", marginTop: 2 }}>
+      {/* 2026-06-04 (WS-2 F-002): was a bare <button> with no
+          onClick/href so clicking did nothing. Lina specified this
+          as the "back to dashboard" control. Anchor so middle-click
+          opens the feed in a new tab too. */}
+      <a className="btn ghost" href="/dashboard" title="Back to triage feed"
+         style={{ color: "var(--muted)", marginTop: 2, textDecoration: "none" }}>
         <Icon.arrowL/>
-      </button>
+      </a>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
           <StateIcon kind={a.indicator}/>
@@ -419,24 +424,74 @@ function RelatedSidebar({ a }) {
         </div>
       </div>
 
-      <div>
-        <div className="section-label">Feedback</div>
-        <div className="card" style={{ padding: 14 }}>
-          <div style={{ fontSize: 13.5, color: "var(--text)", marginBottom: 12 }}>Was this alert useful?</div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-            <button className="btn lift" style={{ flex: 1, justifyContent: "center", color: "var(--accent-green)" }}>
-              <Icon.thumbUp/>
-            </button>
-            <button className="btn lift" style={{ flex: 1, justifyContent: "center", color: "var(--accent-red)" }}>
-              <Icon.thumbDown/>
-            </button>
-          </div>
-          <a className="btn sm ghost" style={{ width: "100%", justifyContent: "center", color: "var(--muted)" }}>
-            Open full feedback form →
-          </a>
-        </div>
-      </div>
+      <FeedbackCard a={a}/>
     </aside>
+  );
+}
+
+// 2026-06-04 (WS-2 F-003 + F-004): inline feedback card in the
+// detail sidebar. Was three dead buttons. Now:
+//   - thumbs up / thumbs down POST a minimal {rating} payload to
+//     /feedback/rate/{short_id} and surface inline success/error
+//     state without leaving the detail page.
+//   - "Open full feedback form" anchor is now a real <a href> to
+//     /dashboard/alert/{short_id}/rate (Lina's L4 - the page was
+//     reachable but the only link to it had no href).
+function FeedbackCard({ a }) {
+  const [state, setState] = useDetailState("idle"); // idle | sending | ok | err
+  const [errMsg, setErrMsg] = useDetailState(null);
+  const submit = async (rating) => {
+    if (state === "sending") return;
+    setState("sending"); setErrMsg(null);
+    try {
+      const r = await fetch(`/feedback/rate/${a.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rating: rating,
+          verdict_was_right: null,
+          action_was_right: null,
+          actual_cause: null,
+          tags: [],
+          notes: null,
+          rater: "operator",
+        }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setState("ok");
+    } catch (e) {
+      setErrMsg(String(e && e.message ? e.message : e));
+      setState("err");
+    }
+  };
+  const disabled = state === "sending" || state === "ok";
+  return (
+    <div>
+      <div className="section-label">Feedback</div>
+      <div className="card" style={{ padding: 14 }}>
+        <div style={{ fontSize: 13.5, color: "var(--text)", marginBottom: 12 }}>Was this alert useful?</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <button className="btn lift" disabled={disabled} onClick={() => submit("yes")}
+                  style={{ flex: 1, justifyContent: "center", color: "var(--accent-green)", opacity: disabled ? 0.55 : 1, cursor: disabled ? "default" : "pointer" }}>
+            <Icon.thumbUp/>
+          </button>
+          <button className="btn lift" disabled={disabled} onClick={() => submit("no")}
+                  style={{ flex: 1, justifyContent: "center", color: "var(--accent-red)", opacity: disabled ? 0.55 : 1, cursor: disabled ? "default" : "pointer" }}>
+            <Icon.thumbDown/>
+          </button>
+        </div>
+        {state === "ok" && (
+          <div style={{ fontSize: 12, color: "var(--accent-green)", marginBottom: 8, textAlign: "center" }}>Thanks - rating saved.</div>
+        )}
+        {state === "err" && (
+          <div style={{ fontSize: 12, color: "var(--accent-red)", marginBottom: 8, textAlign: "center" }}>Save failed: {errMsg}</div>
+        )}
+        <a className="btn sm ghost" href={`/dashboard/alert/${a.id}/rate`}
+           style={{ width: "100%", justifyContent: "center", color: "var(--muted)", textDecoration: "none" }}>
+          Open full feedback form →
+        </a>
+      </div>
+    </div>
   );
 }
 
