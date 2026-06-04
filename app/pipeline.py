@@ -61,6 +61,23 @@ def _is_shelved_in_disguise(decision, quality: str) -> bool:
     return False
 
 
+def _context_is_mcp_outage(ctx) -> bool:
+    """BE-B2 (2026-06-04) — True when EVERY reachable MCP pillar errored
+    (4xx/5xx/connection), i.e. NO source succeeded at all.
+
+    `gather()` increments `sources_available` once per pillar fetch that did
+    NOT raise (including a healthy-but-empty 200) and appends one entry to
+    `ctx.errors` per pillar that DID raise. So an outage — all three pillars
+    erroring simultaneously — is `sources_available == 0` AND at least one
+    recorded error. This is NOT data-starvation: the sources never reported,
+    so we must fail OPEN (escalate / page a human), never silently suppress a
+    potentially-real alert during a transient MCP outage.
+    """
+    sources_available = getattr(ctx, "sources_available", 0) or 0
+    errors = getattr(ctx, "errors", None) or []
+    return sources_available == 0 and len(errors) > 0
+
+
 def _context_is_data_starved(
     ctx,
     alert: GrafanaAlert,
@@ -75,11 +92,22 @@ def _context_is_data_starved(
     ~100s cold inference (+retry) to hedge "Cannot determine / insufficient
     data" and emit a noisy investigate row.
 
+    BE-B2 (2026-06-04) — the predicate is now keyed on CONTENT emptiness, NOT
+    on reachability. The previous `sources_available > 0 → not starved`
+    short-circuit was wrong both ways: (a) `gather()` increments
+    `sources_available` for any reachable MCP INCLUDING a healthy-but-empty
+    200, so the genuine reachable-but-empty case (0 rows) never tripped the
+    gate; and (b) the only path that DID fire — all MCPs erroring
+    (`sources_available == 0`) — is an OUTAGE, where suppressing a real
+    non-critical alert is unsafe. Outage detection now lives in
+    `_context_is_mcp_outage` and the caller escalates (never suppresses) it
+    BEFORE this predicate is consulted.
+
     CONSERVATIVE: any one signal below keeps the alert on the full LLM path.
     The alert is "data-starved" ONLY when ALL of these hold:
       - no Prometheus metrics, no logs / annotated logs, no traces, no deep
-        trace (sources_available == 0 is the canonical signal, double-checked
-        against the raw fields in case a pillar returned an empty container),
+        trace (CONTENT emptiness — a reachable 200 that returned an empty
+        container is still starved),
       - no Drain3 anomaly_summary (the rich verbatim-lines evidence),
       - no observed value on the alert (the metric value is itself groundable
         evidence — an alert that carries a value is never data-starved),
@@ -87,12 +115,14 @@ def _context_is_data_starved(
       - no prior decision for this fingerprint (DA-3 coherence anchor),
       - no high-value operator corrective feedback for this family.
 
-    Critical-severity bypass is handled by the caller (a critical alert with
-    thin context still earns the full investigation + page).
+    Critical-severity bypass + MCP-outage escalation are handled by the caller.
     """
-    # Any pillar with content → groundable, not starved.
-    if getattr(ctx, "sources_available", 0) and ctx.sources_available > 0:
+    # An MCP outage is NOT data-starvation — caller escalates it. Be defensive
+    # in case the caller order ever changes: an outage is never "starved".
+    if _context_is_mcp_outage(ctx):
         return False
+    # Any pillar with CONTENT → groundable, not starved (regardless of how many
+    # sources were reachable).
     if ctx.metrics or ctx.logs or ctx.annotated_logs or ctx.traces or ctx.deep_trace:
         return False
     if (anomaly_summary or "").strip():
@@ -743,6 +773,67 @@ class TriagePipeline:
                 "Phase 6: injecting %d high-value operator feedback row(s) for %s/%s",
                 len(corrective_feedback), alert.alertname, alert.service,
             )
+
+        # Step 5.9 (BE-B2, 2026-06-04) — MCP-outage fail-open.
+        # If EVERY reachable MCP pillar errored (sources_available == 0 with
+        # recorded errors), the platform is blind for this alert — that is an
+        # OUTAGE, not data-starvation. Suppressing a real (non-critical) alert
+        # during a transient MCP outage would silently swallow it; instead we
+        # fail OPEN: page a human (raw alert email) and record an explicit
+        # `mcp_outage_escalated` row. Critical alerts already escalate
+        # downstream, but a warning that the gate would otherwise have eaten is
+        # the dangerous case this guards. This runs BEFORE the data-starved
+        # gate so an outage can never be misread as "no evidence".
+        if _context_is_mcp_outage(ctx):
+            elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
+            pipeline_duration.observe(elapsed_ms / 1000)
+            logger.error(
+                "Alert %s/%s — all MCP pillars unreachable (%s); failing OPEN "
+                "(escalate, raw-alert email) rather than suppressing as "
+                "data-starved (%dms)",
+                alert.alertname, alert.service,
+                "; ".join(getattr(ctx, "errors", []) or []), elapsed_ms,
+            )
+            try:
+                await self.notifier.send_timeout_alert(alert)
+                emails_sent.labels(type="mcp_outage").inc()
+            except Exception as exc:
+                logger.error("MCP-outage escalation email failed for %s: %s",
+                             alert.alertname, exc)
+            record = RCARecord(
+                alert_source=source,
+                alert_name=alert.alertname,
+                alert_fingerprint=alert.fingerprint,
+                affected_service=alert.service,
+                severity=alert.severity,
+                triage_decision="mcp_outage_escalated",
+                llm_verdict="escalate",
+                rca_report=(
+                    f"All three MCP pillars (Prometheus/Loki/Jaeger) were "
+                    f"unreachable for service={alert.service} at investigation "
+                    f"time ({'; '.join(getattr(ctx, 'errors', []) or []) or 'all errored'}). "
+                    f"The platform had no telemetry to ground a root cause, so "
+                    f"this alert was ESCALATED (failed open) rather than "
+                    f"suppressed — a transient MCP outage must never silently "
+                    f"swallow a real alert. Check the MCP bridges "
+                    f"(Prometheus/Loki/Jaeger) and re-investigate once telemetry "
+                    f"is restored."
+                ),
+                llm_reasoning=None,
+                action_taken="emailed_raw",
+                investigation_duration_ms=elapsed_ms,
+                rca_quality="data_starved",
+                alert_instance=alert.instance,
+                alert_component=alert.labels.get("component"),
+                alert_signal=alert.labels.get("signal"),
+                env=env,
+            )
+            try:
+                await self.store.save_decision(record)
+            except Exception as exc:
+                logger.warning("Failed to persist mcp_outage_escalated record: %s", exc)
+            alerts_processed.labels(decision="escalate").inc()
+            return
 
         # Step 6.0 (Issue #2, 2026-06-04) — data-starved early-exit gate.
         # Runs AFTER all context-gather + anchor lookups (so the predicate sees

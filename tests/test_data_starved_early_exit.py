@@ -29,7 +29,11 @@ import pytest_asyncio
 from app.config import settings
 from app.metric_interpreter import interpret as interpret_metric
 from app.models import Decision, GatheredContext, GrafanaAlert, LLMDecision
-from app.pipeline import TriagePipeline, _context_is_data_starved
+from app.pipeline import (
+    TriagePipeline,
+    _context_is_data_starved,
+    _context_is_mcp_outage,
+)
 from app.rca_store import RCAStore
 
 
@@ -67,6 +71,33 @@ def test_predicate_true_when_everything_empty():
         ctx, _alert(), anomaly_summary="", correlated=None,
         prior_decision=None, corrective_feedback=None, metric_facts=None,
     ) is True
+
+
+def test_predicate_true_when_reachable_but_empty():
+    """BE-B2: the live shape that the OLD gate never caught — all three MCPs
+    reachable (sources_available=3, no errors) but every pillar returned an
+    empty 200. CONTENT is empty → genuinely data-starved → True."""
+    ctx = GatheredContext(sources_available=3, metrics=None, logs=None, traces=None)
+    assert _context_is_mcp_outage(ctx) is False
+    assert _context_is_data_starved(
+        ctx, _alert(), anomaly_summary="", correlated=None,
+        prior_decision=None, corrective_feedback=None, metric_facts=None,
+    ) is True
+
+
+def test_predicate_false_on_mcp_outage_all_sources_errored():
+    """BE-B2: all MCPs erroring (sources_available=0 WITH recorded errors) is
+    an OUTAGE, not data-starvation — the predicate must return False so the
+    caller escalates instead of suppressing."""
+    ctx = GatheredContext(
+        sources_available=0,
+        errors=["Prometheus: 503", "Loki: conn refused", "Jaeger: 500"],
+    )
+    assert _context_is_mcp_outage(ctx) is True
+    assert _context_is_data_starved(
+        ctx, _alert(), anomaly_summary="", correlated=None,
+        prior_decision=None, corrective_feedback=None, metric_facts=None,
+    ) is False
 
 
 def test_predicate_false_when_pillar_has_content():
@@ -148,7 +179,10 @@ def _make_pipeline(store: RCAStore):
     llm.request_tool_or_decide = AsyncMock(return_value=(None, 0))
 
     ctx_gatherer = MagicMock()
-    ctx_gatherer.gather = AsyncMock(return_value=GatheredContext(sources_available=0))
+    # BE-B2: the LIVE empty-but-reachable shape — all three MCPs answered 200
+    # with no rows (sources_available=3, no errors, empty content). The OLD
+    # gate skipped this case (sources_available>0); the corrected gate fires.
+    ctx_gatherer.gather = AsyncMock(return_value=GatheredContext(sources_available=3))
 
     drain = MagicMock()
     drain.annotate_lines = MagicMock(return_value=([], ""))
@@ -247,3 +281,29 @@ async def test_gate_disabled_falls_through_to_llm(store, monkeypatch):
     llm.investigate.assert_called()
     rows = await store.get_decisions(limit=5)
     assert all(r["triage_decision"] != "data_starved_suppressed" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_all_mcps_down_escalates_not_suppressed(store, monkeypatch):
+    """BE-B2 — when ALL three MCP pillars error (outage), a non-critical alert
+    must FAIL OPEN: escalate + raw-alert email, NEVER silently suppressed as
+    data-starved. This is the regression the inverted gate introduced."""
+    monkeypatch.setattr(settings, "data_starved_early_exit_enabled", True)
+    pipeline, llm, notifier = _make_pipeline(store)
+    # Outage shape: no source succeeded, every pillar recorded an error.
+    pipeline.context.gather = AsyncMock(return_value=GatheredContext(
+        sources_available=0,
+        errors=["Prometheus: 503", "Loki: conn refused", "Jaeger: 500"],
+    ))
+
+    await pipeline._process_alert(_alert(severity="warning"), source="grafana")
+
+    # Failed open: a human was paged via the raw-alert email, no LLM burned.
+    notifier.send_timeout_alert.assert_awaited()
+    llm.investigate.assert_not_called()
+    rows = await store.get_decisions(limit=5)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["triage_decision"] == "mcp_outage_escalated"
+    assert row["triage_decision"] != "data_starved_suppressed"
+    assert row["llm_verdict"] == "escalate"
