@@ -2314,6 +2314,35 @@ _DASH_UID_TRACING = "tracing-overview"
 _DASH_UID_OTEL    = "otel-collector-health"
 
 
+def _safe_http_url(url) -> str:
+    """FE-H2 (2026-06-04) — defense-in-depth href-scheme allowlist.
+
+    Every URL emitted into a `window.CIRES_*` link or `evidence[].link`
+    eventually renders as a raw `<a href>`. `_safe_script_json` only
+    neutralises `</script>` breakout inside the JSON blob — it does NOTHING
+    for the href scheme, so a `javascript:`/`data:`/`vbscript:` URL would
+    render as a live 1-click XSS sink. Allow ONLY http(s) (plus the sentinel
+    "#"); anything else collapses to "#". Single server-side chokepoint;
+    atoms.jsx `safeHref` is the client backstop.
+    """
+    if not isinstance(url, str):
+        return "#"
+    u = url.strip()
+    if u == "" or u == "#":
+        return "#"
+    # Reject control chars / whitespace that browsers strip to smuggle a
+    # scheme (e.g. "java\tscript:") before the scheme check.
+    if any(ord(c) < 0x20 for c in u):
+        return "#"
+    low = u.lower()
+    if low.startswith("http://") or low.startswith("https://"):
+        return u
+    # Protocol-relative ("//host/…") is acceptable (inherits page scheme).
+    if u.startswith("//"):
+        return u
+    return "#"
+
+
 def _grafana_deep_link_for_alert(alert_name: str, service: str) -> str:
     """Pick the most relevant provisioned dashboard URL for this alert.
 
@@ -2397,10 +2426,12 @@ def _build_cires_links(alert: dict) -> dict:
     """
     alert_name = (alert.get("alertName") or "")
     service = (alert.get("component") or alert.get("boldSubject") or "") or ""
+    # FE-H2: every emitted URL passes the http(s) scheme allowlist so a
+    # crafted service name / label can never produce a javascript:/data: href.
     return {
-        "grafana": _grafana_deep_link_for_alert(alert_name, service),
-        "loki":    _loki_deep_link_for_alert(service),
-        "jaeger":  _jaeger_deep_link_for_alert(service),
+        "grafana": _safe_http_url(_grafana_deep_link_for_alert(alert_name, service)),
+        "loki":    _safe_http_url(_loki_deep_link_for_alert(service)),
+        "jaeger":  _safe_http_url(_jaeger_deep_link_for_alert(service)),
     }
 
 
@@ -2543,7 +2574,10 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
             # opens its own metric) deferred to Sprint 5 (US-G-EV1)
             # so we don't block the old-account-IP fix on a bigger
             # refactor of the evidence array shape.
-            ev_link = _grafana_deep_link_for_alert(alert_name, svc)
+            # FE-H2: scheme-allowlist every evidence href (the contextual
+            # Grafana link AND any link the upstream row already carried) so a
+            # javascript:/data: URL can never reach the rendered <a href>.
+            ev_link = _safe_http_url(_grafana_deep_link_for_alert(alert_name, svc))
             for e in parsed[:5]:
                 if isinstance(e, str):
                     evidence.append({"source": "prom", "text": e, "link": ev_link})
@@ -2552,10 +2586,13 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
                     # the link is empty / placeholder ("Grafana" / "#"),
                     # overwrite with the contextual URL so the row is
                     # clickable. Preserve any real URL the upstream code
-                    # has already provided.
+                    # has already provided — but only if it survives the
+                    # http(s) allowlist.
                     existing = (e.get("link") or "").strip()
                     if (not existing) or existing in ("#", "Grafana", "Loki", "Jaeger"):
                         e = {**e, "link": ev_link}
+                    else:
+                        e = {**e, "link": _safe_http_url(existing)}
                     evidence.append(e)
     except Exception:
         pass

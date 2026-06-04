@@ -263,9 +263,9 @@ function ExpandedDetail({ a }) {
           <span>View full detail</span><Icon.chevR/>
         </a>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          <a className="btn lift" href={(a.links && a.links.grafana) || "#"} target="_blank" rel="noopener noreferrer" style={{ justifyContent: "space-between", textDecoration: "none" }}>Grafana <Icon.ext/></a>
-          <a className="btn lift" href={(a.links && a.links.loki) || "#"} target="_blank" rel="noopener noreferrer" style={{ justifyContent: "space-between", textDecoration: "none" }}>Loki <Icon.ext/></a>
-          <a className="btn lift" href={(a.links && a.links.jaeger) || "#"} target="_blank" rel="noopener noreferrer" style={{ justifyContent: "space-between", textDecoration: "none" }}>Jaeger <Icon.ext/></a>
+          <a className="btn lift" href={safeHref(a.links && a.links.grafana)} target="_blank" rel="noopener noreferrer" style={{ justifyContent: "space-between", textDecoration: "none" }}>Grafana <Icon.ext/></a>
+          <a className="btn lift" href={safeHref(a.links && a.links.loki)} target="_blank" rel="noopener noreferrer" style={{ justifyContent: "space-between", textDecoration: "none" }}>Loki <Icon.ext/></a>
+          <a className="btn lift" href={safeHref(a.links && a.links.jaeger)} target="_blank" rel="noopener noreferrer" style={{ justifyContent: "space-between", textDecoration: "none" }}>Jaeger <Icon.ext/></a>
           <a className="btn lift" href={`/dashboard/alert/${a.id}/rate`} style={{ justifyContent: "space-between", textDecoration: "none" }}>Rate alert <Icon.ext/></a>
         </div>
         {a.fireCount > 1 && <div style={{

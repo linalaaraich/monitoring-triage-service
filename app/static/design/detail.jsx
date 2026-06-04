@@ -58,9 +58,9 @@ function DetailHeader({ a }) {
           app.config.settings. Falls back to "#" if not injected so the
           design canvas still renders standalone. */}
       <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
-        <a className="btn" href={(window.CIRES_LINKS && window.CIRES_LINKS.grafana) || "#"} target="_blank" rel="noopener noreferrer">Grafana <Icon.ext/></a>
-        <a className="btn" href={(window.CIRES_LINKS && window.CIRES_LINKS.loki) || "#"} target="_blank" rel="noopener noreferrer">Loki <Icon.ext/></a>
-        <a className="btn" href={(window.CIRES_LINKS && window.CIRES_LINKS.jaeger) || "#"} target="_blank" rel="noopener noreferrer">Jaeger <Icon.ext/></a>
+        <a className="btn" href={safeHref(window.CIRES_LINKS && window.CIRES_LINKS.grafana)} target="_blank" rel="noopener noreferrer">Grafana <Icon.ext/></a>
+        <a className="btn" href={safeHref(window.CIRES_LINKS && window.CIRES_LINKS.loki)} target="_blank" rel="noopener noreferrer">Loki <Icon.ext/></a>
+        <a className="btn" href={safeHref(window.CIRES_LINKS && window.CIRES_LINKS.jaeger)} target="_blank" rel="noopener noreferrer">Jaeger <Icon.ext/></a>
       </div>
     </div>
   );
@@ -337,7 +337,7 @@ function EvidenceSection({ a }) {
                 color: meta.color, width: 80, flexShrink: 0,
               }}>{meta.name}</span>
               <span style={{ flex: 1, fontSize: 13.5, color: "var(--text)", lineHeight: 1.5 }}>{e.text}</span>
-              <a className="btn sm" href={e.link || "#"} target="_blank" rel="noopener noreferrer">View in {meta.name} <Icon.ext/></a>
+              <a className="btn sm" href={safeHref(e.link)} target="_blank" rel="noopener noreferrer">View in {meta.name} <Icon.ext/></a>
             </div>
           );
         })}

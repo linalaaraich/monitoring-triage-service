@@ -3,6 +3,23 @@
 
 const { useState, useEffect } = React;
 
+// FE-H2 (2026-06-04) — client-side href-scheme backstop. The server
+// (_build_cires_links / evidence builder) is the primary allowlist, but every
+// dynamic-URL anchor wraps its href in safeHref so a javascript:/data:/
+// vbscript: URL can never render as a live link even if a future code path
+// slips one past the server. Allow only http(s) (and protocol-relative //);
+// anything else collapses to "#".
+function safeHref(u) {
+  if (typeof u !== "string") return "#";
+  var s = u.trim();
+  if (s === "" || s === "#") return "#";
+  // reject control chars that browsers strip to smuggle a scheme (java\tscript:)
+  if (/[\x00-\x1f]/.test(s)) return "#";
+  if (/^https?:\/\//i.test(s)) return s;
+  if (/^\/\//.test(s)) return s;
+  return "#";
+}
+
 // ────────────────────────────────────────────────────────────
 // Theme — dark | light. Persists in localStorage; broadcast across artboards via storage event.
 const THEME_KEY = "obs-rca-theme";
