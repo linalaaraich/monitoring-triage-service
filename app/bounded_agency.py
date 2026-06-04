@@ -328,9 +328,39 @@ async def execute_tool(
                 return {"tool": name, "args": args, "result": r.json()}
             else:
                 return {"tool": name, "args": args, "error": f"unknown_tool:{name}"}
+    except httpx.HTTPStatusError as e:
+        # Distinguish a query fumble (4xx — the LLM's args were invalid) from
+        # a source outage (5xx) so the retry prompt tells the model to FIX its
+        # query rather than abandon the source (misc.md issue 6 / task #3).
+        status = e.response.status_code
+        detail = ""
+        try:
+            detail = (e.response.text or "")[:300]
+        except Exception:
+            detail = ""
+        if 400 <= status < 500:
+            logger.warning("Tool %s query rejected (HTTP %s): %s", name, status, detail)
+            return {
+                "tool": name, "args": args,
+                "error_kind": "query_rejected",
+                "upstream_status": status,
+                "error": f"query_rejected (HTTP {status}): {detail}",
+            }
+        logger.warning("Tool %s upstream error (HTTP %s): %s", name, status, e)
+        return {
+            "tool": name, "args": args,
+            "error_kind": "source_unavailable",
+            "upstream_status": status,
+            "error": f"source_unavailable (HTTP {status}): {e}",
+        }
     except httpx.HTTPError as e:
+        # Connection / timeout — the source is unreachable, not a bad query.
         logger.warning("Tool %s HTTP error: %s", name, e)
-        return {"tool": name, "args": args, "error": f"mcp_http_error:{e}"}
+        return {
+            "tool": name, "args": args,
+            "error_kind": "source_unavailable",
+            "error": f"source_unavailable: {e}",
+        }
     except Exception as e:
         logger.warning("Tool %s execution failed: %s", name, e)
         return {"tool": name, "args": args, "error": str(e)}
@@ -342,11 +372,22 @@ def tool_result_to_prompt_block(result: dict[str, Any]) -> str:
     args = result.get("args", {})
     args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
     if "error" in result:
+        kind = result.get("error_kind")
+        if kind == "query_rejected":
+            return (
+                f"## Additional MCP query you requested: {tool}({args_str})\n"
+                f"QUERY REJECTED: {result['error']}\n"
+                "The source is reachable but your query was invalid (bad "
+                "syntax or parameters). Do NOT conclude the source is down or "
+                "that data is missing — your query was the problem. Reason "
+                "from the original evidence; do not invent a source-outage "
+                "root cause."
+            )
         return (
             f"## Additional MCP query you requested: {tool}({args_str})\n"
             f"ERROR: {result['error']}\n"
-            "Factor this into your decision — the tool failed, so treat the "
-            "original evidence as your only source."
+            "Factor this into your decision — the source was unavailable, so "
+            "treat the original evidence as your only source."
         )
     body = result.get("result")
     body_str = json.dumps(body, indent=2, default=str) if body is not None else "(empty result)"

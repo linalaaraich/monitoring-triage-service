@@ -13,6 +13,37 @@ from app.models import GatheredContext, GrafanaAlert
 logger = logging.getLogger(__name__)
 
 
+class MCPQueryRejected(Exception):
+    """Raised when an MCP tool call returns a 4xx — i.e. the LLM/pipeline
+    issued a malformed or invalid query (bad PromQL/LogQL, unknown param),
+    NOT a source outage. Carries the upstream status + a truncated detail so
+    the prompt can tell the model "your query was rejected" rather than the
+    misleading "source unavailable" (a 4xx and a 5xx previously surfaced
+    identically — misc.md issue 6 / task #3).
+    """
+
+    def __init__(self, server: str, status: int, detail: str = ""):
+        self.server = server
+        self.status = status
+        self.detail = (detail or "")[:300]
+        super().__init__(f"{server} query rejected (HTTP {status}): {self.detail}")
+
+
+def _mcp_error_label(source: str, exc: BaseException) -> str:
+    """Build the context-error line for a failed pillar fetch, distinguishing
+    a query rejection (4xx — the query was bad) from a source outage
+    (5xx / connection — the source is down). The triage prompt renders these
+    so the LLM can tell "fix your query" from "this source has no data."
+    """
+    if isinstance(exc, MCPQueryRejected):
+        return (
+            f"[{source}] query rejected (HTTP {exc.status}): {exc.detail} "
+            f"— the source is reachable but the query was invalid; "
+            f"do not conclude {source} is down."
+        )
+    return f"[{source}] unavailable: {exc}"
+
+
 def _parse_alert_time(alert_time: str) -> float | None:
     """Parse an ISO 8601 alert startsAt string to epoch seconds (float).
 
@@ -174,21 +205,21 @@ class ContextGatherer:
         errors = []
 
         if isinstance(results[0], Exception):
-            errors.append(f"[Prometheus] unavailable: {results[0]}")
+            errors.append(_mcp_error_label("Prometheus", results[0]))
             ctx.prometheus_ms = settings.context_timeout * 1000
         else:
             ctx.metrics, ctx.prometheus_ms = results[0]
             ctx.sources_available += 1
 
         if isinstance(results[1], Exception):
-            errors.append(f"[Loki] unavailable: {results[1]}")
+            errors.append(_mcp_error_label("Loki", results[1]))
             ctx.loki_ms = settings.context_timeout * 1000
         else:
             ctx.logs, ctx.loki_ms, ctx.loki_is_fallback = results[1]
             ctx.sources_available += 1
 
         if isinstance(results[2], Exception):
-            errors.append(f"[Jaeger] unavailable: {results[2]}")
+            errors.append(_mcp_error_label("Jaeger", results[2]))
             ctx.jaeger_ms = settings.context_timeout * 1000
         else:
             ctx.traces, ctx.jaeger_ms = results[2]
@@ -435,7 +466,16 @@ class ContextGatherer:
         )
 
     async def _mcp_call(self, server: str, url: str, params: dict) -> tuple:
-        """Execute an MCP server HTTP call with metrics instrumentation."""
+        """Execute an MCP server HTTP call with metrics instrumentation.
+
+        Error semantics (misc.md issue 6 / task #3): a 4xx means the query
+        the LLM/pipeline issued was rejected (bad PromQL/LogQL, invalid
+        param) — the source is healthy, the query is the problem. We raise
+        the distinct `MCPQueryRejected` so the gather block can label the
+        prompt section "query rejected by <source>" instead of the misleading
+        "source unavailable". 5xx / connection errors keep the
+        source-unavailable semantics (a generic exception).
+        """
         start = time.monotonic()
         try:
             resp = await self._client.get(url, params=params)
@@ -445,6 +485,22 @@ class ContextGatherer:
             triage_mcp_requests_total.labels(server=server, status="success").inc()
             triage_mcp_duration_seconds.labels(server=server).observe(elapsed)
             return resp.json(), ms
+        except httpx.HTTPStatusError as exc:
+            elapsed = time.monotonic() - start
+            triage_mcp_duration_seconds.labels(server=server).observe(elapsed)
+            status = exc.response.status_code
+            if 400 <= status < 500:
+                # Query fumble, not an outage — distinct metric + exception.
+                triage_mcp_requests_total.labels(server=server, status="query_rejected").inc()
+                detail = ""
+                try:
+                    detail = exc.response.text
+                except Exception:
+                    detail = ""
+                raise MCPQueryRejected(server, status, detail) from exc
+            # 5xx — the source itself failed.
+            triage_mcp_requests_total.labels(server=server, status="error").inc()
+            raise exc
         except Exception as exc:
             elapsed = time.monotonic() - start
             triage_mcp_requests_total.labels(server=server, status="error").inc()
