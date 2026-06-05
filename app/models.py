@@ -85,6 +85,10 @@ class Drain3Webhook(BaseModel):
     new_templates: list[str] = Field(default_factory=list)
     service: str = "unknown"
     timestamp: str = ""
+    # S5-DRN-01 — which hierarchical tier raised this and over what scope.
+    # Defaults preserve every existing caller (single system-wide fire).
+    tier: str = "system"          # component | application | system
+    scope: str = "all"            # service name | app name | "all"
 
 
 # --- LLM decision ---

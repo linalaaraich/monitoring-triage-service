@@ -143,6 +143,32 @@ class Settings(BaseSettings):
     drain3_alert_min_lines: int = 100              # minimum sample size per window
     drain3_alert_cooldown_seconds: int = 600       # 10 min between alerts
     drain3_self_webhook_url: str = "http://localhost:8090/webhook/drain3"
+
+    # S5-DRN-01 (2026-06-04) — 3-TIER HIERARCHICAL anomaly thresholds.
+    # A single global per-batch rate (drain3_alert_rate_threshold above, now the
+    # SYSTEM tier) misses two real failure shapes: (1) ONE service very weird but
+    # globally diluted (40% of cart's lines anomalous, but cart is 10 of 1000
+    # batch lines → 1% global → no fire); (2) a whole application quietly weird
+    # across its components, none individually crossing the bar. So we evaluate
+    # three tiers INDEPENDENTLY each batch, each with its own scope-keyed cooldown:
+    #   - COMPONENT: per-service rate (catches one weird service)
+    #   - APPLICATION: per-app rate, aggregating a namespace's component services
+    #   - SYSTEM: the global rate (unchanged — preserves prior behavior)
+    # Hierarchy: broader scope ⇒ LOWER bar (0.25 > 0.15 > 0.10), because broad
+    # elevation is much harder to reach by noise than a single-service spike.
+    drain3_component_rate_threshold: float = 0.25   # one service this weird → fire
+    drain3_component_min_lines: int = 30
+    drain3_app_rate_threshold: float = 0.15         # a whole app's components elevated
+    drain3_app_min_lines: int = 60
+    # System tier reuses drain3_alert_rate_threshold / drain3_alert_min_lines.
+    # Optional explicit service→application overrides; when absent, the app is
+    # derived from the log stream's k8s namespace label, else the service itself
+    # (so an ungrouped service is its own single-component app — harmless).
+    drain3_app_map: dict[str, str] = {}
+    # Cap fires per tier per batch so an incident can't spawn an alert storm;
+    # highest-rate scopes fire first and the suppressed count is logged (never
+    # silently dropped).
+    drain3_max_alerts_per_tier_per_batch: int = 3
     # Issue #1 (2026-06-04) — drain3 noise-suppression gate. A drain3 self-fire
     # that carries NO new templates AND an anomaly_rate below this floor is a
     # data-starved "cannot determine" self-fire (rare/under-threshold clusters,

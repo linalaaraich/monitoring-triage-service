@@ -263,7 +263,9 @@ async def webhook_grafana(payload: GrafanaWebhook, background_tasks: BackgroundT
 async def webhook_drain3(payload: Drain3Webhook, background_tasks: BackgroundTasks):
     webhooks_received.labels(source="drain3").inc()
     logger.info(
-        "Received Drain3 webhook: anomalous_lines=%d anomaly_rate=%.4f",
+        "Received Drain3 webhook: tier=%s scope=%s anomalous_lines=%d anomaly_rate=%.4f",
+        payload.tier,
+        payload.scope,
         len(payload.anomalous_lines),
         payload.anomaly_rate,
     )

@@ -205,7 +205,27 @@ class TriagePipeline:
         # Capped to fit the prompt budget but rich enough to ground the RCA.
         templates = (webhook.new_templates or [])[:10]
         sample_lines = (webhook.anomalous_lines or [])[:8]
-        evidence_parts = [f"Anomaly rate: {webhook.anomaly_rate:.2%} ({len(webhook.anomalous_lines)} lines flagged in batch)."]
+        # S5-DRN-01 — tier-aware lede so the LLM reasons about blast radius.
+        tier = getattr(webhook, "tier", "system")
+        scope = getattr(webhook, "scope", "all")
+        if tier == "component":
+            tier_lede = (
+                f"COMPONENT-tier log anomaly in service '{scope}': this single "
+                f"service's novel/rare-template rate crossed the per-service bar."
+            )
+        elif tier == "application":
+            tier_lede = (
+                f"APPLICATION-tier log anomaly across the components of '{scope}': "
+                f"the application's aggregate anomaly rate is elevated even though "
+                f"no single component necessarily crossed the component bar — a "
+                f"whole-app drift, not one bad service."
+            )
+        else:
+            tier_lede = (
+                "SYSTEM-tier log anomaly: the novel-template rate is elevated "
+                "across the platform as a whole (many services at once)."
+            )
+        evidence_parts = [tier_lede, f"Anomaly rate: {webhook.anomaly_rate:.2%} ({len(webhook.anomalous_lines)} lines flagged in batch)."]
         if templates:
             evidence_parts.append("New log templates seen for the first time:")
             for t in templates:
@@ -218,16 +238,21 @@ class TriagePipeline:
                 evidence_parts.append(f"  • {line[:240]}")
         rich_description = "\n".join(evidence_parts)
 
+        # System-tier stays warning; an application-tier fire (whole-app drift)
+        # is a wider blast radius, so bump it to high severity.
+        _severity = "high" if tier == "application" else "warning"
+        _tier_label = {"component": "Component", "application": "Application", "system": "System"}.get(tier, "System")
         alert = GrafanaAlert(
             status="firing",
             labels={
                 "alertname": "Drain3AnomalyDetected",
                 "service": webhook.service,
-                "severity": "warning",
+                "severity": _severity,
                 "signal": "log",
+                "tier": tier,
             },
             annotations={
-                "summary": f"Drain3 detected {len(webhook.anomalous_lines)} anomalous log lines (rate {webhook.anomaly_rate:.2%})",
+                "summary": f"Drain3 {_tier_label}-tier anomaly ({scope}): {len(webhook.anomalous_lines)} anomalous log lines (rate {webhook.anomaly_rate:.2%})",
                 "description": rich_description,
             },
             startsAt=webhook.timestamp or datetime.now(UTC).replace(tzinfo=None).isoformat(),

@@ -56,6 +56,47 @@ class AnalyzeResult:
     excluded: bool = False
 
 
+@dataclass
+class ScopeCounts:
+    """Per-scope (one service, or one application) tally for a single batch."""
+    lines: int = 0
+    anomalous: int = 0
+    new_templates: list[str] = field(default_factory=list)
+    sample_lines: list[str] = field(default_factory=list)
+
+    @property
+    def rate(self) -> float:
+        return self.anomalous / self.lines if self.lines else 0.0
+
+
+@dataclass
+class BatchResult:
+    """S5-DRN-01 — structured result of ingesting one batch, preserving the
+    per-component and per-application breakdown the 3 tiers need."""
+    total_lines: int = 0
+    total_anomalous: int = 0
+    per_service: dict[str, ScopeCounts] = field(default_factory=dict)
+    per_app: dict[str, ScopeCounts] = field(default_factory=dict)
+    # Which component services rolled up into each app (for double-fire guard).
+    app_components: dict[str, set] = field(default_factory=dict)
+
+    @property
+    def total_rate(self) -> float:
+        return self.total_anomalous / self.total_lines if self.total_lines else 0.0
+
+    def all_anomalous_lines(self) -> list[str]:
+        out: list[str] = []
+        for sc in self.per_service.values():
+            out.extend(sc.sample_lines)
+        return out
+
+    def all_new_templates(self) -> list[str]:
+        out: list[str] = []
+        for sc in self.per_service.values():
+            out.extend(sc.new_templates)
+        return out
+
+
 # Regex matchers for extracting service from a stream's label dict.
 # Loki ships with `service_name`, but some pipelines use other labels.
 _SERVICE_LABEL_KEYS = ("service_name", "service", "k8s_app", "app_kubernetes_io_name", "app")
@@ -75,6 +116,34 @@ def _service_from_stream_labels(labels: dict[str, Any]) -> str:
             if sanitized:
                 return sanitized
     return "_unknown"
+
+
+# Stream labels that name the application/namespace a component belongs to.
+_NAMESPACE_LABEL_KEYS = (
+    "k8s_namespace_name", "namespace", "k8s.namespace.name", "exported_namespace",
+)
+
+
+def _app_from_stream_labels(labels: dict[str, Any], service: str) -> str:
+    """S5-DRN-01 — resolve the APPLICATION a component (service) belongs to,
+    for the application-tier threshold. Priority:
+      1. an explicit settings.drain3_app_map[service] override,
+      2. the stream's k8s namespace label (so all services in one namespace —
+         e.g. the otel-demo astronomy shop — aggregate into one app),
+      3. the service name itself (an ungrouped service is its own single-
+         component app, so the app tier harmlessly mirrors the component tier).
+    """
+    mapped = (settings.drain3_app_map or {}).get(service)
+    if mapped:
+        return re.sub(r"[^A-Za-z0-9_-]+", "_", str(mapped))[:64] or service
+    if isinstance(labels, dict):
+        for key in _NAMESPACE_LABEL_KEYS:
+            v = labels.get(key)
+            if v:
+                sanitized = re.sub(r"[^A-Za-z0-9_-]+", "_", str(v))[:64]
+                if sanitized:
+                    return sanitized
+    return service
 
 
 def is_excluded_service(service: str) -> bool:
@@ -152,6 +221,9 @@ class DrainAnalyzer:
         # P1.7 — self-alerting state. After each ingest batch we compare
         # the current batch's anomaly rate against the threshold.
         self._last_alert_ts: float = 0.0
+        # S5-DRN-01 — per-(tier, scope) cooldown timestamps so a component alert
+        # for "cart" never blocks a system alert (or an app alert for its app).
+        self._tier_alert_ts: dict[tuple[str, str], float] = {}
         self._background_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
@@ -407,24 +479,21 @@ class DrainAnalyzer:
                     )
                     if resp.status_code == 200:
                         data = resp.json()
-                        # Group lines by service so each batch is per-service
-                        streams_with_lines: list[tuple[str, list[str]]] = []
-                        total_lines = 0
+                        # Group lines by (service, application) so each batch
+                        # carries the component + app breakdown the 3 tiers need.
+                        streams_with_app: list[tuple[str, str, list[str]]] = []
                         for stream in data.get("data", {}).get("result", []):
-                            svc = _service_from_stream_labels(stream.get("stream", {}))
+                            labels = stream.get("stream", {})
+                            svc = _service_from_stream_labels(labels)
+                            app = _app_from_stream_labels(labels, svc)
                             lines = [line for _ts, line in stream.get("values", [])]
                             if lines:
-                                streams_with_lines.append((svc, lines))
-                                total_lines += len(lines)
-                        if streams_with_lines:
-                            anomalous, new_templates = await asyncio.to_thread(
-                                self._ingest_batch_sync_streams, streams_with_lines
+                                streams_with_app.append((svc, app, lines))
+                        if streams_with_app:
+                            batch = await asyncio.to_thread(
+                                self._ingest_batch_structured, streams_with_app
                             )
-                            await self.maybe_fire_alert(
-                                batch_total=total_lines,
-                                anomalous=anomalous,
-                                new_templates=new_templates,
-                            )
+                            await self.maybe_fire_alerts(batch)
                     else:
                         logger.debug("Drain3 Loki poll returned %d", resp.status_code)
             except asyncio.CancelledError:
@@ -432,36 +501,60 @@ class DrainAnalyzer:
             except Exception as e:
                 logger.debug("Drain3 background ingestion error: %s", e)
 
-    def _ingest_batch_sync_streams(
-        self, streams: list[tuple[str, list[str]]]
-    ) -> tuple[list[str], list[str]]:
-        """Per-service version of the batch ingest. Aggregates anomalous
-        lines + new templates across all services in this batch."""
-        anomalous_lines: list[str] = []
-        new_templates_seen: dict[int, str] = {}
+    def _ingest_batch_structured(
+        self, streams: list[tuple[str, str, list[str]]]
+    ) -> BatchResult:
+        """S5-DRN-01 — ingest a batch of (service, application, lines) and return
+        a BatchResult with the per-component AND per-application breakdown the
+        three tiers need. BE-B3 exclusion is applied per stream."""
+        batch = BatchResult()
+        seen_templates: set = set()   # (svc, cluster_id) dedup across the batch
         skipped = 0
-        for svc, lines in streams:
+        for svc, app, lines in streams:
             # BE-B3 — observability/infra streams never enter the miner.
             if is_excluded_service(svc):
                 skipped += len(lines)
                 continue
+            svc_c = batch.per_service.setdefault(svc, ScopeCounts())
+            app_c = batch.per_app.setdefault(app, ScopeCounts())
+            batch.app_components.setdefault(app, set()).add(svc)
             for line in lines:
+                batch.total_lines += 1
+                svc_c.lines += 1
+                app_c.lines += 1
                 try:
                     result = self.analyze(line, service=svc)
                     if result.is_new_pattern or result.match_count < settings.drain3_anomaly_threshold:
-                        anomalous_lines.append(line)
+                        batch.total_anomalous += 1
+                        svc_c.anomalous += 1
+                        app_c.anomalous += 1
+                        if len(svc_c.sample_lines) < 50:
+                            svc_c.sample_lines.append(line)
+                        if len(app_c.sample_lines) < 50:
+                            app_c.sample_lines.append(line)
                     if result.is_new_pattern and result.cluster_id is not None:
-                        # Use (service, cluster_id) as the dedup key so two
-                        # different services with the same internal cluster_id
-                        # both get captured.
-                        new_templates_seen.setdefault(
-                            hash((svc, result.cluster_id)), result.template
-                        )
+                        key = (svc, result.cluster_id)
+                        if key not in seen_templates:
+                            seen_templates.add(key)
+                            svc_c.new_templates.append(result.template)
+                            app_c.new_templates.append(result.template)
                 except Exception as e:
                     logger.debug("Drain3 analyze failed for one line (non-fatal): %s", e)
         if skipped:
             logger.debug("Drain3 BE-B3 ingest: skipped %d excluded infra line(s)", skipped)
-        return anomalous_lines, list(new_templates_seen.values())
+        return batch
+
+    def _ingest_batch_sync_streams(
+        self, streams: list[tuple[str, list[str]]]
+    ) -> tuple[list[str], list[str]]:
+        """Back-compat tuple adapter (per-service shape, no app labels). Resolves
+        each service's app via the app_map/service fallback, runs the structured
+        ingest, and flattens to the legacy (anomalous_lines, new_templates)."""
+        with_app = [
+            (svc, _app_from_stream_labels({}, svc), lines) for svc, lines in streams
+        ]
+        batch = self._ingest_batch_structured(with_app)
+        return batch.all_anomalous_lines(), batch.all_new_templates()
 
     # Backwards-compat shim for any callers still using the flat-list shape.
     def _ingest_batch_sync(self, lines: list[str]) -> tuple[list[str], list[str]]:
@@ -470,7 +563,105 @@ class DrainAnalyzer:
         return self._ingest_batch_sync_streams([("_unknown", lines)])
 
     # ------------------------------------------------------------------
-    # Self-alerting (unchanged from V1)
+    # Self-alerting — S5-DRN-01 3-tier (component / application / system)
+    # ------------------------------------------------------------------
+
+    async def maybe_fire_alerts(self, batch: BatchResult) -> None:
+        """Evaluate all three tiers INDEPENDENTLY for this batch. Each tier fires
+        its own scopes (system="all", application=app name, component=service),
+        each gated by a per-(tier, scope) cooldown, and capped per tier per batch
+        to prevent an incident from spawning an alert storm."""
+        if not settings.drain3_alert_enabled:
+            return
+
+        # (tier, threshold, min_lines, scope->counts dict)
+        tiers = [
+            ("system", settings.drain3_alert_rate_threshold,
+             settings.drain3_alert_min_lines,
+             {"all": ScopeCounts(
+                 lines=batch.total_lines, anomalous=batch.total_anomalous,
+                 new_templates=batch.all_new_templates()[:20],
+                 sample_lines=batch.all_anomalous_lines()[:50])}),
+            ("application", settings.drain3_app_rate_threshold,
+             settings.drain3_app_min_lines, batch.per_app),
+            ("component", settings.drain3_component_rate_threshold,
+             settings.drain3_component_min_lines, batch.per_service),
+        ]
+
+        for tier, threshold, min_lines, scopes in tiers:
+            # Candidate scopes that cross this tier's bar.
+            candidates = [
+                (scope, c) for scope, c in scopes.items()
+                if c.lines >= min_lines and c.rate >= threshold
+            ]
+            if tier == "application":
+                # Skip an app whose only component already qualifies at the
+                # component tier AND the app name == that single service — that
+                # would be a pure duplicate. Multi-component apps still fire.
+                candidates = [
+                    (scope, c) for scope, c in candidates
+                    if not (len(batch.app_components.get(scope, set())) <= 1
+                            and scope in batch.per_service)
+                ]
+            # Highest-rate scopes first, then apply the per-tier cap.
+            candidates.sort(key=lambda sc: sc[1].rate, reverse=True)
+            cap = settings.drain3_max_alerts_per_tier_per_batch
+            if len(candidates) > cap:
+                logger.warning(
+                    "Drain3 %s tier: %d scopes crossed threshold; capping to %d "
+                    "(suppressed %d this batch)",
+                    tier, len(candidates), cap, len(candidates) - cap,
+                )
+                candidates = candidates[:cap]
+            for scope, counts in candidates:
+                await self._fire_one(tier, scope, counts)
+
+    async def _fire_one(self, tier: str, scope: str, counts: "ScopeCounts") -> None:
+        """Fire a single drain3 self-alert for (tier, scope), respecting the
+        per-(tier, scope) cooldown."""
+        import time as _time
+        now = _time.monotonic()
+        cooldown = settings.drain3_alert_cooldown_seconds
+        last = self._tier_alert_ts.get((tier, scope), 0.0)
+        if last and (now - last) < cooldown:
+            logger.info(
+                "Drain3 %s/%s rate %.2f crossed threshold but within cooldown "
+                "(%.0fs remaining)", tier, scope, counts.rate, cooldown - (now - last),
+            )
+            return
+        from datetime import datetime, timezone
+        payload = {
+            "anomalous_lines": counts.sample_lines[:50],
+            "anomaly_rate": round(counts.rate, 4),
+            "new_templates": counts.new_templates[:20],
+            # `service` carries the scope so the dashboard/dedup key it sensibly:
+            # the component name, the app name, or "drain3" for system-wide.
+            "service": scope if tier != "system" else "drain3",
+            "tier": tier,
+            "scope": scope,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(settings.drain3_self_webhook_url, json=payload)
+                if resp.status_code in (200, 202):
+                    self._tier_alert_ts[(tier, scope)] = now
+                    logger.warning(
+                        "Drain3 %s-tier self-alert fired: scope=%s rate=%.2f "
+                        "(%d/%d lines), webhook=%d",
+                        tier, scope, counts.rate, counts.anomalous, counts.lines,
+                        resp.status_code,
+                    )
+                else:
+                    logger.warning(
+                        "Drain3 %s/%s self-alert webhook returned %d — %s",
+                        tier, scope, resp.status_code, resp.text[:100],
+                    )
+        except (httpx.HTTPError, OSError) as e:
+            logger.warning("Drain3 %s/%s self-alert webhook failed: %s", tier, scope, e)
+
+    # ------------------------------------------------------------------
+    # Self-alerting — legacy single-tier (kept for back-compat / direct callers)
     # ------------------------------------------------------------------
 
     async def maybe_fire_alert(

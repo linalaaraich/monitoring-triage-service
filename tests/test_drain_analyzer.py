@@ -37,6 +37,7 @@ def drain():
     analyzer._background_task = None
     analyzer._lock = threading.Lock()
     analyzer._last_alert_ts = 0.0
+    analyzer._tier_alert_ts = {}
     return analyzer
 
 
