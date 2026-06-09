@@ -719,9 +719,19 @@ class LLMClient:
                 "     (c) No concrete correlation AND not recurring (<3 fires in 7d): DISMISS with "
                 "reason='shelved pending recurrence — anomaly #N in 7d window, no correlation found'. "
                 "Confidence 0.5-0.65. suggested_actions=[] (the pipeline will fill the shelve template).\n"
+                "     (d) The templates are CLEARLY ROUTINE / BENIGN infrastructure chatter — e.g. "
+                "storage-engine compaction ('badger … LOG Compact'), periodic healthchecks, "
+                "INFO-level lifecycle/startup lines, log-rotation, or empty/blank lines. These are "
+                "novel-to-the-miner but operationally meaningless. DISMISS and NAME it: human_cause = "
+                "'Benign infrastructure log noise — <what the lines are> (routine, not an incident).' "
+                "Confidence 0.6-0.75. NEVER write 'insufficient data' / 'cannot determine' for this case "
+                "— you CAN determine it: it's benign noise. Say so plainly.\n"
                 "DO NOT emit a generic 'kubectl rollout restart' as your only suggestion when you have "
                 "no concrete cause — that's not a fix, that's a guess. Either justify the action with a "
                 "correlation, or shelve it.\n"
+                "REMEMBER: a Drain3 alert ALWAYS has its evidence (the anomaly_summary templates). "
+                "'Insufficient data' is NEVER the right answer here — at minimum classify the templates "
+                "as benign (d) or shelve as un-correlated (c). Name what you see.\n"
             )
 
         # Exemplar injection — pick the best-matching canonical RCA from

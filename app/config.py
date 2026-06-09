@@ -215,6 +215,23 @@ class Settings(BaseSettings):
         "kube-system",
         "observability",
         "monitoring",
+        # 2026-06-09 (alert-quality audit, RC-1) — host/infra streams that were
+        # the DOMINANT drain3 noise source: Jaeger's embedded BadgerDB
+        # compaction INFO + the OTel collector's batch-processor self-noise all
+        # ship under `monitoring-vm` (the obs-backend host) / `jaeger`, neither
+        # of which the bare `monitoring`/`observability` buckets matched. The
+        # monitored apps run on k3s, never on these hosts, so excluding the
+        # whole stream is safe. Also the GPU-host infra streams flagged in the
+        # 2026-06-04 handoff ("not blocking" then — now the #1 alert source).
+        "monitoring-vm",
+        "jaeger",
+        "ollama",
+        "coredns",
+        "host-syslog",
+        "syslog",
+        "gpu-stack",
+        "drain3",
+        "dcgm-exporter",
     ]
 
     # Issue #2 (2026-06-04) — data-starved early-exit gate. When context-gather

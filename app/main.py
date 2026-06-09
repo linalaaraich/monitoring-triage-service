@@ -4549,6 +4549,20 @@ async def dashboard_v2_alert(short_id: str):
         drain3_stats=drain3_stats,
         now_utc=now_utc,
     )
+    # RC-4 (2026-06-09) — recurrence count from the incident entity, which
+    # also counts dedup-suppressed re-fires (those no longer write a feed row).
+    # The fingerprint_history above only sees FULL investigate rows, so prefer
+    # the incident's fire_count when it's higher. This is the "see its history"
+    # number Lina asked for, shown ON the original alert (no see-prior stub).
+    if fp:
+        try:
+            incident = await _store.get_incident_by_fingerprint(fp)
+            if incident and (incident.get("fire_count") or 0) > (alert.get("fireCount") or 1):
+                alert["fireCount"] = incident["fire_count"]
+                if (alert["fireCount"] or 1) >= 3:
+                    alert["indicator"] = "recurring"
+        except Exception:
+            pass
     # Transform related — the design's RelatedSidebar reads `a.related` and
     # accesses {id, title, time, verdict} on each entry. Shape them
     # explicitly so we don't depend on the full CIRES_ALERT object.

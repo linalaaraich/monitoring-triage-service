@@ -140,6 +140,7 @@ def _classify_rca_quality(
     reasoning: str | None,
     suggested_actions: str | None = None,
     evidence: str | None = None,
+    human_cause: str | None = None,
 ) -> str:
     """Tag a decision as 'actionable', 'data_starved', or 'needs_review'.
 
@@ -171,7 +172,16 @@ def _classify_rca_quality(
                 )
         except (ValueError, TypeError):
             pass
-    combined = " ".join(filter(None, [rca_text_for_scan, reasoning or ""])).lower()
+    # 2026-06-09 (alert-quality audit, RC-3): scan `human_cause` too. The
+    # human-first reason refactor moved the hedge into `human_cause`
+    # ("Insufficient data to determine root cause…") while `rca` said
+    # "insufficient evidence" — and this classifier was called WITHOUT
+    # human_cause (pipeline.py), so 62/108 live hedges were mis-tagged
+    # `actionable`, escaping the data-starved retry + quarantine and showing
+    # on the dashboard as good RCAs. Include it in the scan.
+    combined = " ".join(
+        filter(None, [rca_text_for_scan, reasoning or "", human_cause or ""])
+    ).lower()
     if not combined.strip():
         return "data_starved"
 
@@ -183,17 +193,15 @@ def _classify_rca_quality(
     if _is_empty_json_list(suggested_actions) and _is_empty_json_list(evidence):
         return "needs_review"
 
-    # Rule 2: hedge phrases anywhere in the narrative.
-    hedge_patterns = [
-        r"\binsufficient (?:data|information|context)\b",
-        r"\bno (?:recent |available )?(?:metrics|logs|traces|data)\b",
-        r"\b(?:cannot|unable to) (?:determine|identify|conclude)\b",
-        r"\bnot enough (?:data|information|context)\b",
-        r"\black(?:s|ing)? (?:sufficient |enough )?(?:data|context|information)\b",
-        r"\bempty (?:metrics|logs|traces|context)\b",
-    ]
-    for pat in hedge_patterns:
-        if re.search(pat, combined):
+    # Rule 2: hedge phrases anywhere in the narrative. 2026-06-09 (RC-3) —
+    # reuse the validator's authoritative banned-phrase set as the SINGLE
+    # source of truth so the classifier and validator can never drift again
+    # (the classifier's old local list omitted "evidence" / "could not
+    # determine" / "additional investigation needed", which the validator
+    # already caught). Lazy import avoids an import cycle at module load.
+    from app.response_validator import _BANNED_PHRASE_PATTERNS
+    for pat in _BANNED_PHRASE_PATTERNS:
+        if pat.search(combined):
             return "data_starved"
     return "actionable"
 
@@ -433,6 +441,61 @@ class RCAStore:
         )
         row = await cursor.fetchone()
         return row["id"] if row else new_id
+
+    async def record_recurrence(
+        self,
+        fingerprint: str,
+        at_iso: str,
+        verdict: str | None = None,
+        severity: str | None = None,
+        alert_name: str | None = None,
+        affected_service: str | None = None,
+    ) -> dict | None:
+        """RC-4 (2026-06-09 alert-quality audit) — register a DUPLICATE fire as a
+        recurrence of the EXISTING incident, WITHOUT minting a separate "see
+        prior RCA" feed row. Bumps the incident's fire_count + last_seen and
+        returns the live {id, fire_count, first_seen, last_seen} so the caller
+        can log it and the detail page can render "fired N times" history on the
+        original alert. Returns None when there is no fingerprint to key on.
+
+        Replaces the old behaviour where every dup wrote a standalone
+        `suppressed_duplicate` row saying "Duplicate fire … See prior RCA <id>"
+        — clutter Lina asked to scrap. The recurrence now lives ON the alert
+        (incident entity), with its history visible, exactly as requested.
+        """
+        if not fingerprint:
+            return None
+        await self._upsert_incident(
+            fingerprint=fingerprint,
+            at_iso=at_iso,
+            verdict=verdict,
+            severity=severity,
+            alert_name=alert_name,
+            affected_service=affected_service,
+        )
+        await self._db.commit()
+        cursor = await self._db.execute(
+            "SELECT id, fire_count, first_seen, last_seen FROM incidents "
+            "WHERE fingerprint = ?",
+            (fingerprint,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_incident_by_fingerprint(self, fingerprint: str) -> dict | None:
+        """Fetch the incident entity for a fingerprint (fire_count + bounds),
+        or None. Used by the detail page to render recurrence history on the
+        original alert instead of a separate 'see prior' row (RC-4)."""
+        if not fingerprint:
+            return None
+        cursor = await self._db.execute(
+            "SELECT id, fingerprint, first_seen, last_seen, fire_count, "
+            "current_verdict, current_severity, alert_name, affected_service "
+            "FROM incidents WHERE fingerprint = ?",
+            (fingerprint,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
     async def get_decisions(
         self,

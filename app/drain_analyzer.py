@@ -25,6 +25,7 @@ Threading:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -187,6 +188,41 @@ def is_excluded_service(service: str) -> bool:
     return any(c in denylist for c in candidates)
 
 
+def is_empty_log_body(log_line: str) -> bool:
+    """True when a log line carries no minable content and must NOT seed a
+    template. Two shapes seen live (2026-06-09 alert-quality audit):
+
+      1. Raw blank lines — `""` / `"\n"` / pure whitespace.
+      2. OTel/JSON-wrapped records whose `body` is empty/whitespace, e.g.
+         `{"body":"\n","attributes":{...}}`. The surrounding JSON is non-empty
+         so a naive `.strip()` misses it; drain3 was mining the *envelope* and
+         minting a fresh "novel template" on every batch (the attributes carry
+         rotating file names / instance ids).
+
+    Conservative: only fires when the body is provably empty. A JSON object
+    WITH a non-empty body, or any non-JSON line with visible text, returns
+    False and is mined as before — no reshuffling of existing templates.
+    """
+    if log_line is None:
+        return True
+    stripped = log_line.strip()
+    if not stripped:
+        return True
+    # JSON-wrapped record: inspect the `body` field only.
+    if stripped[0] == "{" and '"body"' in stripped:
+        try:
+            obj = json.loads(stripped)
+        except (ValueError, TypeError):
+            return False
+        if isinstance(obj, dict) and "body" in obj:
+            body = obj.get("body")
+            if body is None:
+                return True
+            if isinstance(body, str) and not body.strip():
+                return True
+    return False
+
+
 class DrainAnalyzer:
     """Per-service Drain3 template miners with shared lock + file persistence."""
 
@@ -262,6 +298,19 @@ class DrainAnalyzer:
         callers can tally skipped lines.
         """
         if is_excluded_service(service):
+            return AnalyzeResult(
+                cluster_id=None,
+                template="",
+                is_new_pattern=False,
+                match_count=0,
+                service=service,
+                excluded=True,
+            )
+        # 2026-06-09 (alert-quality audit, RC-1): empty/whitespace bodies (incl.
+        # JSON-wrapped `{"body":"\n",...}` records) carry no minable content and
+        # were minting a fresh "novel template" every batch. Drop them at the
+        # boundary like an excluded service — no miner touched, no anomaly.
+        if is_empty_log_body(log_line):
             return AnalyzeResult(
                 cluster_id=None,
                 template="",

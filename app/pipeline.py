@@ -341,35 +341,33 @@ class TriagePipeline:
         is_dup, prior_decision_id = await self.dedup.check(dedup_key, alert.status)
         if is_dup:
             alerts_deduplicated.inc()
+            # RC-4 (2026-06-09 alert-quality audit) — Lina asked to SCRAP the
+            # "see prior RCA <id>" stub rows entirely. A duplicate fire is now
+            # registered as a RECURRENCE of the existing incident (same alert,
+            # history visible on its detail page) instead of a separate feed
+            # row. We bump the incident's fire_count + last_seen on the ORIGINAL
+            # alert's fingerprint and persist NO new rca_history row — the
+            # dashboard's recurrence view (incident entity + detail-page
+            # "fired N times" section) surfaces the flap without clutter.
+            recurrence = None
+            try:
+                recurrence = await self.store.record_recurrence(
+                    fingerprint=alert.fingerprint,
+                    at_iso=datetime.now(UTC).replace(tzinfo=None).isoformat(),
+                    severity=alert.severity,
+                    alert_name=alert.alertname,
+                    affected_service=alert.service,
+                )
+            except Exception as exc:
+                logger.warning("Failed to record recurrence for %s: %s", alert.alertname, exc)
+            fire_count = (recurrence or {}).get("fire_count") if recurrence else None
             logger.info(
-                "Alert %s deduplicated (dedup_key=%s, prior_rca=%s) — persisting short-path record",
+                "Alert %s deduplicated (dedup_key=%s) — recorded recurrence "
+                "(fire_count=%s, prior_rca=%s); no see-prior stub row",
                 alert.alertname, dedup_key[:24] if dedup_key else "-",
+                fire_count if fire_count is not None else "n/a",
                 prior_decision_id or "pending",
             )
-            # Short-path record so the dashboard shows it
-            short = RCARecord(
-                alert_source=source,
-                alert_name=alert.alertname,
-                alert_fingerprint=alert.fingerprint,
-                affected_service=alert.service,
-                severity=alert.severity,
-                triage_decision="suppressed_duplicate",
-                llm_verdict=None,
-                rca_report=(
-                    f"Duplicate fire within {self.dedup.window}s dedup window. "
-                    f"See prior RCA {prior_decision_id or '(pending)'} for the full analysis."
-                ),
-                action_taken=(
-                    f"see_previous_rca:{prior_decision_id}" if prior_decision_id else "see_previous_rca:pending"
-                ),
-                investigation_duration_ms=int((time.monotonic() - pipeline_start) * 1000),
-                rca_quality="actionable",
-                env=env,
-            )
-            try:
-                await self.store.save_decision(short)
-            except Exception as exc:
-                logger.warning("Failed to persist suppressed_duplicate record: %s", exc)
             return
 
         # Step 1b (AI-04, Layer 2): Pre-LLM suppression.
@@ -980,7 +978,10 @@ class TriagePipeline:
                     alert.alertname, metric_facts.deployment_type, len(templated),
                 )
 
-        quality = _classify_rca_quality(decision.rca, decision.reason, decision.suggested_actions, decision.evidence)
+        quality = _classify_rca_quality(
+            decision.rca, decision.reason, decision.suggested_actions,
+            decision.evidence, human_cause=getattr(decision, "human_cause", None),
+        )
         total_so_far = int((time.monotonic() - pipeline_start) * 1000)
         retry_budget_ms = settings.pipeline_timeout * 1000 - total_so_far - 5000  # 5s safety margin
         # Retry triggers (added 2026-04-28 PM after live-verify):
@@ -1356,6 +1357,7 @@ class TriagePipeline:
         quality = _classify_rca_quality(
             decision.rca, decision.reason,
             decision.suggested_actions, decision.evidence,
+            human_cause=getattr(decision, "human_cause", None),
         )
 
         # 2026-06-04 quarantine-on-save (Stage E follow-up). The validator
