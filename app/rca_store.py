@@ -482,6 +482,21 @@ class RCAStore:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def get_fingerprint_for_decision(self, decision_id: str) -> str | None:
+        """Return the alert_fingerprint of a stored decision, or None. Used by
+        the dedup short-path (RC-4) so a family-collapsed duplicate (e.g. a
+        HighCpu fire deduped against a MediumCpu window — DA-5) records its
+        recurrence against the ORIGINAL fire's fingerprint/incident, not its
+        own per-tier fingerprint (which would mint an orphan incident)."""
+        if not decision_id:
+            return None
+        cursor = await self._db.execute(
+            "SELECT alert_fingerprint FROM rca_history WHERE id = ?",
+            (decision_id,),
+        )
+        row = await cursor.fetchone()
+        return (row["alert_fingerprint"] if row else None) or None
+
     async def get_incident_by_fingerprint(self, fingerprint: str) -> dict | None:
         """Fetch the incident entity for a fingerprint (fire_count + bounds),
         or None. Used by the detail page to render recurrence history on the

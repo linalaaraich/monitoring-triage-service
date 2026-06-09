@@ -66,6 +66,34 @@ def test_rc1_analyze_skips_empty_body():
     assert r.excluded is True
 
 
+def test_rc1_empty_bodies_not_counted_anomalous():
+    # General-cycle backend finding: empty/excluded lines must count as NEITHER
+    # a line NOR an anomaly — else match_count=0 < threshold marks them anomalous
+    # and inflates anomaly_rate (opposite of RC-1's intent).
+    from app.drain_analyzer import DrainAnalyzer
+    da = DrainAnalyzer()
+    empties = ['{"body":"\\n"}'] * 5
+    batch = da._ingest_batch_structured([("frontend", "frontend", empties)])
+    assert batch.total_lines == 0, "empty bodies must not count as lines"
+    assert batch.total_anomalous == 0, "empty bodies must not count as anomalies"
+    # And a real error line in the same batch IS counted + anomalous (new template).
+    mixed = ['{"body":"\\n"}', '{"body":"NullPointerException at Foo.bar line 9"}']
+    b2 = da._ingest_batch_structured([("frontend", "frontend", mixed)])
+    assert b2.total_lines == 1
+    assert b2.total_anomalous == 1
+
+
+def test_rc1_annotate_lines_skips_empty():
+    from app.drain_analyzer import DrainAnalyzer
+    da = DrainAnalyzer()
+    annotated, summary = da.annotate_lines(
+        ['{"body":"\\n"}', "real log line here"], service="cart",
+    )
+    # Only the real line is annotated; the empty body is dropped, not [ANOMALY].
+    assert len(annotated) == 1
+    assert "of 1 lines anomalous" in summary
+
+
 # ── RC-3: honest quality classification ───────────────────────────────────
 def test_rc3_hedge_in_human_cause_is_data_starved():
     # The live failure: rca says "insufficient evidence", human_cause says

@@ -351,8 +351,18 @@ class TriagePipeline:
             # "fired N times" section) surfaces the flap without clutter.
             recurrence = None
             try:
+                # Attach the recurrence to the ORIGINAL fire's incident. For a
+                # plain re-fire that's alert.fingerprint; for a DA-5 family
+                # collapse (HighCpu deduped against a MediumCpu window) the
+                # original fingerprint differs, so resolve it from the prior
+                # decision to avoid minting an orphan incident.
+                recur_fp = alert.fingerprint
+                if prior_decision_id:
+                    orig_fp = await self.store.get_fingerprint_for_decision(prior_decision_id)
+                    if orig_fp:
+                        recur_fp = orig_fp
                 recurrence = await self.store.record_recurrence(
-                    fingerprint=alert.fingerprint,
+                    fingerprint=recur_fp,
                     at_iso=datetime.now(UTC).replace(tzinfo=None).isoformat(),
                     severity=alert.severity,
                     alert_name=alert.alertname,

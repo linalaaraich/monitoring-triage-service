@@ -123,9 +123,15 @@ function HistorySection({ a }) {
   const history = a.history && a.history.length ? a.history : [
     { time: "now", verdict: a.verdict, delta: "first seen" },
   ];
+  // RC-4 (2026-06-09): the true recurrence count comes from the incident entity
+  // (a.fireCount), which also counts dedup-absorbed re-fires. The history[]
+  // timeline below is capped (≤10 rows), so use fireCount for the headline count.
+  const fireCount = Math.max(a.fireCount || 1, history.length);
+  const cappedNote = fireCount > history.length
+    ? ` · showing last ${history.length}` : "";
   return (
     <section style={{ marginBottom: 24 }}>
-      <div className="section-label">Incident history · {history.length === 1 ? "first fire" : history.length + " fires"}</div>
+      <div className="section-label">Incident history · {fireCount === 1 ? "first fire" : fireCount + " fires"}{cappedNote}</div>
       <div className="card" style={{ padding: "18px 22px" }}>
         {history.length === 1 ? (
           <div style={{ fontSize: 13.5, color: "var(--text-soft)" }}>

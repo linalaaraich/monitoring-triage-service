@@ -371,8 +371,14 @@ class DrainAnalyzer:
         annotated = []
         anomaly_count = 0
         new_patterns = 0
+        emitted = 0
         for line in lines:
             result = self.analyze(line, service=service)
+            # 2026-06-09 (RC-1 follow-up): empty/excluded lines carry no signal —
+            # never annotate them [ANOMALY] or count them in the denominator.
+            if getattr(result, "excluded", False):
+                continue
+            emitted += 1
             if result.is_new_pattern or result.match_count < settings.drain3_anomaly_threshold:
                 annotated.append(f"[ANOMALY] {line}")
                 anomaly_count += 1
@@ -381,7 +387,7 @@ class DrainAnalyzer:
             else:
                 annotated.append(f"[KNOWN] {line}")
         summary = (
-            f"Anomaly Summary: {anomaly_count} of {len(lines)} lines anomalous "
+            f"Anomaly Summary: {anomaly_count} of {emitted} lines anomalous "
             f"for service={service}. {new_patterns} new patterns detected."
         )
         return annotated, summary
@@ -568,11 +574,19 @@ class DrainAnalyzer:
             app_c = batch.per_app.setdefault(app, ScopeCounts())
             batch.app_components.setdefault(app, set()).add(svc)
             for line in lines:
-                batch.total_lines += 1
-                svc_c.lines += 1
-                app_c.lines += 1
                 try:
                     result = self.analyze(line, service=svc)
+                    # 2026-06-09 (RC-1 follow-up, general-cycle backend finding):
+                    # an empty/excluded line (is_empty_log_body → excluded sentinel)
+                    # carries no signal — it must count as NEITHER a line nor an
+                    # anomaly. Counting it before this check let `match_count=0 <
+                    # threshold` mark it anomalous and inflate anomaly_rate (the
+                    # opposite of RC-1's intent). Skip it entirely.
+                    if getattr(result, "excluded", False):
+                        continue
+                    batch.total_lines += 1
+                    svc_c.lines += 1
+                    app_c.lines += 1
                     if result.is_new_pattern or result.match_count < settings.drain3_anomaly_threshold:
                         batch.total_anomalous += 1
                         svc_c.anomalous += 1
