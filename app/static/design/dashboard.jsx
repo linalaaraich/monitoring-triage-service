@@ -132,27 +132,6 @@ function EnvDropdown({ selected, onToggle }) {
     ))}
   </DropdownPanel>;
 }
-function NsDropdown({ selected, onToggle }) {
-  const sel = selected || new Set();
-  const opts = [
-    { label: "app", count: "2" },
-    { label: "rental", count: "2" },
-    { label: "network", count: "1" },
-    { label: "observability", count: "1" },
-    { label: "camera", count: "1" },
-    { label: "kube-system", count: "0" },
-  ];
-  return <DropdownPanel w={240}>
-    <div style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--bg-soft)", borderRadius: 6, padding: "5px 9px", marginBottom: 6 }}>
-      <Icon.search style={{ color: "var(--muted-2)" }}/>
-      <input className="input" placeholder="Filter namespaces…" style={{ background: "transparent", border: 0, padding: 0, flex: 1, fontSize: 12.5 }}/>
-    </div>
-    {opts.map(o => (
-      <DropdownRow key={o.label} checked={sel.has(o.label)} label={o.label} count={o.count} mono
-        onClick={onToggle ? () => onToggle(o.label) : undefined}/>
-    ))}
-  </DropdownPanel>;
-}
 function VerdictDropdown({ selected, onToggle }) {
   // Values are the lowercase server filter tokens (?verdict=…); _V2_FILTER_VERDICTS.
   const sel = selected || new Set();
@@ -311,7 +290,10 @@ function ExpandedDetail({ a }) {
           fontSize: 12, color: "var(--muted)", marginTop: 4,
           display: "flex", alignItems: "center", gap: 6,
         }}>
-          <Icon.loop size={12}/> Fired {a.fireCount} times in last 24 h
+          {/* No time-window claim: fireCount is the incident's all-time count
+              (F-2), not a 24 h figure — the old hardcoded 24 h copy was wrong
+              for the default 15 d feed window. */}
+          <Icon.loop size={12}/> Fired {a.fireCount} times
         </div>}
       </div>
     </div>
@@ -478,9 +460,6 @@ function _seedFiltersFromCIRES() {
     verdict: _seedFilterSet(cf.verdict),
     severity: _seedFilterSet(cf.severity),
     family: _seedFilterSet(cf.family),
-    // kept for back-compat with code that reads these keys; never URL-backed.
-    namespace: new Set(),
-    service_type: new Set(),
   };
 }
 // Map a React chip key → its /dashboard URL query param.
@@ -501,7 +480,10 @@ function _navWithFilterPatch(patch) {
 
 function Dashboard({ mode = "default" }) {
   const [expandedId, setExpandedId] = useDashState(mode === "expanded" ? "8df8a37a" : null);
-  const [openFilter, setOpenFilter] = useDashState(mode === "filters" ? "ns" : null);
+  // F-5 (2026-06-10): the "filters" canvas mode used to open the mock
+  // namespace dropdown ("ns"); that orphaned component is removed — open the
+  // real EnvDropdown instead so the artboard still shows an open panel.
+  const [openFilter, setOpenFilter] = useDashState(mode === "filters" ? "env" : null);
   const [toast, setToast] = useDashState(null);
   // Seed the search box + chips from the server-resolved filter set so the UI
   // reflects the active URL (?q=…&verdict=… etc.), not a fresh empty state.

@@ -1259,6 +1259,11 @@ def _humanize_triage_path(triage_decision: str | None) -> tuple[str, str]:
         return "Investigated", "Pipeline ran the full LLM investigation"
     if t == "triage_suppressed":
         return "Deduped", "Same alert fingerprint already seen inside the dedup window — short-path"
+    if t == "suppressed_duplicate":
+        # Legacy enum (pre-2026-06-09 recurrence change): the dedup short-path
+        # used to write a standalone "See prior RCA" row with this decision.
+        # 229 historical rows still carry it — keep them human-readable.
+        return "Recurrence (suppressed)", "Repeat fire of an already-investigated fingerprint — dedup short-path, no LLM call (legacy row, pre-recurrence change)"
     if t == "dismiss":
         return "Dismissed", "Verdict was DISMISS — alert judged not actionable"
     if t == "dismiss_shelved":
@@ -2439,7 +2444,8 @@ def _build_cires_links(alert: dict) -> dict:
 
 def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
                        drain3_stats: dict | None = None,
-                       now_utc=None) -> dict:
+                       now_utc=None,
+                       incident_fire_counts: dict | None = None) -> dict:
     """Map a /decisions RCARecord row → the CIRES_ALERT shape the design expects.
 
     `fingerprint_history`: dict mapping alert_fingerprint → list[prior_row]
@@ -2447,6 +2453,13 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
     `drain3_stats`: optional dict from _drain.get_stats(), used for the
     Drain3 detail-page tile and the dashboard sustained indicator.
     `now_utc`: reference datetime for relTime / activeFor calculations.
+    `incident_fire_counts`: F-2 (2026-06-10) — {fingerprint: fire_count}
+    prefetched from the incidents table (one bulk query per page render).
+    The slab-derived len(prior)+1 misses dedup-absorbed recurrences (which
+    no longer write feed rows) and anything outside the 500-row/15-day slab;
+    the incident entity is the source of truth, so fireCount reconciles to
+    MAX(slab, incident) here — the ONE shared place — keeping feed and
+    detail in agreement (they both call this transform).
     """
     import json as _json2
     from datetime import datetime, timezone, timedelta
@@ -2470,6 +2483,16 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
     # by the route handler from the same /decisions slab — no extra DB hits.
     prior = (fingerprint_history or {}).get(fingerprint, [])
     fire_count = len(prior) + 1 if fingerprint else 1
+    # F-2: reconcile against the incident entity's fire_count (counts
+    # dedup-absorbed recurrences + fires outside the slab window). MAX, not
+    # replace: a missing/stale incident row must never UNDER-count the slab.
+    if fingerprint and incident_fire_counts:
+        try:
+            inc_fc = int(incident_fire_counts.get(fingerprint) or 0)
+        except (TypeError, ValueError):
+            inc_fc = 0
+        if inc_fc > fire_count:
+            fire_count = inc_fc
     first_fire_ts = (prior[0].get("timestamp") if prior else r.get("timestamp")) or r.get("timestamp")
 
     # Time formatting — Tangier UTC+01:00 per the design's locale ask.
@@ -2613,6 +2636,12 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
         tags.append("shelved")
     if td == "recurrence_gated_pre_llm":
         tags.append("recurrence-gated")
+    if td == "suppressed_duplicate":
+        # F-3 (2026-06-10): legacy dedup short-path rows (pre-2026-06-09
+        # recurrence change) had no humanized surface in the v2 UI — tag them
+        # in the same tone as recurrence-gated so the operator sees WHY the
+        # row has no verdict/confidence instead of a bare PENDING.
+        tags.append("recurrence-suppressed")
     if not tags:
         tags = ["—"]
 
@@ -3020,6 +3049,16 @@ async def dashboard_v2(
     # Drain3 stats once per request (used for Drain3AnomalyDetected rows)
     drain3_stats = _drain.get_stats() if _drain is not None else {}
 
+    # F-2 (2026-06-10): ONE bulk incidents query for the page's fingerprints so
+    # the feed's fireCount reconciles to the incident entity — the same number
+    # the detail page shows. Failure degrades to the slab count (no 500).
+    incident_fire_counts: dict[str, int] = {}
+    page_fps = [(rep.get("alert_fingerprint") or "") for _fp, rep in page_reps]
+    try:
+        incident_fire_counts = await _store.get_fire_counts_for_fingerprints(page_fps)
+    except Exception as exc:
+        logger.warning("feed incident fire_count prefetch failed (non-fatal): %s", exc)
+
     # Transform the page representatives. The transformer's fingerprint_history
     # is the OLDER rows of the same fingerprint — the fireCount + history
     # timeline come from this.
@@ -3031,6 +3070,7 @@ async def dashboard_v2(
             fingerprint_history={(rep.get("alert_fingerprint") or fp): prior},
             drain3_stats=drain3_stats,
             now_utc=now_utc,
+            incident_fire_counts=incident_fire_counts,
         ))
     alerts_json = _safe_script_json(alerts)
 
@@ -4502,7 +4542,16 @@ async def dashboard_v2_alert(short_id: str):
             target = r
             break
     if target is None:
-        raise HTTPException(status_code=404, detail=f"No alert found with short_id prefix '{short_id}' in the last 15 days")
+        # F-4 (2026-06-10): incident click-throughs link the incident's LATEST
+        # rca_history row, which can be older than the 15-day scan window
+        # (long-lived incidents). Fall back to a direct id-prefix lookup so
+        # those links resolve instead of 404ing.
+        try:
+            target = await _store.get_decision_by_id_prefix(short_id)
+        except Exception:
+            target = None
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"No alert found with short_id prefix '{short_id}'")
 
     # Build fingerprint history from the same scan
     fp = target.get("alert_fingerprint") or ""
@@ -4542,27 +4591,30 @@ async def dashboard_v2_alert(short_id: str):
 
     drain3_stats = _drain.get_stats() if _drain is not None else {}
 
+    # RC-4 (2026-06-09) / F-2 (2026-06-10) — recurrence count from the incident
+    # entity, which also counts dedup-suppressed re-fires (those no longer write
+    # a feed row). The fingerprint_history below only sees FULL investigate
+    # rows. Reconciliation now lives INSIDE _v2_transform_row (the one shared
+    # transform), so feed and detail render the same fireCount by construction;
+    # here we just prefetch this fingerprint's incident count. Failure degrades
+    # to the slab count, no 500.
+    incident_fire_counts: dict[str, int] = {}
+    if fp:
+        try:
+            incident = await _store.get_incident_by_fingerprint(fp)
+            if incident:
+                incident_fire_counts = {fp: int(incident.get("fire_count") or 0)}
+        except Exception:
+            pass
+
     # Transform target
     alert = _v2_transform_row(
         target,
         fingerprint_history={fp: history_rows} if fp else None,
         drain3_stats=drain3_stats,
         now_utc=now_utc,
+        incident_fire_counts=incident_fire_counts,
     )
-    # RC-4 (2026-06-09) — recurrence count from the incident entity, which
-    # also counts dedup-suppressed re-fires (those no longer write a feed row).
-    # The fingerprint_history above only sees FULL investigate rows, so prefer
-    # the incident's fire_count when it's higher. This is the "see its history"
-    # number Lina asked for, shown ON the original alert (no see-prior stub).
-    if fp:
-        try:
-            incident = await _store.get_incident_by_fingerprint(fp)
-            if incident and (incident.get("fire_count") or 0) > (alert.get("fireCount") or 1):
-                alert["fireCount"] = incident["fire_count"]
-                if (alert["fireCount"] or 1) >= 3:
-                    alert["indicator"] = "recurring"
-        except Exception:
-            pass
     # Transform related — the design's RelatedSidebar reads `a.related` and
     # accesses {id, title, time, verdict} on each entry. Shape them
     # explicitly so we don't depend on the full CIRES_ALERT object.
@@ -5103,9 +5155,20 @@ async def dashboard_sprint5_incidents():
             first_fire = inc.get("first_seen") or "—"
             if first_fire and first_fire != "—":
                 first_fire = first_fire[:16].replace("T", " ")
+            # F-4 (2026-06-10): click-through to the alert detail page via the
+            # incident's most-recent rca_history row (incidents are keyed by
+            # fingerprint; the detail route resolves by decision short_id —
+            # with an id-prefix fallback for rows older than its 15-day scan).
+            # Same pattern as the service cell's <a href> link. Incidents with
+            # no rca_history row (recurrence-only orphans) stay plain text.
+            latest_id = (inc.get("latest_decision_id") or "").strip()
+            name_cell = (
+                f'<a href="/dashboard/alert/{_esc(latest_id[:8])}">{_esc(name)}</a>'
+                if latest_id else _esc(name)
+            )
             row_html_parts.append(f"""
         <tr>
-          <td class="svc-cell-name">{_esc(name)}</td>
+          <td class="svc-cell-name">{name_cell}</td>
           <td>{svc_cell}</td>
           <td class="inc-cell-fires">{fire_count}</td>
           <td class="inc-cell-dur">{_esc(duration)}</td>

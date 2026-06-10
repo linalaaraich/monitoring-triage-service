@@ -497,6 +497,63 @@ class RCAStore:
         row = await cursor.fetchone()
         return (row["alert_fingerprint"] if row else None) or None
 
+    async def get_fire_counts_for_fingerprints(
+        self, fingerprints: list[str]
+    ) -> dict[str, int]:
+        """F-2 (2026-06-10 general-cycle audit) — bulk {fingerprint: fire_count}
+        lookup for the feed transform. ONE query per page render so the feed's
+        fireCount can be reconciled against the incident entity (which also
+        counts dedup-absorbed recurrences that no longer write a feed row),
+        instead of the slab-derived len(prior)+1 that under-reports. Unknown /
+        empty fingerprints are simply absent from the returned map.
+        """
+        fps = [fp for fp in (fingerprints or []) if fp]
+        if not fps:
+            return {}
+        placeholders = ",".join("?" for _ in fps)
+        cursor = await self._db.execute(
+            f"SELECT fingerprint, fire_count FROM incidents "
+            f"WHERE fingerprint IN ({placeholders})",
+            fps,
+        )
+        rows = await cursor.fetchall()
+        return {row["fingerprint"]: int(row["fire_count"] or 0) for row in rows}
+
+    async def get_decision_by_id_prefix(self, prefix: str) -> dict | None:
+        """F-4 (2026-06-10) — resolve a short_id (8-char id prefix) directly in
+        SQL, with no time-window cap. The detail route's primary resolution
+        scans the most-recent 500 rows / 15 days; incident click-throughs can
+        point at older rows (an incident's latest fire may predate the scan
+        window), so this is the fallback that keeps those links resolving.
+        Newest row wins if the prefix is ambiguous.
+        """
+        prefix = (prefix or "").strip().lower()
+        if not prefix:
+            return None
+        cursor = await self._db.execute(
+            "SELECT * FROM rca_history WHERE id LIKE ? "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (f"{prefix}%",),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        # Same JSON-as-TEXT decode get_decisions applies at its API boundary,
+        # so the transform sees an identical row shape on either path.
+        d = dict(row)
+        for col in ("suggested_actions", "evidence", "diagnostic_steps", "correlated_alerts"):
+            v = d.get(col)
+            if isinstance(v, str) and v:
+                try:
+                    parsed = json.loads(v)
+                    if isinstance(parsed, list):
+                        d[col] = parsed
+                except (ValueError, TypeError):
+                    pass
+            elif v is None:
+                d[col] = []
+        return d
+
     async def get_incident_by_fingerprint(self, fingerprint: str) -> dict | None:
         """Fetch the incident entity for a fingerprint (fire_count + bounds),
         or None. Used by the detail page to render recurrence history on the
@@ -810,7 +867,10 @@ class RCAStore:
 
         Each row carries the stored columns plus a derived duration_seconds
         (last_seen − first_seen) so the page can render "how long" without
-        re-parsing timestamps in the template.
+        re-parsing timestamps in the template, plus latest_decision_id —
+        the newest rca_history row for the fingerprint (F-4, 2026-06-10) so
+        the incidents table can click through to /dashboard/alert/{short_id}.
+        NULL when the incident has no rca_history rows (recurrence-only).
         """
         clauses: list[str] = []
         if exclude_dismissed:
@@ -821,7 +881,10 @@ class RCAStore:
         cursor = await self._db.execute(
             f"""SELECT id, fingerprint, first_seen, last_seen, fire_count,
                        current_verdict, current_severity, alert_name,
-                       affected_service
+                       affected_service,
+                       (SELECT h.id FROM rca_history h
+                        WHERE h.alert_fingerprint = incidents.fingerprint
+                        ORDER BY h.timestamp DESC LIMIT 1) AS latest_decision_id
                 FROM incidents
                 {where_sql}
                 ORDER BY last_seen DESC
