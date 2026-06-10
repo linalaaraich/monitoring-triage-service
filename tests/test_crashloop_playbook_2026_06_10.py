@@ -475,3 +475,120 @@ async def test_non_crashloop_alert_still_uses_llm_tool_pick(
     await pipeline._process_alert(alert, source="grafana")
 
     llm.request_tool_or_decide.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Iteration 3 — digest_crashloop_evidence (pre-interpreted facts, not raw JSON)
+# ---------------------------------------------------------------------------
+
+from app.bounded_agency import digest_crashloop_evidence
+
+
+def _mcp_result(series):
+    return {
+        "tool": "prometheus.query",
+        "args": {"expr": "…"},
+        "result": {"status": "success", "result_type": "vector", "result": series},
+    }
+
+
+def _oom_series():
+    # Exactly the live shape replayed at 2026-06-10 14:26:40 for image-provider.
+    return [
+        {"metric": {"__name__": "kube_pod_container_status_last_terminated_reason",
+                    "exported_pod": "image-provider-58fc85685d-49dd4",
+                    "reason": "OOMKilled"},
+         "value": [1781101600, "1"]},
+        {"metric": {"exported_pod": "image-provider-56664c7cd7-btlvf"},
+         "value": [1781101600, "7.09"]},
+        {"metric": {"exported_pod": "image-provider-579cb4974c-9js6n"},
+         "value": [1781101600, "0"]},
+        {"metric": {"exported_pod": "image-provider-58fc85685d-49dd4"},
+         "value": [1781101600, "15.04"]},
+        {"metric": {"__name__": "kube_pod_container_resource_limits",
+                    "exported_pod": "image-provider-58fc85685d-49dd4"},
+         "value": [1781101600, "4194304"]},
+    ]
+
+
+def test_digest_names_oom_with_limit_and_restarts():
+    out = digest_crashloop_evidence(_mcp_result(_oom_series()), "image-provider", "otel-demo")
+    assert out is not None
+    assert "PRE-INTERPRETED FACTS" in out
+    assert "last termination reason = OOMKilled" in out
+    assert "restarted 15x" in out
+    assert "memory limit = 4 MiB" in out
+    assert "READY VERDICT" in out
+    assert "OOMKilled" in out and "too small for the workload" in out
+    # The trailing-window escape hatch must be present (accounting case).
+    assert "ENDED" in out
+    # Quiet replacement pods are named so the model doesn't confuse them.
+    assert "image-provider-579cb4974c-9js6n" in out
+
+
+def test_digest_non_oom_reason_still_names_mechanism():
+    series = [
+        {"metric": {"__name__": "kube_pod_container_status_last_terminated_reason",
+                    "exported_pod": "cart-abc", "reason": "Error"},
+         "value": [0, "1"]},
+        {"metric": {"exported_pod": "cart-abc"}, "value": [0, "6"]},
+    ]
+    out = digest_crashloop_evidence(_mcp_result(series), "cart", "otel-demo")
+    assert out is not None
+    assert "'Error'" in out
+    assert "Cannot determine" in out or "cannot determine" in out  # the anti-hedge line
+
+
+def test_digest_empty_result_falls_back_to_none():
+    assert digest_crashloop_evidence(_mcp_result([]), "x", "y") is None
+    assert digest_crashloop_evidence({"tool": "prometheus.query", "error": "boom"}, "x", "y") is None
+    # Limits-only (no reasons, no restarts) is not decisive evidence either.
+    series = [{"metric": {"__name__": "kube_pod_container_resource_limits",
+                          "exported_pod": "p"}, "value": [0, "1048576"]}]
+    assert digest_crashloop_evidence(_mcp_result(series), "x", "y") is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_injects_digested_block(crashloop_store, monkeypatch):
+    """The agency retry prompt must carry the digested facts, not raw JSON."""
+    captured = {}
+
+    async def fake_execute_tool(req, ctx, store):
+        return _mcp_result(_oom_series())
+
+    monkeypatch.setattr("app.bounded_agency.execute_tool", fake_execute_tool)
+
+    llm = MagicMock()
+    llm.close = AsyncMock()
+
+    async def capture_investigate(*args, **kwargs):
+        if "tool_result_block" in kwargs and kwargs["tool_result_block"]:
+            captured["block"] = kwargs["tool_result_block"]
+            return (_named_oom_decision(), 10)
+        return (_hedged_decision(), 10)
+
+    llm.investigate = AsyncMock(side_effect=capture_investigate)
+
+    pipeline = TriagePipeline(
+        rca_store=crashloop_store,
+        drain=MagicMock(
+            annotate_lines=MagicMock(return_value=([], "")),
+            get_stats=MagicMock(return_value={"total_clusters": 0}),
+        ),
+        context_gatherer=MagicMock(
+            gather=AsyncMock(return_value=GatheredContext(sources_available=3)),
+        ),
+        llm_client=llm,
+        notifier=MagicMock(send_escalation=AsyncMock(), send_timeout_alert=AsyncMock()),
+        dedup=MagicMock(
+            check=AsyncMock(return_value=(False, None)),
+            record_first_decision=AsyncMock(), window=300,
+        ),
+    )
+
+    alert = _crashloop_alert()
+    await pipeline._process_alert(alert, source="grafana")
+
+    assert "block" in captured
+    assert "PRE-INTERPRETED FACTS" in captured["block"]
+    assert "READY VERDICT" in captured["block"]

@@ -33,7 +33,7 @@ from app.v2_mappings import env_resolver
 logger = logging.getLogger(__name__)
 
 
-def _is_shelved_in_disguise(decision, quality: str) -> bool:
+def _is_shelved_in_disguise(decision, quality: str, severity: str = "warning") -> bool:
     """Return True when the LLM picked ESCALATE but every other signal
     says this RCA isn't operator-actionable.
 
@@ -47,8 +47,16 @@ def _is_shelved_in_disguise(decision, quality: str) -> bool:
       - confidence < 0.40 (LLM self-rated this as low-trust)
       - quality in (needs_review, data_starved) — thin output
       - ALL suggested_actions contain "shelved" (LLM explicitly shelved)
+
+    Critical/high severity is exempt (2026-06-10 stress-test fix): a
+    genuinely-down critical workload where the LLM couldn't name a cause must
+    STILL page — silence on a critical is worse than a low-confidence email.
+    This anti-noise shelving is only for low-severity noise. Keyed on the
+    alert's Grafana severity (authoritative), passed in by the caller.
     """
     if decision.decision != Decision.ESCALATE:
+        return False
+    if severity in ("critical", "high"):
         return False
     if decision.confidence is not None and decision.confidence < 0.40:
         return True
@@ -1016,6 +1024,7 @@ class TriagePipeline:
             if settings.triage_bounded_agency_enabled:
                 from app.bounded_agency import (
                     build_crashloop_tool_request,
+                    digest_crashloop_evidence,
                     parse_tool_request,
                     execute_tool,
                     tool_result_to_prompt_block,
@@ -1044,7 +1053,26 @@ class TriagePipeline:
                         tool_req.args.get("expr", "")[:200],
                     )
                     tool_result = await execute_tool(tool_req, self.context, self.store)
-                    tool_block = tool_result_to_prompt_block(tool_result)
+                    # Iteration 3 (2026-06-10): pre-interpret the fixed-shape
+                    # result into plain-English facts + a ready verdict. The
+                    # live re-induction proved iteration 2's query executed
+                    # and returned reason="OOMKilled" — and the model STILL
+                    # hedged when handed the raw series JSON (5a8231f8,
+                    # 6899cb1b). Digest in code; fall back to the raw block
+                    # only if the result shape is unexpected.
+                    tool_block = (
+                        digest_crashloop_evidence(
+                            tool_result,
+                            alert.service,
+                            alert.labels.get("namespace", "") or "unknown",
+                        )
+                        or tool_result_to_prompt_block(tool_result)
+                    )
+                    logger.info(
+                        "Agency: crash-loop evidence block (digested=%s): %s",
+                        not tool_block.startswith("## Additional MCP query"),
+                        tool_block[:300].replace("\n", " | "),
+                    )
                     retry_decision, rd_ms = await self.llm.investigate(
                         alert, ctx, anomaly_summary, history_context,
                         correlated=correlated, metric_facts=metric_facts,
@@ -1355,7 +1383,9 @@ class TriagePipeline:
         # other signal says this RCA isn't operator-actionable. Don't page;
         # keep the row for review. See `_is_shelved_in_disguise` docstring
         # for the rule and the 2026-05-21 audit context.
-        is_shelved_in_disguise = _is_shelved_in_disguise(decision, quality)
+        is_shelved_in_disguise = _is_shelved_in_disguise(
+            decision, quality, severity=alert.severity
+        )
         if is_shelved_in_disguise:
             logger.info(
                 "Shelved-in-disguise gate: %s escalate at conf=%s quality=%s "

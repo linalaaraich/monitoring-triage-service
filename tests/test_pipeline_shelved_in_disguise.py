@@ -116,6 +116,42 @@ def test_predicate_dismiss_is_never_shelved():
     assert _is_shelved_in_disguise(d2, quality="actionable") is False
 
 
+# ---------------------------------------------------------------------------
+# 2026-06-10 stress-test fix: critical/high severity must page even when the
+# automated RCA is thin (KubeWorkloadDown reproducer — a real down workload was
+# being silently shelved because the LLM had no k8s evidence to name a cause).
+# ---------------------------------------------------------------------------
+
+
+def test_critical_severity_bypasses_shelved_gate_low_confidence():
+    """A critical alert at confidence=0.30 (would normally shelve) must still
+    page — silence on a critical is worse than a low-confidence email."""
+    d = _decision(verdict=Decision.ESCALATE, confidence=0.30)
+    assert _is_shelved_in_disguise(d, quality="data_starved", severity="critical") is False
+
+
+def test_high_severity_bypasses_shelved_gate_data_starved():
+    """High severity is also exempt from the anti-noise shelving."""
+    d = _decision(verdict=Decision.ESCALATE, confidence=0.0)
+    assert _is_shelved_in_disguise(d, quality="needs_review", severity="high") is False
+
+
+def test_warning_severity_still_shelved_when_thin():
+    """Regression: the bypass is severity-scoped — a low-severity thin ESCALATE
+    must STILL be shelved (the original anti-noise behaviour is preserved)."""
+    d = _decision(verdict=Decision.ESCALATE, confidence=0.30)
+    assert _is_shelved_in_disguise(d, quality="data_starved", severity="warning") is True
+    # default severity arg also preserves the old behaviour
+    assert _is_shelved_in_disguise(d, quality="data_starved") is True
+
+
+def test_critical_severity_does_not_resurrect_dismiss():
+    """The severity bypass only applies to ESCALATE — a DISMISS stays handled
+    by the suppression path regardless of severity."""
+    d = _decision(verdict=Decision.DISMISS, confidence=0.0)
+    assert _is_shelved_in_disguise(d, quality="needs_review", severity="critical") is False
+
+
 def test_predicate_boundary_exactly_0_40_is_NOT_shelved():
     """Confidence cutoff is strict <0.40 — at 0.40 the LLM is borderline
     but not low-trust enough to override the verdict on confidence alone."""

@@ -91,6 +91,46 @@ def _prom_result_empty(data) -> bool:
     return False
 
 
+# Kubernetes workload alerts (2026-06-10 stress-test finding) -----------------
+# KubeWorkloadDown / KubeWorkloadReplicasDeficit / PodCrashLooping carry their
+# root cause in kube-state-metrics + pod phase, NOT in app metrics/logs/traces.
+# The default service-scoped `{job=~".*<svc>.*"}` Prometheus query matches no
+# series for these, so the LLM saw an empty context and hedged "cannot
+# determine" — which the shelved-in-disguise gate then suppressed, so a
+# genuinely-down critical workload never paged. Query the deployment's replica
+# counts, namespace pod phase, and last-terminated reason instead, so the model
+# gets real evidence (0/N available, pod Pending/unschedulable, OOMKilled) and
+# can name the cause. kube-state-metrics labels (verified live): `deployment`,
+# `exported_namespace`, `exported_pod`, `phase`.
+_KUBE_WORKLOAD_ALERTS = {
+    "PodCrashLooping", "PodHighMemoryUsage", "PodHighCpuUsage",
+    "KubeContainerRestarting", "KubePodNotReady",
+}
+
+
+def _is_kube_workload_alert(alert) -> bool:
+    name = alert.alertname or ""
+    return name.startswith("Kube") or name in _KUBE_WORKLOAD_ALERTS
+
+
+def _kube_state_promql(service: str, namespace: str) -> str:
+    """Build a kube-state-metrics PromQL union for a workload alert. Returns the
+    deployment's desired/available/unavailable replica counts plus, when the
+    namespace is known, any non-Running pods and recent container termination
+    reasons in that namespace."""
+    d = f'deployment="{service}"'
+    parts = [
+        f"kube_deployment_spec_replicas{{{d}}}",
+        f"kube_deployment_status_replicas_available{{{d}}}",
+        f"kube_deployment_status_replicas_unavailable{{{d}}}",
+    ]
+    if namespace and namespace != "unknown":
+        ns = f'exported_namespace="{namespace}"'
+        parts.append(f'kube_pod_status_phase{{{ns},phase=~"Pending|Failed|Unknown"}} > 0')
+        parts.append(f"kube_pod_container_status_last_terminated_reason{{{ns}}} > 0")
+    return " or ".join(parts)
+
+
 # S3-HF-07 PII sanitizer ------------------------------------------------------
 # Span `db.statement` tags can include literal parameter values, e.g.
 #   WHERE customer_id = 12345 AND email = 'lina@…' AND created_at > '2026-04-12'
@@ -274,8 +314,15 @@ class ContextGatherer:
         that's the case that previously produced "insufficient data" RCAs.
         """
         service = alert.service
+        # Kube workload alerts: query kube-state-metrics for the deployment
+        # instead of the (always-empty) service-job match, so the LLM sees the
+        # replica deficit / pod phase that actually explains the alert.
+        if _is_kube_workload_alert(alert):
+            primary_promql = _kube_state_promql(service, alert.labels.get("namespace", ""))
+        else:
+            primary_promql = f'{{job=~".*{service}.*"}}'
         primary = {
-            "promql": f'{{job=~".*{service}.*"}}',
+            "promql": primary_promql,
             "step": "60s",
         }
         if abs_window:

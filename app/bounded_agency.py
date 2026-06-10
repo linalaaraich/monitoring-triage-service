@@ -203,6 +203,116 @@ def build_crashloop_tool_request(alert) -> ToolRequest:
     )
 
 
+def digest_crashloop_evidence(
+    tool_result: dict[str, Any], service: str, namespace: str
+) -> str | None:
+    """Deterministically pre-interpret the fixed-shape crash-loop evidence
+    query into plain-English facts for the retry prompt.
+
+    Iteration 3 of the 2026-06-10 micro-cycle. Iteration 2 made the QUERY
+    deterministic, and the live re-induction proved it executed and returned
+    decisive series (replayed at 14:26:40: reason="OOMKilled"=1, 15 restarts
+    /2h, limit 4Mi) — yet the 14b model, handed that as a raw JSON series
+    dump, still hedged "cannot determine" (decisions 5a8231f8/6899cb1b),
+    fighting the response format the whole way ("LLM JSON parse failed"
+    every pass). Same lesson one level up: for a fixed-shape result, asking
+    the model to INTERPRET raw series is pure downside. This digest is the
+    metric-interpreter pattern (lifecycle 3.4) applied to the agency result:
+    parse the three evidence families in code and hand the model finished
+    facts plus a ready verdict sentence it only has to confirm.
+
+    Returns None when the result is empty/unparseable — caller falls back
+    to the raw tool_result_to_prompt_block.
+    """
+    inner = tool_result.get("result")
+    if not isinstance(inner, dict):
+        return None
+    series = inner.get("result") or []
+    if not isinstance(series, list) or not series:
+        return None
+
+    reasons: dict[str, str] = {}          # pod -> termination reason
+    restarts: dict[str, float] = {}       # pod -> increase over the window
+    limits: dict[str, float] = {}         # pod -> memory limit bytes
+    for s in series:
+        if not isinstance(s, dict):
+            continue
+        metric = s.get("metric") or {}
+        pod = metric.get("exported_pod") or metric.get("pod") or "?"
+        name = metric.get("__name__", "")
+        try:
+            value = float((s.get("value") or [None, "nan"])[1])
+        except (TypeError, ValueError):
+            continue
+        if name == "kube_pod_container_status_last_terminated_reason":
+            if value >= 1 and metric.get("reason"):
+                reasons[pod] = metric["reason"]
+        elif name == "kube_pod_container_resource_limits":
+            limits[pod] = value
+        elif name == "":
+            # increase() drops __name__ — the only nameless family in the
+            # union is the restart increase.
+            restarts[pod] = value
+
+    if not (reasons or restarts):
+        return None
+
+    lines = [
+        "## Crash-loop evidence — PRE-INTERPRETED FACTS "
+        "(extracted deterministically from Prometheus via MCP; trust them as ground truth):"
+    ]
+    looping = {p: n for p, n in restarts.items() if n >= 1}
+    for pod, reason in reasons.items():
+        lines.append(f"- Pod {pod}: last termination reason = {reason}.")
+    for pod, n in sorted(restarts.items(), key=lambda kv: -kv[1]):
+        if n >= 1:
+            lines.append(f"- Pod {pod}: restarted {n:.0f}x inside the query window.")
+    for pod, b in limits.items():
+        lines.append(f"- Pod {pod}: memory limit = {b / 1048576:.0f} MiB.")
+    quiet = sorted(set(restarts) - set(looping))
+    if quiet:
+        lines.append(
+            "- Pods with ZERO restarts in the window (e.g. replacements after "
+            "a deploy roll): " + ", ".join(quiet) + "."
+        )
+
+    # Ready verdict the model only has to confirm/adapt — never compose.
+    oom_pods = [p for p, r in reasons.items() if r == "OOMKilled"]
+    if oom_pods:
+        pod = oom_pods[0]
+        n = restarts.get(pod)
+        lim = limits.get(pod)
+        verdict = (
+            f"=> READY VERDICT (state this unless the facts above contradict it): "
+            f"the {service} container in namespace {namespace} is being OOMKilled — "
+        )
+        verdict += (
+            f"its memory limit ({lim / 1048576:.0f} MiB) is too small for the workload"
+            if lim is not None
+            else "its memory limit is too small for the workload"
+        )
+        if n:
+            verdict += f"; it restarted {n:.0f}x in the query window"
+        verdict += (
+            ". Remedy: raise the memory limit on the deployment and verify the "
+            "restart counter flattens. If the looping pod no longer exists or its "
+            "recent restarts are zero, the loop has ENDED (trailing-window alert) — "
+            "say that, named, with verdict dismiss/monitor. This is a DETERMINED "
+            "cause; 'cannot determine' is wrong."
+        )
+        lines.append(verdict)
+    elif reasons:
+        pod, reason = next(iter(reasons.items()))
+        lines.append(
+            f"=> READY VERDICT (adapt to the facts above): the {service} container "
+            f"in namespace {namespace} is crash-looping with termination reason "
+            f"'{reason}' — name that mechanism (bad config / boot failure / etc.); "
+            "rollback-first if every restart dies at the same step. 'Cannot "
+            "determine' is wrong: the termination reason above IS the determination."
+        )
+    return "\n".join(lines)
+
+
 def parse_tool_request(raw_llm_json: str | dict) -> ToolRequest | None:
     """If the LLM emitted `{"tool_request": {...}}`, parse + validate it.
     Returns None if the response was a normal decision (no tool request).
@@ -429,6 +539,8 @@ def tool_result_to_prompt_block(result: dict[str, Any]) -> str:
 __all__ = [
     "TOOLS_DESCRIPTION",
     "ToolRequest",
+    "build_crashloop_tool_request",
+    "digest_crashloop_evidence",
     "parse_tool_request",
     "execute_tool",
     "tool_result_to_prompt_block",

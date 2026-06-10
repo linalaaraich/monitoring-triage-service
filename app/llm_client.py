@@ -700,6 +700,16 @@ class LLMClient:
             )
             decision.decision = Decision.ESCALATE
 
+        # 2026-06-10 stress-test fix: severity must never fall below the alert's
+        # own Grafana-assigned severity. Small models routinely omit `severity`
+        # (LLMDecision defaults to "warning") or echo a lower one, which silently
+        # downgraded critical alerts — letting the recurrence gate and the
+        # shelved-in-disguise gate suppress a genuine page. The Grafana label is
+        # authoritative for "how bad is this"; the LLM only refines the cause.
+        _SEV_RANK = {"info": 0, "warning": 1, "high": 2, "critical": 3}
+        if _SEV_RANK.get(decision.severity, 1) < _SEV_RANK.get(alert.severity, 1):
+            decision.severity = alert.severity
+
         return decision, duration_ms
 
     async def request_tool_or_decide(
