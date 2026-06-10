@@ -704,3 +704,68 @@ def test_deployment_type_inferred_k8s_for_namespace_labelled_alerts():
     alert = _crashloop_alert()  # service=image-provider, namespace label set
     facts = interpret(alert)
     assert facts.deployment_type == "k8s"
+
+
+# ---------------------------------------------------------------------------
+# Iteration 5 — kube-state pre-interpretation in the context + prompt
+# ---------------------------------------------------------------------------
+
+from app.context import _summarize_kube_workload_state
+
+
+def _range_result(series):
+    return {"status": "success", "result_type": "matrix", "result": series}
+
+
+def test_kube_summary_names_zero_available_deployment():
+    """The induced ad outage shape: spec=1, available=0, unavailable=1,
+    Pending pod — must produce a 'workload IS down' sentence."""
+    series = [
+        {"metric": {"kpi": "spec_replicas", "deployment": "ad"}, "values": [[0, "1"]]},
+        {"metric": {"kpi": "replicas_available", "deployment": "ad"}, "values": [[0, "1"], [1, "0"]]},
+        {"metric": {"kpi": "replicas_unavailable", "deployment": "ad"}, "values": [[0, "0"], [1, "1"]]},
+        {"metric": {"__name__": "kube_pod_status_phase", "exported_pod": "ad-69f7-x", "phase": "Pending"},
+         "values": [[1, "1"]]},
+    ]
+    out = _summarize_kube_workload_state(_range_result(series), "ad")
+    assert out is not None
+    assert "available=0" in out and "unavailable=1" in out
+    assert "ZERO available replicas" in out and "IS down" in out
+    assert "ad-69f7-x phase=Pending" in out
+
+
+def test_kube_summary_includes_terminations_and_handles_empty():
+    series = [
+        {"metric": {"__name__": "kube_pod_container_status_last_terminated_reason",
+                    "exported_pod": "image-provider-x", "reason": "OOMKilled"},
+         "values": [[1, "1"]]},
+    ]
+    out = _summarize_kube_workload_state(_range_result(series), "image-provider")
+    assert "image-provider-x: OOMKilled" in out
+    assert _summarize_kube_workload_state(_range_result([]), "x") is None
+    assert _summarize_kube_workload_state(None, "x") is None
+
+
+def test_prompt_renders_kube_workload_block(monkeypatch):
+    client = LLMClient.__new__(LLMClient)
+    captured = {}
+
+    async def fake_call(messages):
+        captured["messages"] = messages
+        return None
+
+    monkeypatch.setattr(client, "_call_ollama_with_resilience", fake_call)
+    client._circuit = MagicMock()
+
+    import asyncio
+    ctx = GatheredContext(
+        sources_available=3,
+        kube_workload_summary="Deployment ad: spec=1, available=0, unavailable=1 (latest values).",
+    )
+    asyncio.get_event_loop().run_until_complete(
+        client.investigate(_crashloop_alert(), ctx, "")
+    )
+    user = captured["messages"][-1]["content"]
+    assert "### Kubernetes workload state (PRE-INTERPRETED" in user
+    assert user.index("Kubernetes workload state") < user.index("### Metrics")
+    assert "'cannot determine' is wrong while this block is non-empty" in user

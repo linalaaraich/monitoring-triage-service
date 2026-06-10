@@ -467,6 +467,20 @@ _CRASHLOOP_ALERT_RE = re.compile(
 )
 
 
+def _cap_json(obj, limit: int = 6000) -> str:
+    """Render context JSON for the prompt with a hard size cap (iteration 5).
+
+    The raw `### Metrics` dump was unbounded — a namespace-wide kube-state
+    union (22-service otel-demo) inflates the prompt toward the num_ctx=16384
+    ceiling, where Ollama silently truncates the FRONT of the prompt (the
+    system prompt + whatever evidence we promoted to the top). Cap matches
+    tool_result_to_prompt_block's 6000."""
+    s = json.dumps(obj, indent=2, default=str)
+    if len(s) > limit:
+        s = s[:limit] + "\n... (truncated for prompt budget)"
+    return s
+
+
 def is_crashloop_alert(alertname: str) -> bool:
     """True when the alert is a crash-loop / restart-counter alert and the
     crash-loop playbook (build_crashloop_playbook) should be injected."""
@@ -694,8 +708,17 @@ class LLMClient:
         decision, parse_error = self._parse_response(raw_response)
 
         if decision is None:
-            # Retry once with the Pydantic validation error appended
-            logger.warning("LLM JSON parse failed, retrying with error feedback")
+            # Retry once with the Pydantic validation error appended.
+            # Iteration 5 (2026-06-10): log the raw head — this fired on
+            # EVERY production call while format=schema should make invalid
+            # JSON impossible, and without the raw text the failure was
+            # undiagnosable (and the model's possibly-correct first answer
+            # was being discarded invisibly).
+            logger.warning(
+                "LLM JSON parse failed (%s), retrying with error feedback. Raw head: %r",
+                parse_error if parse_error else "?",
+                (raw_response or "")[:300],
+            )
             messages.append({"role": "assistant", "content": raw_response})
             messages.append({
                 "role": "user",
@@ -1015,6 +1038,25 @@ class LLMClient:
                 "value above."
             )
 
+        # Iteration 5 (2026-06-10): deterministic kube-state interpretation,
+        # rendered ABOVE the raw metrics JSON with the same do-not-hedge
+        # framing as the drain-summary PRIMARY block. The raw series JSON
+        # alone demonstrably failed: available=0/Pending sat in ### Metrics
+        # and the model still wrote "no anomalous metric values"
+        # (13b15c81/1b177fa4).
+        if context.kube_workload_summary:
+            kube_workload_block = (
+                "### Kubernetes workload state (PRE-INTERPRETED from "
+                "kube-state-metrics — authoritative; reason FROM this)\n"
+                f"{context.kube_workload_summary}\n"
+                "If this block names a mechanism (zero available replicas, a "
+                "Pending/Failed pod, an OOMKilled termination), state THAT as "
+                "the cause — 'cannot determine' is wrong while this block is "
+                "non-empty.\n\n"
+            )
+        else:
+            kube_workload_block = ""
+
         user_content = f"""## Alert Details
 - **Name:** {alert.alertname}
 - **Severity:** {alert.severity}
@@ -1041,8 +1083,8 @@ The observed value above is ground-truth signal from Prometheus at the moment th
 {exemplar_block}
 ## Pre-Gathered Context
 
-### Metrics (Prometheus, last {settings.prometheus_range_minutes}min)
-{json.dumps(context.metrics, indent=2) if context.metrics else "[Prometheus] returned no series for service=" + alert.service + " — rare-but-possible, treat as MCP miss not app silence. The alert value above is still authoritative."}
+{kube_workload_block}### Metrics (Prometheus, last {settings.prometheus_range_minutes}min)
+{_cap_json(context.metrics) if context.metrics else "[Prometheus] returned no series for service=" + alert.service + " — rare-but-possible, treat as MCP miss not app silence. The alert value above is still authoritative."}
 {anomaly_block}
 ### Logs ({"⚠ AMBIENT FALLBACK — NOT ALERT-SPECIFIC" if context.loki_is_fallback else "Loki, service-scoped, Drain3-annotated"}, last {settings.loki_log_limit} lines)
 {loki_block}

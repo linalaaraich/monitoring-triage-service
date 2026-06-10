@@ -113,6 +113,94 @@ def _is_kube_workload_alert(alert) -> bool:
     return name.startswith("Kube") or name in _KUBE_WORKLOAD_ALERTS
 
 
+def _summarize_kube_workload_state(data: dict | None, service: str) -> str | None:
+    """Deterministically pre-interpret the kube-state context result into
+    plain-English facts (2026-06-10 iteration 5).
+
+    The raw query_range JSON demonstrably does NOT work as prompt evidence:
+    with available=0/unavailable=1/phase=Pending sitting in `### Metrics`,
+    the 14b still wrote "Prometheus does not show any anomalous metric
+    values" (decisions 13b15c81/1b177fa4 — the induced ad outage). The model
+    can read a categorical smoking gun (reason="OOMKilled" was named at 0.95
+    first-pass) but does not infer 'available=0 means the workload is down'
+    from numeric series. Same lesson as the metric interpreter (3.4) and the
+    crash-loop digest: fixed-shape results get interpreted in code, and the
+    model confirms rather than computes.
+
+    Returns None when the result has no kube-state series (non-kube alerts,
+    MCP miss) — the prompt then renders nothing extra.
+    """
+    if not isinstance(data, dict):
+        return None
+    series = data.get("result") or []
+    if not isinstance(series, list):
+        return None
+
+    def _latest(s):
+        vals = s.get("values") or ([s["value"]] if s.get("value") else [])
+        if not vals:
+            return None
+        try:
+            return float(vals[-1][1])
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    replicas: dict[str, float] = {}
+    pending: list[str] = []
+    terminations: list[str] = []
+    for s in series:
+        if not isinstance(s, dict):
+            continue
+        m = s.get("metric") or {}
+        v = _latest(s)
+        if v is None:
+            continue
+        kpi = m.get("kpi")
+        name = m.get("__name__", "")
+        pod = m.get("exported_pod") or m.get("pod") or "?"
+        if kpi in ("spec_replicas", "replicas_available", "replicas_unavailable"):
+            replicas[kpi] = v
+        elif name == "kube_pod_status_phase" and v >= 1:
+            pending.append(f"{pod} phase={m.get('phase', '?')}")
+        elif name == "kube_pod_container_status_last_terminated_reason" and v >= 1:
+            terminations.append(f"{pod}: {m.get('reason', '?')}")
+
+    if not (replicas or pending or terminations):
+        return None
+
+    lines: list[str] = []
+    if replicas:
+        spec = replicas.get("spec_replicas")
+        avail = replicas.get("replicas_available")
+        unavail = replicas.get("replicas_unavailable")
+        state = (
+            f"Deployment {service}: spec={spec:.0f}" if spec is not None else f"Deployment {service}:"
+        )
+        if avail is not None:
+            state += f", available={avail:.0f}"
+        if unavail is not None:
+            state += f", unavailable={unavail:.0f}"
+        state += " (latest values)."
+        if avail == 0 and (spec or 0) > 0:
+            state += (
+                f" => {service} currently has ZERO available replicas — the workload IS down;"
+                " that is the alert's mechanism, not 'insufficient data'."
+            )
+        lines.append(state)
+    if pending:
+        lines.append(
+            "Non-running pods in the namespace: " + "; ".join(sorted(set(pending))[:6])
+            + ". A Pending pod that never schedules (e.g. unsatisfiable nodeSelector/"
+            "resources) keeps the deployment at 0 available."
+        )
+    if terminations:
+        lines.append(
+            "Recent container terminations (last_terminated_reason): "
+            + "; ".join(sorted(set(terminations))[:6]) + "."
+        )
+    return "\n".join(lines)
+
+
 def _kube_state_promql(service: str, namespace: str) -> str:
     """Build a kube-state-metrics PromQL union for a workload alert. Returns the
     deployment's desired/available/unavailable replica counts plus, when the
@@ -260,6 +348,10 @@ class ContextGatherer:
         else:
             ctx.metrics, ctx.prometheus_ms = results[0]
             ctx.sources_available += 1
+            if _is_kube_workload_alert(alert):
+                ctx.kube_workload_summary = _summarize_kube_workload_state(
+                    ctx.metrics, alert.service
+                )
 
         if isinstance(results[1], Exception):
             errors.append(_mcp_error_label("Loki", results[1]))

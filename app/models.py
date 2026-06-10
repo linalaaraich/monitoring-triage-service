@@ -185,6 +185,12 @@ class GatheredContext(BaseModel):
     # or when the MCP call failed (non-fatal — first-pass RCA still ships).
     deep_trace: Optional[dict] = None
     deep_trace_ms: int = 0
+    # 2026-06-10 (iteration 5): deterministic plain-English interpretation of
+    # the kube-state context query (replica counts, non-running pods, recent
+    # termination reasons). Rendered ABOVE the raw metrics JSON for Kube*/
+    # PodCrashLooping alerts — the 14b doesn't infer "available=0 == down"
+    # from raw series (decisions 13b15c81/1b177fa4), so code does.
+    kube_workload_summary: Optional[str] = None
 
 
 # --- RCA history record ---
