@@ -1155,9 +1155,17 @@ class TriagePipeline:
                 llm_ms += fallback_ms
                 retry_ms = (retry_ms or 0) + fallback_ms
 
+            # 2026-06-10: pass human_cause — this call site missed the
+            # 2026-06-09 RC-3 fix, so a retry whose hedge lived in
+            # human_cause ("Cannot determine the root cause…") classified
+            # `actionable` and REPLACED the first pass while logging
+            # "validator clean" (live decision 51619214; save-time
+            # reclassification then re-tagged the row data_starved, masking
+            # the acceptance bug).
             retry_quality = _classify_rca_quality(
                 retry_decision.rca, retry_decision.reason,
                 retry_decision.suggested_actions, retry_decision.evidence,
+                human_cause=getattr(retry_decision, "human_cause", None),
             )
             # Re-run the validator on retry output (added 2026-04-28 PM-late
             # after live-verify saw surface-only ledes in /decisions despite

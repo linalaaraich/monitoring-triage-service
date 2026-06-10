@@ -592,3 +592,77 @@ async def test_pipeline_injects_digested_block(crashloop_store, monkeypatch):
     assert "block" in captured
     assert "PRE-INTERPRETED FACTS" in captured["block"]
     assert "READY VERDICT" in captured["block"]
+
+
+# ---------------------------------------------------------------------------
+# Iteration 3b — digest must be PROMOTED to the top of the prompt, and the
+# retry-acceptance classifier must scan human_cause (RC-3, 4th call site)
+# ---------------------------------------------------------------------------
+
+from app.llm_client import LLMClient
+from app.rca_store import _classify_rca_quality
+
+
+def test_digest_block_promoted_to_top_of_user_prompt(monkeypatch):
+    """Appending the digest at the end reproduced the 2026-06-04 empty-pillar
+    anchoring hedge (live 51619214/f1295667) — it must render FIRST."""
+    client = LLMClient.__new__(LLMClient)  # no httpx client needed
+
+    captured = {}
+
+    async def fake_call(messages):
+        captured["messages"] = messages
+        return None  # force the unavailable-fallback path; we only need the prompt
+
+    monkeypatch.setattr(client, "_call_ollama_with_resilience", fake_call)
+    client._circuit = MagicMock()
+
+    import asyncio
+    digest = "## Crash-loop evidence — PRE-INTERPRETED FACTS\n- Pod x: OOMKilled."
+    asyncio.get_event_loop().run_until_complete(
+        client.investigate(
+            _crashloop_alert(), GatheredContext(sources_available=3), "",
+            tool_result_block=digest,
+        )
+    )
+    user = captured["messages"][-1]["content"]
+    assert user.startswith("## PRIMARY EVIDENCE")
+    assert user.index("PRE-INTERPRETED FACTS") < user.index("## Alert Details")
+    assert "Do NOT answer 'cannot determine' while this block exists" in user
+
+
+def test_generic_tool_block_still_appended(monkeypatch):
+    client = LLMClient.__new__(LLMClient)
+    captured = {}
+
+    async def fake_call(messages):
+        captured["messages"] = messages
+        return None
+
+    monkeypatch.setattr(client, "_call_ollama_with_resilience", fake_call)
+    client._circuit = MagicMock()
+
+    import asyncio
+    block = "## Additional MCP query you requested: prometheus.query(...)\nRESULT: {}"
+    asyncio.get_event_loop().run_until_complete(
+        client.investigate(
+            _crashloop_alert(), GatheredContext(sources_available=3), "",
+            tool_result_block=block,
+        )
+    )
+    user = captured["messages"][-1]["content"]
+    assert not user.startswith("## PRIMARY EVIDENCE")
+    assert user.rstrip().endswith("RESULT: {}")
+
+
+def test_retry_quality_scans_human_cause():
+    """A hedge living ONLY in human_cause must classify data_starved at the
+    retry-acceptance call site too (live 51619214 classified actionable)."""
+    q = _classify_rca_quality(
+        "The service is degraded per the observed value.",  # rca: clean
+        "Reasoned from metrics.",                            # reason: clean
+        '["kubectl describe pod"]',                          # actions present
+        '["restart counter elevated"]',                      # evidence present
+        human_cause="Cannot determine the root cause of the alert with current data.",
+    )
+    assert q == "data_starved"

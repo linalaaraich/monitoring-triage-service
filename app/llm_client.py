@@ -650,9 +650,34 @@ class LLMClient:
             corrective_feedback=corrective_feedback,
         )
         if tool_result_block:
-            # Append to the final user message so the tool result is read
-            # together with the original evidence.
-            messages[-1]["content"] += "\n\n" + tool_result_block
+            if tool_result_block.startswith("## Crash-loop evidence"):
+                # Iteration 3b (2026-06-10): PROMOTE pre-interpreted facts to
+                # the TOP of the user message. Appending them at the end
+                # reproduced the exact 2026-06-04 drain-summary failure mode
+                # (see the Issue #2 comment in _build_prompt): the 14b reads
+                # the empty pillar blocks first, anchors on "Logs are empty",
+                # and emits its canned hedge — live decisions 51619214/
+                # f1295667 hedged WITH the digested OOMKilled facts sitting
+                # at the bottom of the prompt. Same fix as then: render the
+                # decisive evidence FIRST under a PRIMARY banner with an
+                # explicit do-not-hedge clamp, and pre-frame the empty
+                # pillars below as expected non-signals.
+                messages[-1]["content"] = (
+                    "## PRIMARY EVIDENCE — read FIRST, reason FROM this\n"
+                    "The facts below were extracted deterministically from "
+                    "Prometheus for THIS alert and already name the failure "
+                    "mode. The pillar sections further down may be empty "
+                    "(a crash-looping container often emits no logs/traces) — "
+                    "that is EXPECTED and is NOT 'insufficient data'. Do NOT "
+                    "answer 'cannot determine' while this block exists.\n\n"
+                    + tool_result_block
+                    + "\n\n---\n\n"
+                    + messages[-1]["content"]
+                )
+            else:
+                # Generic tool results: append to the final user message so
+                # the tool result is read together with the original evidence.
+                messages[-1]["content"] += "\n\n" + tool_result_block
 
         start = time.monotonic()
         raw_response = await self._call_ollama_with_resilience(messages)
