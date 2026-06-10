@@ -269,3 +269,209 @@ def test_kubepodcrashlooping_on_employees_still_gets_bad_config_exemplar():
     )
     assert ex is not None
     assert ex.get("id") == "crashloop-bad-config"
+
+
+# ---------------------------------------------------------------------------
+# Iteration 2 (same-day live induction): deterministic agency auto-template.
+# The playbook alone failed live — the 14b model never produced a parseable
+# tool_request ("LLM JSON parse failed" x3 in the 13:16-13:18 window), so the
+# agency pass fell back to the plain anti-hedge retry which has no tool offer
+# and no KSM evidence → "Cannot determine" again (image-provider induction).
+# Fix: pipeline auto-executes the playbook's combined query for crash-loop
+# alerts (via prometheus-mcp — MCP-only invariant intact), no LLM tool-pick.
+# ---------------------------------------------------------------------------
+
+import os
+import tempfile
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+import pytest_asyncio
+
+import app.bounded_agency as bounded_agency_mod
+from app.bounded_agency import PrometheusQueryArgs, build_crashloop_tool_request
+from app.config import settings
+from app.models import Decision, LLMDecision
+from app.pipeline import TriagePipeline
+from app.rca_store import RCAStore
+
+
+def test_build_crashloop_tool_request_shape():
+    req = build_crashloop_tool_request(_crashloop_alert())
+    assert req.name == "prometheus.query"
+    expr = req.args["expr"]
+    assert expr == crashloop_evidence_query("otel-demo", "accounting")
+    # The args must validate against the whitelisted schema (rejects extras).
+    PrometheusQueryArgs(**req.args)
+
+
+def test_build_crashloop_tool_request_missing_namespace_defaults_unknown():
+    alert = _crashloop_alert()
+    del alert.labels["namespace"]
+    req = build_crashloop_tool_request(alert)
+    assert 'exported_namespace="unknown"' in req.args["expr"]
+
+
+@pytest_asyncio.fixture
+async def crashloop_store():
+    db_path = os.path.join(tempfile.gettempdir(), "test_crashloop_agency.db")
+    if os.path.exists(db_path):
+        os.unlink(db_path)
+    s = RCAStore(db_path)
+    await s.init_db()
+    yield s
+    await s.close()
+    if os.path.exists(db_path):
+        os.unlink(db_path)
+
+
+def _hedged_decision() -> LLMDecision:
+    return LLMDecision(
+        decision=Decision.ESCALATE, severity="warning", confidence=0.30,
+        reason="No clear cause identified from pre-gathered metrics, logs, or traces.",
+        human_cause="Cannot determine the root cause of the alert with current data.",
+        rca="Cannot determine the root cause. Metrics show no significant anomalies.",
+        suggested_actions=[], evidence=[],
+    )
+
+
+def _named_oom_decision() -> LLMDecision:
+    return LLMDecision(
+        decision=Decision.ESCALATE, severity="warning", confidence=0.85,
+        reason="Kernel OOM-kill loop: memory limit too small for the workload.",
+        human_cause="accounting is being OOMKilled - its memory limit is too small for the workload.",
+        rca=(
+            "accounting's container is in an OOM-kill loop: "
+            "kube_pod_container_status_last_terminated_reason has reason=OOMKilled "
+            "and the restart counter climbed 4x in the last hour while the working "
+            "set hit the memory limit."
+        ),
+        suggested_actions=[
+            "kubectl -n otel-demo set resources deploy/accounting --limits=memory=256Mi — lift the ceiling out of OOMKill range",
+        ],
+        evidence=["kube_pod_container_status_last_terminated_reason{reason='OOMKilled'} = 1"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_crashloop_agency_runs_auto_template_not_llm_tool_pick(
+    crashloop_store, monkeypatch,
+):
+    """End-to-end through _process_alert: a crash-loop alert whose first pass
+    is data_starved must (1) NEVER go through request_tool_or_decide (the
+    flaky tool-pick), (2) auto-execute the combined KSM query, (3) re-prompt
+    with the tool result, and (4) persist the evidence-backed retry."""
+    monkeypatch.setattr(settings, "data_starved_early_exit_enabled", False)
+    monkeypatch.setattr(settings, "triage_data_starved_retry_enabled", True)
+    monkeypatch.setattr(settings, "triage_bounded_agency_enabled", True)
+
+    executed = []
+
+    async def fake_execute_tool(req, context_gatherer, store):
+        executed.append(req)
+        return {
+            "tool": req.name, "args": req.args,
+            "result": {"status": "success", "data": [{
+                "metric": {
+                    "__name__": "kube_pod_container_status_last_terminated_reason",
+                    "exported_pod": "accounting-7c8d9f6b5-x2x4q",
+                    "reason": "OOMKilled",
+                },
+                "value": 1,
+            }]},
+        }
+
+    monkeypatch.setattr(bounded_agency_mod, "execute_tool", fake_execute_tool)
+
+    llm = MagicMock()
+    llm.investigate = AsyncMock(side_effect=[
+        (_hedged_decision(), 10),       # first pass — hedge
+        (_named_oom_decision(), 10),    # evidence-laden retry — named cause
+    ])
+    llm.request_tool_or_decide = AsyncMock(
+        side_effect=AssertionError("crash-loop alerts must not use the LLM tool-pick"),
+    )
+
+    pipeline = TriagePipeline(
+        rca_store=crashloop_store,
+        drain=MagicMock(
+            annotate_lines=MagicMock(return_value=([], "")),
+            get_stats=MagicMock(return_value={"total_clusters": 0}),
+        ),
+        context_gatherer=MagicMock(
+            gather=AsyncMock(return_value=GatheredContext(sources_available=3)),
+        ),
+        llm_client=llm,
+        notifier=MagicMock(send_escalation=AsyncMock(), send_timeout_alert=AsyncMock()),
+        dedup=MagicMock(
+            check=AsyncMock(return_value=(False, None)),
+            record_first_decision=AsyncMock(), window=300,
+        ),
+    )
+
+    await pipeline._process_alert(_crashloop_alert(), source="grafana")
+
+    # (1) the flaky tool-pick was bypassed
+    llm.request_tool_or_decide.assert_not_called()
+    # (2) the combined template query was executed exactly once
+    assert len(executed) == 1
+    assert executed[0].name == "prometheus.query"
+    assert "kube_pod_container_status_last_terminated_reason" in executed[0].args["expr"]
+    assert 'exported_namespace="otel-demo"' in executed[0].args["expr"]
+    # (3) the retry prompt carried the tool result
+    assert llm.investigate.await_count == 2
+    retry_kwargs = llm.investigate.await_args_list[1].kwargs
+    assert "OOMKilled" in (retry_kwargs.get("tool_result_block") or "")
+    # (4) the persisted decision is the evidence-backed retry, not the hedge
+    rows = await crashloop_store.get_decisions(limit=3)
+    assert len(rows) == 1
+    assert "OOM" in (rows[0]["rca_report"] or "")
+    assert rows[0]["rca_quality"] == "actionable"
+
+
+@pytest.mark.asyncio
+async def test_non_crashloop_alert_still_uses_llm_tool_pick(
+    crashloop_store, monkeypatch,
+):
+    """Regression: the generic bounded-agency flow (LLM picks the tool) is
+    untouched for non-restart alerts."""
+    monkeypatch.setattr(settings, "data_starved_early_exit_enabled", False)
+    monkeypatch.setattr(settings, "triage_data_starved_retry_enabled", True)
+    monkeypatch.setattr(settings, "triage_bounded_agency_enabled", True)
+
+    async def fail_execute_tool(req, context_gatherer, store):
+        raise AssertionError("no auto-template for non-crashloop alerts")
+
+    monkeypatch.setattr(bounded_agency_mod, "execute_tool", fail_execute_tool)
+
+    llm = MagicMock()
+    llm.investigate = AsyncMock(side_effect=[
+        (_hedged_decision(), 10),
+        (_named_oom_decision(), 10),
+    ])
+    # Model declines a tool and decides directly — generic path exercised.
+    llm.request_tool_or_decide = AsyncMock(
+        return_value=(_named_oom_decision().model_dump(mode="json"), 10),
+    )
+
+    pipeline = TriagePipeline(
+        rca_store=crashloop_store,
+        drain=MagicMock(
+            annotate_lines=MagicMock(return_value=([], "")),
+            get_stats=MagicMock(return_value={"total_clusters": 0}),
+        ),
+        context_gatherer=MagicMock(
+            gather=AsyncMock(return_value=GatheredContext(sources_available=3)),
+        ),
+        llm_client=llm,
+        notifier=MagicMock(send_escalation=AsyncMock(), send_timeout_alert=AsyncMock()),
+        dedup=MagicMock(
+            check=AsyncMock(return_value=(False, None)),
+            record_first_decision=AsyncMock(), window=300,
+        ),
+    )
+
+    alert = _crashloop_alert(alertname="HighCpuUsage")
+    await pipeline._process_alert(alert, source="grafana")
+
+    llm.request_tool_or_decide.assert_awaited()

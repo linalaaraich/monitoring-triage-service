@@ -1015,58 +1015,93 @@ class TriagePipeline:
 
             if settings.triage_bounded_agency_enabled:
                 from app.bounded_agency import (
+                    build_crashloop_tool_request,
                     parse_tool_request,
                     execute_tool,
                     tool_result_to_prompt_block,
                 )
+                from app.llm_client import is_crashloop_alert
                 logger.info(
                     "First-pass data_starved for %s — invoking bounded-agency retry (P1.5)",
                     alert.alertname,
                 )
-                parsed, agency_ms = await self.llm.request_tool_or_decide(
-                    alert, ctx, anomaly_summary, history_context,
-                    correlated=correlated, metric_facts=metric_facts,
-                    prior_decision=prior_decision,
-                    corrective_feedback=corrective_feedback,
-                )
-                llm_ms += agency_ms
-                llm_duration.observe(agency_ms / 1000)
 
-                if parsed is not None:
-                    tool_req = parse_tool_request(parsed)
-                    if tool_req is not None:
-                        # Model asked for one tool call — execute + re-prompt.
-                        logger.info(
-                            "Agency: LLM requested tool %s with args %s",
-                            tool_req.name, tool_req.args,
-                        )
-                        tool_result = await execute_tool(tool_req, self.context, self.store)
-                        tool_block = tool_result_to_prompt_block(tool_result)
-                        retry_decision, rd_ms = await self.llm.investigate(
-                            alert, ctx, anomaly_summary, history_context,
-                            correlated=correlated, metric_facts=metric_facts,
-                            tool_result_block=tool_block,
-                            prior_decision=prior_decision,
-                            corrective_feedback=corrective_feedback,
-                        )
-                        llm_duration.observe(rd_ms / 1000)
-                        llm_ms += rd_ms
-                        retry_ms = agency_ms + rd_ms
-                        used_agency = True
-                        triage_bounded_agency_invocations_total.labels(outcome="tool_called").inc()
-                    else:
-                        # Model chose to emit a decision directly without a tool — try to parse
-                        try:
-                            from app.models import LLMDecision as _LLMDecision
-                            retry_decision = _LLMDecision(**parsed)
-                            retry_ms = agency_ms
-                            used_agency = True
-                            triage_bounded_agency_invocations_total.labels(outcome="decided_directly").inc()
-                        except Exception as e:
-                            logger.debug("Agency response couldn't be parsed as LLMDecision: %s", e)
-                            triage_bounded_agency_invocations_total.labels(outcome="no_action").inc()
+                if is_crashloop_alert(alert.alertname):
+                    # Crash-loop alerts: deterministic auto-template query
+                    # (2026-06-10 iteration 2). Don't ask the model to compose
+                    # a tool_request — live induction (image-provider OOM at
+                    # 4Mi) showed the 14b model failing the tool-pick JSON
+                    # step every time, dropping the KSM restart/termination
+                    # evidence on the floor and reproducing the 29a05711
+                    # hedge. The decisive series for this family are FIXED
+                    # (last_terminated_reason + restart increase + memory
+                    # limit), so the pipeline runs the playbook's combined
+                    # query itself via prometheus-mcp (MCP-only invariant
+                    # intact) and goes straight to the evidence-laden retry.
+                    tool_req = build_crashloop_tool_request(alert)
+                    logger.info(
+                        "Agency: crash-loop auto-template query (no LLM tool-pick): %s",
+                        tool_req.args.get("expr", "")[:200],
+                    )
+                    tool_result = await execute_tool(tool_req, self.context, self.store)
+                    tool_block = tool_result_to_prompt_block(tool_result)
+                    retry_decision, rd_ms = await self.llm.investigate(
+                        alert, ctx, anomaly_summary, history_context,
+                        correlated=correlated, metric_facts=metric_facts,
+                        tool_result_block=tool_block,
+                        prior_decision=prior_decision,
+                        corrective_feedback=corrective_feedback,
+                    )
+                    llm_duration.observe(rd_ms / 1000)
+                    llm_ms += rd_ms
+                    retry_ms = rd_ms
+                    used_agency = True
+                    triage_bounded_agency_invocations_total.labels(outcome="auto_template").inc()
                 else:
-                    triage_bounded_agency_invocations_total.labels(outcome="no_action").inc()
+                    parsed, agency_ms = await self.llm.request_tool_or_decide(
+                        alert, ctx, anomaly_summary, history_context,
+                        correlated=correlated, metric_facts=metric_facts,
+                        prior_decision=prior_decision,
+                        corrective_feedback=corrective_feedback,
+                    )
+                    llm_ms += agency_ms
+                    llm_duration.observe(agency_ms / 1000)
+
+                    if parsed is not None:
+                        tool_req = parse_tool_request(parsed)
+                        if tool_req is not None:
+                            # Model asked for one tool call — execute + re-prompt.
+                            logger.info(
+                                "Agency: LLM requested tool %s with args %s",
+                                tool_req.name, tool_req.args,
+                            )
+                            tool_result = await execute_tool(tool_req, self.context, self.store)
+                            tool_block = tool_result_to_prompt_block(tool_result)
+                            retry_decision, rd_ms = await self.llm.investigate(
+                                alert, ctx, anomaly_summary, history_context,
+                                correlated=correlated, metric_facts=metric_facts,
+                                tool_result_block=tool_block,
+                                prior_decision=prior_decision,
+                                corrective_feedback=corrective_feedback,
+                            )
+                            llm_duration.observe(rd_ms / 1000)
+                            llm_ms += rd_ms
+                            retry_ms = agency_ms + rd_ms
+                            used_agency = True
+                            triage_bounded_agency_invocations_total.labels(outcome="tool_called").inc()
+                        else:
+                            # Model chose to emit a decision directly without a tool — try to parse
+                            try:
+                                from app.models import LLMDecision as _LLMDecision
+                                retry_decision = _LLMDecision(**parsed)
+                                retry_ms = agency_ms
+                                used_agency = True
+                                triage_bounded_agency_invocations_total.labels(outcome="decided_directly").inc()
+                            except Exception as e:
+                                logger.debug("Agency response couldn't be parsed as LLMDecision: %s", e)
+                                triage_bounded_agency_invocations_total.labels(outcome="no_action").inc()
+                    else:
+                        triage_bounded_agency_invocations_total.labels(outcome="no_action").inc()
 
             # Plain anti-hedge retry as fallback (bounded-agency disabled
             # or produced nothing usable).

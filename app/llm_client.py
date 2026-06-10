@@ -495,6 +495,20 @@ def crashloop_evidence_query(namespace: str, pod_prefix: str) -> str:
     )
 
 
+def crashloop_pod_prefix(alert: GrafanaAlert) -> str:
+    """Stable pod-name prefix for the crash-loop evidence queries.
+
+    Prefix-match pods so the query catches both the looping pod and any
+    replacement pod after a deploy roll. The service label equals the
+    container/app name on this bed (the PodCrashLooping rule mints it from
+    exported_container), so it is the stable prefix; fall back to the full
+    pod name."""
+    service = alert.service
+    if service not in ("", "unknown"):
+        return service
+    return alert.labels.get("pod", "") or ""
+
+
 def build_crashloop_playbook(alert: GrafanaAlert) -> str:
     """Investigation playbook for crash-loop / restart alerts (added
     2026-06-10 after decision 29a05711 hedged on a nameable OOM loop).
@@ -514,12 +528,7 @@ def build_crashloop_playbook(alert: GrafanaAlert) -> str:
     namespace = alert.labels.get("namespace", "") or "unknown"
     pod = alert.labels.get("pod", "") or ""
     service = alert.service
-    # Prefix-match pods so the query catches both the looping pod and any
-    # replacement pod after a deploy roll. The service label equals the
-    # container/app name on this bed (the rule mints it from
-    # exported_container), so it is the stable prefix; fall back to the
-    # full pod name.
-    pod_prefix = service if service not in ("", "unknown") else pod
+    pod_prefix = crashloop_pod_prefix(alert)
     combined_query = crashloop_evidence_query(namespace, pod_prefix)
     sel_human = (
         'exported_namespace="' + namespace + '",exported_pod=~"'

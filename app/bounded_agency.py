@@ -180,6 +180,29 @@ class ToolRequest(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)
 
 
+def build_crashloop_tool_request(alert) -> ToolRequest:
+    """Deterministic agency query for crash-loop / restart alerts.
+
+    Iteration 2 of the 2026-06-10 micro-cycle: the playbook alone was not
+    enough — live induction (image-provider OOM at 4Mi) showed the 14b model
+    repeatedly emitting malformed tool_request JSON ("LLM JSON parse failed"
+    x3), so the agency pass fell back to the plain anti-hedge retry which
+    has NO tool offer and no KSM evidence in context → "Cannot determine"
+    again (decisions 03fd08ea accounting re-fire, and the image-provider
+    row at 13:18). For an alert family whose decisive evidence is ALWAYS
+    the same three series, asking the model to compose the query is pure
+    downside. The pipeline now auto-executes the playbook's combined query
+    (still through prometheus-mcp — MCP-only invariant intact) and goes
+    straight to the evidence-laden retry prompt."""
+    from app.llm_client import crashloop_evidence_query, crashloop_pod_prefix
+    namespace = alert.labels.get("namespace", "") or "unknown"
+    prefix = crashloop_pod_prefix(alert)
+    return ToolRequest(
+        name="prometheus.query",
+        args={"expr": crashloop_evidence_query(namespace, prefix)},
+    )
+
+
 def parse_tool_request(raw_llm_json: str | dict) -> ToolRequest | None:
     """If the LLM emitted `{"tool_request": {...}}`, parse + validate it.
     Returns None if the response was a normal decision (no tool request).
