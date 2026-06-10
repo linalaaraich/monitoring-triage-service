@@ -949,7 +949,17 @@ class LLMClient:
         if exemplar:
             rendered = exemplars_lib.format_for_prompt(exemplar)
             if rendered:
-                exemplar_block = "\n" + rendered + "\n"
+                # 2026-06-11: numeral guard — a live PodCrashLooping verdict
+                # cited the EXEMPLAR's example limit ("128Mi") instead of the
+                # real one (4Mi). Example numbers are illustrative; only
+                # evidence numbers may be cited.
+                exemplar_block = (
+                    "\n" + rendered + "\n"
+                    "(The exemplar above is an ANALOGY for shape and tone. Its "
+                    "numbers — limits, counts, durations — are from a DIFFERENT "
+                    "incident: NEVER copy them. Cite only values present in THIS "
+                    "alert's evidence.)\n"
+                )
 
         # P1.4 — Correlated alerts as first-class prompt section. Moved out of
         # history_context so the prompt rule H about explaining the

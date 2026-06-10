@@ -145,9 +145,18 @@ def _summarize_kube_workload_state(data: dict | None, service: str) -> str | Non
         except (TypeError, ValueError, IndexError):
             return None
 
+    # 2026-06-11 (post-battery fix): pending/termination facts are SCOPED to
+    # the alert's own service. The namespace-wide version let the model
+    # borrow a NEIGHBOR's OOMKilled as this alert's cause — live decisions
+    # 0e892b15/1dc8f6be named "ad is being OOMKilled" for an unschedulable
+    # Pending outage while image-provider OOM-looped in the same namespace.
+    # Cross-service context is reduced to a count with an explicit
+    # do-not-attribute guard (no reason strings the model could copy).
     replicas: dict[str, float] = {}
     pending: list[str] = []
     terminations: list[str] = []
+    other_pending = 0
+    other_terminations = 0
     for s in series:
         if not isinstance(s, dict):
             continue
@@ -158,12 +167,19 @@ def _summarize_kube_workload_state(data: dict | None, service: str) -> str | Non
         kpi = m.get("kpi")
         name = m.get("__name__", "")
         pod = m.get("exported_pod") or m.get("pod") or "?"
+        mine = pod.startswith(service + "-") or pod == service
         if kpi in ("spec_replicas", "replicas_available", "replicas_unavailable"):
             replicas[kpi] = v
         elif name == "kube_pod_status_phase" and v >= 1:
-            pending.append(f"{pod} phase={m.get('phase', '?')}")
+            if mine:
+                pending.append(f"{pod} phase={m.get('phase', '?')}")
+            else:
+                other_pending += 1
         elif name == "kube_pod_container_status_last_terminated_reason" and v >= 1:
-            terminations.append(f"{pod}: {m.get('reason', '?')}")
+            if mine:
+                terminations.append(f"{pod}: {m.get('reason', '?')}")
+            else:
+                other_terminations += 1
 
     if not (replicas or pending or terminations):
         return None
@@ -189,14 +205,27 @@ def _summarize_kube_workload_state(data: dict | None, service: str) -> str | Non
         lines.append(state)
     if pending:
         lines.append(
-            "Non-running pods in the namespace: " + "; ".join(sorted(set(pending))[:6])
+            f"Non-running pods of {service}: " + "; ".join(sorted(set(pending))[:6])
             + ". A Pending pod that never schedules (e.g. unsatisfiable nodeSelector/"
             "resources) keeps the deployment at 0 available."
         )
     if terminations:
         lines.append(
-            "Recent container terminations (last_terminated_reason): "
+            f"Recent container terminations of {service} (last_terminated_reason): "
             + "; ".join(sorted(set(terminations))[:6]) + "."
+        )
+    if not terminations and not pending and replicas.get("replicas_available") == 0:
+        lines.append(
+            f"No termination or non-running-pod evidence for {service}'s own pods in "
+            "the window — if the deployment is unavailable, suspect rollout/scheduling "
+            "(pod replaced or never started) rather than crashes."
+        )
+    if other_pending or other_terminations:
+        lines.append(
+            f"(Context only — OTHER services in this namespace: {other_pending} "
+            f"non-running pod(s), {other_terminations} recent termination(s). These "
+            f"belong to OTHER workloads — do NOT attribute their failure modes to "
+            f"{service}.)"
         )
     return "\n".join(lines)
 

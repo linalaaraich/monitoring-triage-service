@@ -829,3 +829,56 @@ def test_traces_and_deep_trace_capped_in_prompt(monkeypatch):
     )
     user = captured["messages"][-1]["content"]
     assert user.count("(truncated for prompt budget)") >= 2
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-11 — service-scoped kube summary + exemplar numeral guard
+# ---------------------------------------------------------------------------
+
+def test_kube_summary_scopes_facts_to_alert_service():
+    """Live 1dc8f6be: ad's RCA borrowed image-provider's OOMKilled via the
+    namespace-wide terminations line. Neighbor facts must be count-only with
+    a do-not-attribute guard."""
+    series = [
+        {"metric": {"kpi": "spec_replicas", "deployment": "ad"}, "values": [[0, "1"]]},
+        {"metric": {"kpi": "replicas_available", "deployment": "ad"}, "values": [[0, "0"]]},
+        {"metric": {"__name__": "kube_pod_status_phase", "exported_pod": "ad-69f7-x",
+                    "phase": "Pending"}, "values": [[0, "1"]]},
+        {"metric": {"__name__": "kube_pod_container_status_last_terminated_reason",
+                    "exported_pod": "image-provider-58fc-y", "reason": "OOMKilled"},
+         "values": [[0, "1"]]},
+    ]
+    out = _summarize_kube_workload_state(_range_result(series), "ad")
+    assert "ad-69f7-x phase=Pending" in out
+    assert "OOMKilled" not in out                      # neighbor reason never shown
+    assert "image-provider" not in out
+    assert "do NOT attribute" in out and "1 recent termination" in out
+
+
+def test_kube_summary_no_own_evidence_hints_scheduling():
+    series = [
+        {"metric": {"kpi": "spec_replicas", "deployment": "ad"}, "values": [[0, "1"]]},
+        {"metric": {"kpi": "replicas_available", "deployment": "ad"}, "values": [[0, "0"]]},
+    ]
+    out = _summarize_kube_workload_state(_range_result(series), "ad")
+    assert "rollout/scheduling" in out
+
+
+def test_exemplar_block_carries_numeral_guard(monkeypatch):
+    client = LLMClient.__new__(LLMClient)
+    captured = {}
+
+    async def fake_call(messages):
+        captured["messages"] = messages
+        return None
+
+    monkeypatch.setattr(client, "_call_ollama_with_resilience", fake_call)
+    client._circuit = MagicMock()
+
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(
+        client.investigate(_crashloop_alert(), GatheredContext(sources_available=3), "")
+    )
+    user = captured["messages"][-1]["content"]
+    if "ANALOGY for shape and tone" in user:   # exemplar matched for this alert
+        assert "NEVER copy them" in user
