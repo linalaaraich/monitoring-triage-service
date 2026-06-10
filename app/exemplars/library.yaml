@@ -519,6 +519,47 @@ exemplars:
     lesson: "CrashLoopBackOff is one of the most common production failures. Rollback first (restore service), fix forward through GitOps second (auditable), structural improvement third."
     doc_anchor: "scenario-9--app-boot-failure--crashloopbackoff-from-a-bad-config-map"
 
+  - id: oom-crashloop-restart
+    # Added 2026-06-10 with the namespace-generic PodCrashLooping rule
+    # (monitoring-project c6dbf81) after decision 29a05711 hedged on a real
+    # OOM loop. Keyed on the restart-counter alert shape; services "*"
+    # because the rule is namespace-generic (otel-demo, app, rental, ...).
+    # Placed AFTER crashloop-bad-config so on score ties for the employees-*
+    # services the established boot-failure exemplar still wins.
+    archetype: "Container OOM-kill restart loop named via termination-reason evidence"
+    match:
+      alertname: "^(Kube)?PodCrashLooping$"
+      services: ["*"]
+      deployment_types: ["k8s"]
+    decision: "ESCALATE"
+    confidence_band: "0.70-0.90"
+    one_line: "Container is OOMKilled every cycle — memory limit too small for the workload; restart counter staircases until the limit is raised."
+    human_cause: "accounting is being OOMKilled about every 17 minutes - its 120Mi memory limit is too small for the workload, so the kernel kills it and the pod restarts."
+    rca: |
+      The pod is in a kernel-enforced OOM-kill loop: the container's working set
+      grows past its cgroup memory limit, the kernel kills it (exit 137), kubelet
+      restarts it, and the cycle repeats. The verdict lives in ONE series —
+      kube_pod_container_status_last_terminated_reason has reason="OOMKilled" for
+      this pod (KSM labels arrive as exported_namespace/exported_pod/exported_container
+      on this platform). The restart counter staircases (+N per hour) while the loop is
+      active. Note the trailing-window nuance: the alert fires on increase(...[1h]),
+      so if the recent-window restart increase is ~0 and the pod is healthy, the loop
+      ALREADY ENDED (e.g. an operator raised the limit) — then the correct verdict is
+      DISMISS with the ended breach NAMED, not "cannot determine". Current-state
+      health is not evidence of "no anomalies" for a retrospective restart alert.
+    evidence_shape:
+      - "kube_pod_container_status_last_terminated_reason{exported_pod=~'{service}.*', reason='OOMKilled'} = 1"
+      - "increase(kube_pod_container_status_restarts_total{exported_pod=~'{service}.*'}[2h]) = N (staircase)"
+      - "kube_pod_container_resource_limits{resource='memory'} = X Mi vs container_memory_working_set_bytes hugging X"
+      - "Logs often CLEAN — the kernel kills the process mid-flight; absence of app errors does NOT mean absence of cause"
+    actions_shape:
+      - "kubectl -n {namespace} set resources deploy/{service} --limits=memory=<2-4x current> — lift the ceiling out of OOMKill range"
+      - "Persist the new limit through the GitOps path (helm values / ansible) so the next deploy doesn't regress it"
+      - "Watch increase(kube_pod_container_status_restarts_total[30m]) flatten to 0 to confirm remediation"
+      - "If the working set keeps growing after the bump: memory leak — capture a heap profile and helm rollback to the last good revision"
+    lesson: "Restart alerts are retrospective: name the kill reason from last_terminated_reason, check whether the loop is STILL active, and never read current-state calm as 'no anomalies'."
+    doc_anchor: "scenario-1--spring-boot-oom-kill-loop-caught-in-a-single-cycle"
+
   - id: network-firewall-attribution
     # PARTIALLY FORWARD-LOOKING (audit 2026-04-28): regex names
     # HighKongUpstreamErrorRate / HighFrontendErrorRate which are not

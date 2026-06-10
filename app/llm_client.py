@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 
 import httpx
@@ -455,6 +456,123 @@ def build_corrective_feedback_block(rows: list[dict] | None) -> str:
     )
 
 
+# Crash-loop / restart-shaped alert names. Matches PodCrashLooping (the
+# 2026-06-10 namespace-generic rule, monitoring-project c6dbf81),
+# KubePodCrashLooping, anything CrashLoopBackOff-flavoured, KubeWorkloadDown
+# and *Restart* counters. Deliberately a substring search, not an anchored
+# whitelist — restart alerts come in many spellings and missing one costs a
+# hedged "cannot determine" RCA (decision 29a05711).
+_CRASHLOOP_ALERT_RE = re.compile(
+    r"(?i)crash.?loop|KubeWorkloadDown|Restart"
+)
+
+
+def is_crashloop_alert(alertname: str) -> bool:
+    """True when the alert is a crash-loop / restart-counter alert and the
+    crash-loop playbook (build_crashloop_playbook) should be injected."""
+    return bool(_CRASHLOOP_ALERT_RE.search(alertname or ""))
+
+
+def crashloop_evidence_query(namespace: str, pod_prefix: str) -> str:
+    """The single combined PromQL the bounded-agency pass should run for a
+    crash-loop alert: termination reason + restart increase + memory limit,
+    unioned with `or` so ONE whitelisted prometheus.query call returns all
+    three evidence families.
+
+    KSM series on this platform carry exported_namespace / exported_pod /
+    exported_container (the collector's honor-labels clobber) — NOT bare
+    namespace/pod. Using the bare labels returns nothing and the model then
+    concludes "no anomalies"; that exact failure produced decision 29a05711.
+    """
+    sel = (
+        'exported_namespace="' + namespace + '",exported_pod=~"'
+        + pod_prefix + '.*"'
+    )
+    return (
+        "kube_pod_container_status_last_terminated_reason{" + sel + "}"
+        " or increase(kube_pod_container_status_restarts_total{" + sel + "}[2h])"
+        " or kube_pod_container_resource_limits{resource=\"memory\"," + sel + "}"
+    )
+
+
+def build_crashloop_playbook(alert: GrafanaAlert) -> str:
+    """Investigation playbook for crash-loop / restart alerts (added
+    2026-06-10 after decision 29a05711 hedged on a nameable OOM loop).
+
+    Why this exists: a restart-counter alert is RETROSPECTIVE — the rule
+    (e.g. increase(kube_pod_container_status_restarts_total[1h]) > 1) fires
+    on a trailing window, so it can fire AFTER the loop already ended (the
+    accounting case: limit raised 12:41, alert fired 12:43 on the [1h]
+    tail). Live-state context gathering then looks healthy and, without
+    guidance, the model hedges "metrics show no significant anomalies".
+    The playbook redirects the investigation at the RECENT termination
+    evidence (last_terminated_reason, restart increase) which Prometheus
+    holds for every crash loop, and gives the exact KSM label spelling +
+    a copy-pasteable bounded-agency query so the one allowed extra MCP
+    call lands.
+    """
+    namespace = alert.labels.get("namespace", "") or "unknown"
+    pod = alert.labels.get("pod", "") or ""
+    service = alert.service
+    # Prefix-match pods so the query catches both the looping pod and any
+    # replacement pod after a deploy roll. The service label equals the
+    # container/app name on this bed (the rule mints it from
+    # exported_container), so it is the stable prefix; fall back to the
+    # full pod name.
+    pod_prefix = service if service not in ("", "unknown") else pod
+    combined_query = crashloop_evidence_query(namespace, pod_prefix)
+    sel_human = (
+        'exported_namespace="' + namespace + '",exported_pod=~"'
+        + pod_prefix + '.*"'
+    )
+    return (
+        "\n## Crash-loop / restart alert playbook (this alert counts CONTAINER RESTARTS over a trailing window)\n"
+        "This rule fired on a restart counter (see the PromQL above) — the pod restarted "
+        "repeatedly inside the lookback window. Two facts you MUST internalise:\n"
+        "  1. The evidence is RETROSPECTIVE. A trailing-window restart rule can fire (or stay "
+        "firing) AFTER the loop already ended — e.g. minutes after an operator raised a memory "
+        "limit and the pod rolled. CURRENT health (clean logs, calm metrics, pod Running) does "
+        "NOT mean 'no anomalies'; it can simply mean the crashes already stopped. Investigate "
+        "the RECENT termination evidence, never just the live state.\n"
+        "  2. Prometheus holds the series that NAME the cause for every crash loop. On this "
+        "platform the kube-state-metrics labels arrive PREFIXED: exported_namespace / "
+        "exported_pod / exported_container (NOT bare namespace/pod — those selectors return "
+        "nothing here).\n"
+        "Key evidence series for THIS alert (namespace=" + namespace + ", pod=" + (pod or "?")
+        + ", service=" + service + "):\n"
+        "  - WHY it died: kube_pod_container_status_last_terminated_reason{" + sel_human + "} "
+        "— the `reason` label IS the verdict (OOMKilled / Error / ContainerCannotRun).\n"
+        "  - IS the loop still active: compare increase(kube_pod_container_status_restarts_total{"
+        + sel_human + "}[30m]) against the [2h] increase — recent-window ~0 means it stopped.\n"
+        "  - HEADROOM: kube_pod_container_resource_limits{resource=\"memory\"," + sel_human + "} "
+        "vs container_memory_working_set_bytes — a working set hugging the limit confirms OOM.\n"
+        "If these series are NOT in the pre-gathered context and you are offered a tool call, "
+        "request prometheus.query with EXACTLY this expression (copy verbatim — it unions all "
+        "three families in one call):\n"
+        "  " + combined_query + "\n"
+        "VERDICT — choose ONE:\n"
+        "  (a) reason=\"OOMKilled\" AND restarts still climbing → ESCALATE, confidence ≥0.6. "
+        "NAME it in human_cause: '" + service + " container is being OOMKilled — memory limit "
+        "<X>Mi too small for the workload; restarted <N>x in the last hour.' Actions: raise the "
+        "memory limit (kubectl -n " + namespace + " patch deploy/" + service + " ... or the "
+        "GitOps equivalent), then verify the restart counter flattens.\n"
+        "  (b) reason=\"Error\"/\"ContainerCannotRun\" and every restart dies at the same boot "
+        "step → bad config / migration boot failure. ESCALATE; rollback-first (kubectl rollout "
+        "undo), fix forward through GitOps second.\n"
+        "  (c) Termination evidence shows a past kill reason BUT the recent-window restart "
+        "increase is ~0 and the pod is currently healthy → the loop ALREADY ENDED (remediated "
+        "by a recent change, or self-resolved). SAY THAT, with the mechanism — e.g. '" + service
+        + " was OOMKilled repeatedly until the memory limit was raised; restarts have stopped "
+        "and the alert reflects the trailing window.' Verdict DISMISS (monitor), confidence "
+        "0.6-0.8. A named, ended breach is a DETERMINED cause — never call it 'cannot "
+        "determine'.\n"
+        "NEVER answer 'insufficient data' / 'cannot determine' for a restart alert: the restart "
+        "counter that fired the rule IS data, and the termination-reason series exists for any "
+        "pod that restarted. If you don't see the cause yet, you haven't queried it yet — "
+        "request the query above.\n"
+    )
+
+
 def _build_fallback_decision() -> LLMDecision:
     """Return a safe NEEDS_HUMAN_REVIEW fallback when the LLM is unavailable."""
     return LLMDecision(
@@ -734,6 +852,16 @@ class LLMClient:
                 "as benign (d) or shelve as un-correlated (c). Name what you see.\n"
             )
 
+        # Crash-loop / restart playbook (added 2026-06-10 after decision
+        # 29a05711 — PodCrashLooping on a real OOM loop hedged "cannot
+        # determine" because no alert-type guidance existed for restart
+        # alerts; bounded-agency never queried the KSM restart/termination
+        # series). See build_crashloop_playbook docstring for the trailing-
+        # window timing nuance.
+        crashloop_playbook_block = ""
+        if is_crashloop_alert(alert.alertname):
+            crashloop_playbook_block = build_crashloop_playbook(alert)
+
         # Exemplar injection — pick the best-matching canonical RCA from
         # app/exemplars/library.yaml and render it as a structural reference.
         # See app/exemplars/__init__.py for matching logic and decisions-log.html#D17
@@ -861,6 +989,7 @@ class LLMClient:
 - **Observed value at fire time:** {value_line}
 {interpreter_block}
 {drain3_playbook_block}
+{crashloop_playbook_block}
 {correlated_block}
 {prior_decision_block}
 {corrective_feedback_block}

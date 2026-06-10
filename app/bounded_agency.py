@@ -149,7 +149,7 @@ Tool catalog:
     args: {}
     use when: the pre-injected reference exemplar at the top of this prompt
     doesn't fit the archetype you're seeing, and you want to scan the full
-    catalogue of canonical good-RCA shapes (11 archetypes — OOM-loop,
+    catalogue of canonical good-RCA shapes (15 archetypes — OOM-loop,
     upstream-latency, cascade incidents, network-firewall, TLS expiry, etc.).
     Returns id + archetype + one-line gist for each.
 

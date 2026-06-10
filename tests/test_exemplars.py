@@ -150,8 +150,9 @@ def test_format_for_prompt_handles_dismiss_with_empty_actions():
 
 def test_list_all_returns_all_exemplars():
     items = ex.list_all()
-    assert len(items) == 14
+    assert len(items) == 15  # +oom-crashloop-restart (2026-06-10)
     ids = {item["id"] for item in items}
+    assert "oom-crashloop-restart" in ids
     assert "oom-loop" in ids
     assert "upstream-latency-attribution" in ids
     assert "tls-cert-expiry-pre-failure" in ids
