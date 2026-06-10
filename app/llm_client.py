@@ -714,10 +714,15 @@ class LLMClient:
             # JSON impossible, and without the raw text the failure was
             # undiagnosable (and the model's possibly-correct first answer
             # was being discarded invisibly).
+            # Full raw output — the 300-char head proved useless precisely
+            # when it mattered (the failing output WAS 2 chars: '{\n' from
+            # context exhaustion). Failures are either tiny (truncation) or
+            # genuinely malformed; both are worth the log space.
             logger.warning(
-                "LLM JSON parse failed (%s), retrying with error feedback. Raw head: %r",
+                "LLM JSON parse failed (%s), retrying with error feedback. Raw output (%d chars): %r",
                 parse_error if parse_error else "?",
-                (raw_response or "")[:300],
+                len(raw_response or ""),
+                raw_response or "",
             )
             messages.append({"role": "assistant", "content": raw_response})
             messages.append({
@@ -1090,12 +1095,12 @@ The observed value above is ground-truth signal from Prometheus at the moment th
 {loki_block}
 
 ### Traces (Jaeger, last {settings.jaeger_trace_limit} traces)
-{json.dumps(context.traces, indent=2, default=str) if context.traces else "[Jaeger] returned 0 traces for service=" + alert.service + ". Likely normal for infrastructure alerts; a traced request-path would have surfaced a spring-boot/kong service here."}
+{_cap_json(context.traces) if context.traces else "[Jaeger] returned 0 traces for service=" + alert.service + ". Likely normal for infrastructure alerts; a traced request-path would have surfaced a spring-boot/kong service here."}
 {(
     chr(10) + "### Trace span breakdown (the slowest trace, drilled to per-span detail)" + chr(10) +
     "This is the keystone evidence for latency-flavoured alerts: per-span durations, db.statement (PII-sanitized), http.target, error tags. Use it to NAME what's slow, not just say upstream is slow." + chr(10) +
     "```json" + chr(10) +
-    json.dumps(context.deep_trace, indent=2, default=str) + chr(10) +
+    _cap_json(context.deep_trace) + chr(10) +
     "```" + chr(10)
 ) if context.deep_trace else ""}
 ### Context Gathering Stats
@@ -1244,12 +1249,30 @@ Analyze this alert using the context above. Respond with ONLY valid JSON. Start 
                     "format": self._RESPONSE_SCHEMA,
                     "options": {
                         "temperature": 0,
-                        "num_ctx": 16384,
+                        "num_ctx": settings.ollama_num_ctx,
                     },
                 },
             )
             resp.raise_for_status()
             data = resp.json()
+            # 2026-06-10: context-exhaustion telemetry. When the prompt fills
+            # num_ctx, Ollama silently truncates the prompt FRONT (system
+            # prompt + promoted evidence first) and generation stops at the
+            # ceiling — reproduced live: prompt_eval=16383, eval=1, content
+            # '{\n', done_reason=length. That single mechanism produced the
+            # majority "cannot determine" hedges. Make it LOUD, never silent.
+            if data.get("done_reason") == "length" or (
+                isinstance(data.get("prompt_eval_count"), int)
+                and data["prompt_eval_count"] >= settings.ollama_num_ctx - 256
+            ):
+                logger.warning(
+                    "LLM CONTEXT EXHAUSTED: done_reason=%s prompt_eval=%s eval=%s "
+                    "num_ctx=%s — prompt was truncated (evidence/system prompt "
+                    "lost) and/or output cut off. Shrink the prompt or raise "
+                    "OLLAMA_NUM_CTX.",
+                    data.get("done_reason"), data.get("prompt_eval_count"),
+                    data.get("eval_count"), settings.ollama_num_ctx,
+                )
             # Ollama reports token counts on the chat response; record for self-observability (AI-03)
             prompt_tokens = data.get("prompt_eval_count")
             completion_tokens = data.get("eval_count")

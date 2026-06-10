@@ -769,3 +769,63 @@ def test_prompt_renders_kube_workload_block(monkeypatch):
     assert "### Kubernetes workload state (PRE-INTERPRETED" in user
     assert user.index("Kubernetes workload state") < user.index("### Metrics")
     assert "'cannot determine' is wrong while this block is non-empty" in user
+
+
+# ---------------------------------------------------------------------------
+# Iteration 6 — context-exhaustion fix (num_ctx, truncation telemetry, caps)
+# ---------------------------------------------------------------------------
+
+from app.config import settings as _settings
+
+
+def test_ollama_call_uses_configured_num_ctx_and_flags_exhaustion(monkeypatch, caplog):
+    """Reproduced live: prompt > num_ctx -> Ollama truncates the prompt front
+    and returns content '{\\n' with done_reason=length (prompt_eval=16383,
+    eval=1). num_ctx must come from settings and exhaustion must log LOUDLY."""
+    client = LLMClient.__new__(LLMClient)
+    captured = {}
+
+    class FakeResp:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"message": {"content": "{\n"}, "done_reason": "length",
+                    "prompt_eval_count": _settings.ollama_num_ctx - 1, "eval_count": 1}
+
+    class FakeClient:
+        async def post(self, url, json=None):
+            captured["payload"] = json
+            return FakeResp()
+
+    client._client = FakeClient()
+
+    import asyncio, logging
+    with caplog.at_level(logging.WARNING):
+        asyncio.get_event_loop().run_until_complete(
+            client._call_ollama([{"role": "user", "content": "x"}])
+        )
+    assert captured["payload"]["options"]["num_ctx"] == _settings.ollama_num_ctx
+    assert _settings.ollama_num_ctx >= 32768
+    assert any("LLM CONTEXT EXHAUSTED" in r.message for r in caplog.records)
+
+
+def test_traces_and_deep_trace_capped_in_prompt(monkeypatch):
+    """Unbounded json.dumps of traces was prompt bloat pushing kube prompts
+    over num_ctx — must go through _cap_json like metrics."""
+    client = LLMClient.__new__(LLMClient)
+    captured = {}
+
+    async def fake_call(messages):
+        captured["messages"] = messages
+        return None
+
+    monkeypatch.setattr(client, "_call_ollama_with_resilience", fake_call)
+    client._circuit = MagicMock()
+
+    big = [{"traceID": "t", "blob": "x" * 9000}]
+    ctx = GatheredContext(sources_available=3, traces=big, deep_trace={"blob": "y" * 9000})
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(
+        client.investigate(_crashloop_alert(), ctx, "")
+    )
+    user = captured["messages"][-1]["content"]
+    assert user.count("(truncated for prompt budget)") >= 2

@@ -7,6 +7,15 @@ class Settings(BaseSettings):
     ollama_model: str = "llama3.1:8b"
     ollama_timeout: int = 300
     ollama_request_timeout: int = 30
+    # 2026-06-10: context window for every chat call. Was a hardcoded 16384 —
+    # the kube/crash-loop prompts (playbook + digest + metrics + exemplars)
+    # exceed that, and Ollama then SILENTLY truncates the prompt front (the
+    # system prompt + promoted evidence first) and leaves a ~1-token decode
+    # budget: content '{\n', done_reason=length — reproduced deterministically.
+    # That single failure produced the majority "cannot determine" hedges.
+    # qwen2.5:14b natively supports 32K; KV cache at 32K ≈ +3GB, measured fit
+    # on the A10G (12.1/23GB used at 16K).
+    ollama_num_ctx: int = 32768
 
     # Circuit breaker
     circuit_breaker_failure_threshold: int = 5
