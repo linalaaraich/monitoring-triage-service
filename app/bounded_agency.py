@@ -254,7 +254,13 @@ def digest_crashloop_evidence(
             # union is the restart increase.
             restarts[pod] = value
 
-    if not (reasons or restarts):
+    # Require actual crash evidence: a termination reason or ≥1 restart.
+    # A workload that is down WITHOUT restarting (e.g. an unschedulable
+    # Pending pod — the induced ad outage) returns only zero-restart series
+    # here; emitting a digest of "pods with zero restarts" would anchor the
+    # model on a non-signal. Return None so the caller falls back to the
+    # raw block (and the kube-state context carries the real evidence).
+    if not (reasons or any(n >= 1 for n in restarts.values())):
         return None
 
     lines = [

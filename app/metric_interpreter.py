@@ -291,6 +291,21 @@ def interpret(alert) -> MetricFacts:
             delta_pct = (delta / threshold) * 100
 
     deployment_type = settings.service_deployment_type.get(service, "unknown")
+    if deployment_type == "unknown" and (
+        alert.labels.get("namespace") or alert.labels.get("pod")
+        or alertname.startswith("Kube") or alertname == "PodCrashLooping"
+    ):
+        # 2026-06-10 (iteration 4): namespace-generic k8s alerts
+        # (PodCrashLooping, KubeWorkload*) fire for ANY namespace — e.g. the
+        # 22 otel-demo services — but the static map only lists the
+        # platform's own services, so these resolved to "unknown". That one
+        # value gated out the k8s-scoped exemplars (oom-crashloop-restart
+        # requires deployment_types=["k8s"]) and let the validator prune
+        # kubectl actions as arch-mismatched — a structural reason the
+        # PodCrashLooping RCAs hedged (decisions 7e15c8a5/2f0b5ff7) while
+        # the same pod's KubeWorkloadDown named OOMKilled at 0.95. An alert
+        # that carries k8s namespace/pod labels IS a k8s workload — say so.
+        deployment_type = "k8s"
 
     one_liner = build_one_liner(
         observed_value=observed_value,

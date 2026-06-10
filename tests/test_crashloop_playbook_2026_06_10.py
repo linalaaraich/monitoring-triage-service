@@ -666,3 +666,41 @@ def test_retry_quality_scans_human_cause():
         human_cause="Cannot determine the root cause of the alert with current data.",
     )
     assert q == "data_starved"
+
+
+# ---------------------------------------------------------------------------
+# Iteration 4 — or-collision fix, zero-restart digest gate, k8s deployment_type
+# ---------------------------------------------------------------------------
+
+from app.context import _kube_state_promql
+from app.metric_interpreter import interpret
+
+
+def test_kube_state_promql_label_diversifies_replica_trio():
+    """The three kube_deployment_* series differ only in __name__, which `or`
+    ignores — without discriminator labels the union collapses to
+    spec_replicas (live: ad outage context had no available/unavailable)."""
+    q = _kube_state_promql("ad", "otel-demo")
+    assert '"kpi", "spec_replicas"' in q
+    assert '"kpi", "replicas_available"' in q
+    assert '"kpi", "replicas_unavailable"' in q
+    assert q.count("label_replace") >= 3
+
+
+def test_digest_returns_none_for_zero_restart_pending_outage():
+    """A down-but-not-restarting workload (unschedulable Pending pod) must not
+    produce a zero-signal digest that anchors the model."""
+    series = [
+        {"metric": {"exported_pod": "ad-69f7649c7d-f9cpq"}, "value": [0, "0"]},
+    ]
+    assert digest_crashloop_evidence(_mcp_result(series), "ad", "otel-demo") is None
+
+
+def test_deployment_type_inferred_k8s_for_namespace_labelled_alerts():
+    """otel-demo services are not in the static service_deployment_type map;
+    a k8s-labelled alert must still resolve k8s so the k8s exemplars match
+    and kubectl actions survive validation (live: 7e15c8a5 hedged while the
+    same pod's KubeWorkloadDown named OOMKilled)."""
+    alert = _crashloop_alert()  # service=image-provider, namespace label set
+    facts = interpret(alert)
+    assert facts.deployment_type == "k8s"

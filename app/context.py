@@ -119,10 +119,20 @@ def _kube_state_promql(service: str, namespace: str) -> str:
     namespace is known, any non-Running pods and recent container termination
     reasons in that namespace."""
     d = f'deployment="{service}"'
+    # 2026-06-10 (iteration 4): the three kube_deployment_* series carry
+    # IDENTICAL label sets — they differ only in __name__, which PromQL set
+    # operators ignore when matching — so a bare `A or B or C` union
+    # COLLAPSES to spec_replicas alone. Live proof: for the induced ad
+    # outage the context returned only spec_replicas=1; the decisive
+    # available=0 / unavailable=1 never reached the prompt and the RCA
+    # hedged (decisions c1b11a03/79c43dd6). Same bug class as the
+    # `or vector(80)` label-loss of 2026-06-03 (blocker A2). label_replace
+    # with an empty source label mints a discriminator label per part, so
+    # the label sets differ and the union keeps all three.
     parts = [
-        f"kube_deployment_spec_replicas{{{d}}}",
-        f"kube_deployment_status_replicas_available{{{d}}}",
-        f"kube_deployment_status_replicas_unavailable{{{d}}}",
+        f'label_replace(kube_deployment_spec_replicas{{{d}}}, "kpi", "spec_replicas", "", "")',
+        f'label_replace(kube_deployment_status_replicas_available{{{d}}}, "kpi", "replicas_available", "", "")',
+        f'label_replace(kube_deployment_status_replicas_unavailable{{{d}}}, "kpi", "replicas_unavailable", "", "")',
     ]
     if namespace and namespace != "unknown":
         ns = f'exported_namespace="{namespace}"'
