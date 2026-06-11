@@ -190,6 +190,17 @@ _INFRA_SERVICES = {
 }
 _INFRA_SERVICE_PREFIXES = ("ai-", "mcp-")
 
+# N5 (2026-06-11 X1 test): drain3-originated alerts for otel-demo emitters
+# carried env=unknown — the bed's services resolve "demo" by service token
+# so demo rows are never an env gap. Kept in sync with the deployed bed.
+_DEMO_SERVICES = {
+    "ad", "cart", "checkout", "currency", "email", "frontend",
+    "frontend-proxy", "image-provider", "payment", "product-catalog",
+    "product-reviews", "quote", "recommendation", "shipping", "flagd",
+    "kafka", "valkey-cart", "accounting", "fraud-detection",
+    "load-generator", "llm", "postgresql",
+}
+
 
 def is_infra_service(service: str | None) -> bool:
     svc = (service or "").strip().lower()
@@ -311,6 +322,8 @@ def env_resolver(
         # but is the platform's own host, not a prod workload).
         if is_infra_service(svc):
             return "infra"
+        if svc in _DEMO_SERVICES:
+            return "demo"
         logical_ns = NAMESPACE.get(svc)
         inferred = namespace_to_env(logical_ns)
         if inferred:

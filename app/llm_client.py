@@ -145,7 +145,7 @@ You MUST return JSON matching the schema below. The Ollama runtime validates at 
   "severity": "critical" | "warning" | "info",
   "confidence": <float 0.0-1.0>,
   "human_cause": "<ONE plain-English sentence: what is broken, in human prose. NO PromQL, NO `metric{...}=value`, NO formulas. This is what the operator reads first. See rule A0.>",
-  "reason": "<one-line summary that NAMES a cause, not a symptom; may be terser than human_cause but must still be formula-free>",
+  "reason": "<your INVESTIGATION LOG: 3-6 numbered steps in the order you actually checked, format '1. checked X -> found Y' with CONCRETE numbers from the evidence (values, durations, counts). When a '### Trace span breakdown' section is present, ONE step MUST analyze it: name the slowest span/operation, its duration, and the comparison (share of total request time, or how many times above the threshold/normal). Each step <= 25 words; no filler steps, no restating the alert name. Rendered to the operator as the 'Investigation' section.>",
   "rca": "<2-5 sentences; first sentence names a specific cause (component / link / process / config / change). Metric/log/trace evidence follows in support>",
   "anomaly_summary": "<Drain3 findings or '' if none>",
   "suggested_actions": [<2-4 concrete commands/queries/URLs — see rule E>],
@@ -1134,7 +1134,7 @@ The observed value above is ground-truth signal from Prometheus at the moment th
 {_cap_json(context.traces) if context.traces else "[Jaeger] returned 0 traces for service=" + alert.service + ". Likely normal for infrastructure alerts; a traced request-path would have surfaced a spring-boot/kong service here."}
 {(
     chr(10) + "### Trace span breakdown (the slowest trace, drilled to per-span detail)" + chr(10) +
-    "This is the keystone evidence for latency-flavoured alerts: per-span durations, db.statement (PII-sanitized), http.target, error tags. Use it to NAME what's slow, not just say upstream is slow." + chr(10) +
+    "This is the keystone evidence for latency-flavoured alerts: per-span durations, db.statement (PII-sanitized), http.target, error tags. Use it to NAME what's slow, not just say upstream is slow. REQUIRED: one numbered step of your reason must cite this breakdown with numbers — e.g. 'checked traces in the alert window: the <service> span took <N> ms of the <M> ms total (~<P>% of request time, <K>x the normal p95)'." + chr(10) +
     "```json" + chr(10) +
     _cap_json(context.deep_trace) + chr(10) +
     "```" + chr(10)

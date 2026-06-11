@@ -208,3 +208,41 @@ def test_drain3_alert_carries_namespace_hint():
                       tier="component", scope="spring-boot", services=["spring-boot"])
     asyncio.get_event_loop().run_until_complete(p.process_drain3_webhook(w))
     assert captured["alert"].labels.get("namespace") == "app"
+
+
+# --- X1/X2 follow-ups: demo env tier + investigation-log prompt --------------
+
+def test_demo_services_resolve_demo_env_by_token():
+    from app.v2_mappings import env_resolver
+    for svc in ("cart", "valkey-cart", "product-catalog", "kafka"):
+        assert env_resolver(service=svc) == "demo", svc
+    assert env_resolver(service="employees-backend", namespace="app") == "prod"
+
+
+def test_system_prompt_specifies_investigation_log():
+    from app.llm_client import SYSTEM_PROMPT
+    assert "INVESTIGATION LOG" in SYSTEM_PROMPT
+    assert "numbered steps" in SYSTEM_PROMPT
+    assert "Trace span breakdown" in SYSTEM_PROMPT
+
+
+def test_deep_trace_block_requires_numbered_trace_step(monkeypatch):
+    from app.llm_client import LLMClient
+    from app.models import GatheredContext
+    from unittest.mock import MagicMock
+    import asyncio
+    client = LLMClient.__new__(LLMClient)
+    captured = {}
+    async def fake(messages):
+        captured["m"] = messages
+        return None
+    client._call_ollama_with_resilience = fake
+    client._circuit = MagicMock()
+    from app.models import GrafanaAlert
+    alert = GrafanaAlert(status="firing",
+        labels={"alertname": "HighDemoFrontendP95Latency", "severity": "warning", "service": "frontend"},
+        annotations={"summary": "p95 high"}, startsAt="2026-06-11T23:00:00Z", fingerprint="x2")
+    ctx = GatheredContext(sources_available=3, deep_trace={"spans": [{"op": "ad", "ms": 2800}]})
+    asyncio.get_event_loop().run_until_complete(client.investigate(alert, ctx, ""))
+    user = captured["m"][-1]["content"]
+    assert "checked traces in the alert window" in user
