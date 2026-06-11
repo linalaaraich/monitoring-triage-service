@@ -71,3 +71,27 @@ def test_v2_email_is_light_mode():
 
 def test_v2_email_carries_env_pill():
     assert "demo" in _render_email()
+
+
+# ---------------------------------------------------------------------------
+# Display naming convention — [appName]-[tech]-[role] (display level only)
+# ---------------------------------------------------------------------------
+
+from app.v2_mappings import display_namespace, display_service
+
+
+def test_display_service_follows_app_tech_role_convention():
+    assert display_service("employees-backend") == "employee-spring-backend"
+    assert display_service("spring-boot") == "employee-spring-backend"
+    assert display_service("employees-db") == "employee-mysql-db"
+    assert display_service("kong") == "employee-kong-gateway"
+    assert display_service("rental-backend") == "carRental-spring-backend"
+    # non-tenant services pass through unchanged
+    assert display_service("ad") == "ad"
+    assert display_service("prometheus") == "prometheus"
+
+
+def test_display_namespace_maps_tenants():
+    assert display_namespace("app") == "employee"
+    assert display_namespace("rental") == "carRental"
+    assert display_namespace("otel-demo") == "otel-demo"

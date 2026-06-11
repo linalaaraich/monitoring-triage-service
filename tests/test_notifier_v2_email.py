@@ -68,7 +68,8 @@ def _decision(verdict=Decision.ESCALATE, actions=None):
 def test_subject_format_prod_escalate():
     n = EmailNotifier()
     subj = n._v2_subject(_alert(), _decision(), _record())
-    assert subj.startswith("[prod] [network] [ESCALATE]")
+    # 2026-06-11: display naming — "network" tenant ns renders "employee"
+    assert subj.startswith("[prod] [employee] [ESCALATE]")
     assert "High p95 latency on Kong gateway" in subj
 
 
@@ -100,7 +101,8 @@ def test_subject_env_stg_for_rental_namespace():
     n = EmailNotifier()
     subj = n._v2_subject(_alert(service="rental-backend"), _decision(),
                           _record(affected_service="rental-backend"))
-    assert subj.startswith("[stg] [rental]")
+    # 2026-06-11: display naming — rental renders "carRental"
+    assert subj.startswith("[stg] [carRental]")
 
 
 # ─── _build_v2_escalation_body ────────────────────────────────────────

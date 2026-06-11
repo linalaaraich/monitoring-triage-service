@@ -198,6 +198,41 @@ def is_infra_service(service: str | None) -> bool:
     )
 
 
+# 2026-06-11 (Lina) — operator-facing DISPLAY names follow the convention
+# [appName]-[tech]-[role] (e.g. employee-spring-backend, carRental-spring-
+# backend). Display-level ONLY: the underlying labels/streams/alert scoping
+# keep the original tokens, so drain3 miners, Loki streams and rule
+# matchers are untouched. "app" tenant = the employee CRUD app; "rental"
+# tenant = the carRental app (stg fixture).
+DISPLAY_SERVICE = {
+    "employees-backend": "employee-spring-backend",
+    "spring-boot":       "employee-spring-backend",
+    "spring-boot-app":   "employee-spring-backend",
+    "springboot-app":    "employee-spring-backend",
+    "employees-db":      "employee-mysql-db",
+    "mysql":             "employee-mysql-db",
+    "employees-gateway": "employee-kong-gateway",
+    "kong":              "employee-kong-gateway",
+    "kong-kong-proxy":   "employee-kong-gateway",
+    "rental-backend":    "carRental-spring-backend",
+    "rental-frontend":   "carRental-react-frontend",
+    "rental-mysql":      "carRental-mysql-db",
+}
+DISPLAY_NAMESPACE = {
+    "app":     "employee",
+    "network": "employee",
+    "rental":  "carRental",
+}
+
+
+def display_service(svc: str | None) -> str:
+    return DISPLAY_SERVICE.get((svc or ""), svc or "")
+
+
+def display_namespace(ns: str | None) -> str:
+    return DISPLAY_NAMESPACE.get((ns or ""), ns or "")
+
+
 def namespace_to_env(namespace: str | None) -> str | None:
     """Infer env from a k8s namespace string. Two rules:
 
@@ -320,7 +355,7 @@ def design_shape_for_alert(alertname: str, service: str, verdict_lower: str,
     absent (legacy callers), the resolver falls back to service-token
     inference.
     """
-    namespace = NAMESPACE.get(service, (service or "")[:20] or "-")
+    namespace = display_namespace(NAMESPACE.get(service, (service or "")[:20] or "-"))
     if action_taken.lower() == "shelved":
         verdict = "SHELVED"
     else:
