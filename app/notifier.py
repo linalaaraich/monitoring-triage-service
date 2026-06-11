@@ -757,11 +757,11 @@ class EmailNotifier:
         if evidence_items_html:
             evidence_block_html = (
                 '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
-                'width="100%" style="background:#15171f;border:1px solid #2a2d3a;'
+                'width="100%" style="background:#eef1f8;border:1px solid #dfe3ee;'
                 'border-radius:10px;margin-bottom:18px"><tr><td style="padding:12px 14px">'
-                '<div style="font-size:10.5px;font-weight:600;color:#8890a0;'
+                '<div style="font-size:10.5px;font-weight:600;color:#5b6b8b;'
                 'text-transform:uppercase;letter-spacing:.1px;margin-bottom:8px">'
-                'Technical evidence <span style="color:#5b6172;font-weight:400;'
+                'Technical evidence <span style="color:#7a849e;font-weight:400;'
                 'text-transform:none;letter-spacing:0">- PromQL, metric values, '
                 'log snippets (for SRE reference)</span></div>'
                 f'<ul style="margin:0;padding-left:20px;font-family:JetBrains Mono,monospace;'
@@ -783,22 +783,25 @@ class EmailNotifier:
                     f'padding:4px 10px;border-radius:12px;border:1px solid {color};'
                     f'color:{color};background:{bg};letter-spacing:.2px">{_html.escape(text)}</span>')
 
+        # 2026-06-11: light-mode palette — pill text colors darkened for
+        # contrast on white; "infra"/"demo" envs added.
         env_colors = {
-            "prod": "#e06070", "preprod": "#f0a050", "stg": "#f0a050",
-            "uat": "#4ea8de", "int": "#4ea8de", "dev": "#8890a0",
+            "prod": "#c43d4b", "preprod": "#b26a0a", "stg": "#b26a0a",
+            "uat": "#2563b0", "int": "#2563b0", "dev": "#5b6b8b",
+            "infra": "#5b6b8b", "demo": "#0f766e",
         }
         verdict_colors = {
-            "ESCALATE": "#e06070", "DISMISS": "#8890a0",
-            "SHELVED": "#f0a050", "PENDING": "#4ea8de",
+            "ESCALATE": "#c43d4b", "DISMISS": "#5b6b8b",
+            "SHELVED": "#b26a0a", "PENDING": "#2563b0",
         }
-        severity_colors = {"critical": "#e06070", "warning": "#f0a050", "info": "#4ea8de"}
+        severity_colors = {"critical": "#c43d4b", "warning": "#b26a0a", "info": "#2563b0"}
 
-        env_pill = _pill(env, env_colors.get(env, "#8890a0"), bg=f"rgba(224,96,112,.08)" if env == "prod" else "rgba(136,144,160,.06)")
-        ns_pill = _pill(ns, "#8890a0", bg="rgba(136,144,160,.06)")
-        svc_pill = _pill(svc_type, "#8890a0", bg="rgba(136,144,160,.06)")
-        comp_pill = _pill(component, "#8890a0", bg="rgba(136,144,160,.06)")
-        verdict_pill = _pill(verdict, verdict_colors.get(verdict, "#8890a0"), bg=f"rgba(224,96,112,.08)" if verdict == "ESCALATE" else "rgba(136,144,160,.06)")
-        severity_pill = _pill(severity, severity_colors.get(severity, "#8890a0"), bg="rgba(240,160,80,.08)" if severity == "warning" else "rgba(224,96,112,.08)" if severity == "critical" else "rgba(78,168,222,.08)")
+        env_pill = _pill(env, env_colors.get(env, "#5b6b8b"), bg=f"rgba(224,96,112,.08)" if env == "prod" else "rgba(136,144,160,.06)")
+        ns_pill = _pill(ns, "#5b6b8b", bg="rgba(136,144,160,.06)")
+        svc_pill = _pill(svc_type, "#5b6b8b", bg="rgba(136,144,160,.06)")
+        comp_pill = _pill(component, "#5b6b8b", bg="rgba(136,144,160,.06)")
+        verdict_pill = _pill(verdict, verdict_colors.get(verdict, "#5b6b8b"), bg=f"rgba(224,96,112,.08)" if verdict == "ESCALATE" else "rgba(136,144,160,.06)")
+        severity_pill = _pill(severity, severity_colors.get(severity, "#5b6b8b"), bg="rgba(240,160,80,.08)" if severity == "warning" else "rgba(224,96,112,.08)" if severity == "critical" else "rgba(78,168,222,.08)")
 
         active_for_str = "active fire"  # SF-6 placeholder; real value needs history aggregation
 
@@ -808,15 +811,15 @@ class EmailNotifier:
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{_html.escape(self._v2_subject(alert, decision, record))}</title>
 </head>
-<body style="margin:0;padding:0;background:#0a0b0f;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#e4e6ee">
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#0a0b0f">
+<body style="margin:0;padding:0;background:#f4f6fb;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#0b1b3a">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f4f6fb">
   <tr><td align="center" style="padding:24px 16px">
-  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:680px;background:#0f1117;border-radius:14px;border:1px solid #2a2d3a;overflow:hidden">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:680px;background:#ffffff;border-radius:14px;border:1px solid #dfe3ee;overflow:hidden">
 
     <tr><td style="padding:28px 30px 0">
       <!-- Banner -->
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:linear-gradient(180deg,rgba(224,96,112,.10),rgba(224,96,112,.02));border:1px solid rgba(224,96,112,.35);border-radius:12px;margin-bottom:22px"><tr><td style="padding:14px 18px">
-        {verdict_pill} &nbsp; {severity_pill} &nbsp; <span style="font-size:12px;color:#8890a0">{active_for_str}</span>
+        {verdict_pill} &nbsp; {severity_pill} &nbsp; <span style="font-size:12px;color:#5b6b8b">{active_for_str}</span>
       </td></tr></table>
 
       <!-- Identity pills -->
@@ -825,22 +828,22 @@ class EmailNotifier:
       </div>
 
       <!-- WHAT -->
-      <h1 style="margin:0 0 4px;font-size:24px;font-weight:600;color:#e4e6ee;line-height:1.3">{_html.escape(plain)}</h1>
-      <div style="font-size:12.5px;color:#8890a0;margin-bottom:20px">
-        Alert <span style="font-family:JetBrains Mono,monospace;color:#c0c5d0">{_html.escape(short_id)}</span> · {_html.escape(time_local)} Tangier
+      <h1 style="margin:0 0 4px;font-size:24px;font-weight:600;color:#0b1b3a;line-height:1.3">{_html.escape(plain)}</h1>
+      <div style="font-size:12.5px;color:#5b6b8b;margin-bottom:20px">
+        Alert <span style="font-family:JetBrains Mono,monospace;color:#3b4663">{_html.escape(short_id)}</span> · {_html.escape(time_local)} Tangier
       </div>
 
       <!-- Why block -->
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#1a1d27;border:1px solid #2a2d3a;border-radius:10px;margin-bottom:10px"><tr><td style="padding:12px 14px">
-        <div style="font-size:10.5px;font-weight:600;color:#8890a0;text-transform:uppercase;letter-spacing:.1px;margin-bottom:6px">Why</div>
-        <div style="font-size:14px;line-height:1.5;color:#e4e6ee">{reason_short}</div>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f7f9ff;border:1px solid #dfe3ee;border-radius:10px;margin-bottom:10px"><tr><td style="padding:12px 14px">
+        <div style="font-size:10.5px;font-weight:600;color:#5b6b8b;text-transform:uppercase;letter-spacing:.1px;margin-bottom:6px">Why</div>
+        <div style="font-size:14px;line-height:1.5;color:#0b1b3a">{reason_short}</div>
       </td></tr></table>
 
       <!-- Suggested action block -->
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#1a1d27;border:1px solid #2a2d3a;border-radius:10px;margin-bottom:18px"><tr><td style="padding:12px 14px">
-        <div style="font-size:10.5px;font-weight:600;color:#8890a0;text-transform:uppercase;letter-spacing:.1px;margin-bottom:6px">Suggested action</div>
-        <div style="background:#0a0c11;border:1px solid #2a2d3a;border-radius:6px;padding:8px 10px;font-family:JetBrains Mono,monospace;font-size:12px;color:#e4e6ee;word-break:break-all">
-          <span style="color:#40d0d0">$</span> {action_cmd_html}
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f7f9ff;border:1px solid #dfe3ee;border-radius:10px;margin-bottom:18px"><tr><td style="padding:12px 14px">
+        <div style="font-size:10.5px;font-weight:600;color:#5b6b8b;text-transform:uppercase;letter-spacing:.1px;margin-bottom:6px">Suggested action</div>
+        <div style="background:#eef1f8;border:1px solid #dfe3ee;border-radius:6px;padding:8px 10px;font-family:JetBrains Mono,monospace;font-size:12px;color:#0b1b3a;word-break:break-all">
+          <span style="color:#0f766e">$</span> {action_cmd_html}
         </div>
       </td></tr></table>
 
@@ -848,18 +851,18 @@ class EmailNotifier:
 
       <!-- Buttons row -->
       <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
-        <td style="padding-right:8px"><a href="{_html.escape(dashboard_url)}" style="display:inline-block;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:500;background:rgba(78,168,222,.18);border:1px solid rgba(78,168,222,.45);color:#b9dcf2;text-decoration:none">View on dashboard →</a></td>
-        <td style="padding-right:8px"><a href="{_html.escape(grafana_url)}" style="display:inline-block;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:500;background:#1a1d27;border:1px solid #2a2d3a;color:#e4e6ee;text-decoration:none">Open Grafana ↗</a></td>
-        <td style="padding-right:8px"><a href="{_html.escape(loki_url)}" style="display:inline-block;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:500;background:#1a1d27;border:1px solid #2a2d3a;color:#e4e6ee;text-decoration:none">Open Loki ↗</a></td>
-        <td><a href="{_html.escape(rate_url)}" style="display:inline-block;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:500;background:#1a1d27;border:1px solid #2a2d3a;color:#e4e6ee;text-decoration:none">Rate this alert</a></td>
+        <td style="padding-right:8px"><a href="{_html.escape(dashboard_url)}" style="display:inline-block;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:500;background:rgba(78,168,222,.18);border:1px solid rgba(78,168,222,.45);color:#0b5bd3;text-decoration:none">View on dashboard →</a></td>
+        <td style="padding-right:8px"><a href="{_html.escape(grafana_url)}" style="display:inline-block;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:500;background:#f7f9ff;border:1px solid #dfe3ee;color:#0b1b3a;text-decoration:none">Open Grafana ↗</a></td>
+        <td style="padding-right:8px"><a href="{_html.escape(loki_url)}" style="display:inline-block;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:500;background:#f7f9ff;border:1px solid #dfe3ee;color:#0b1b3a;text-decoration:none">Open Loki ↗</a></td>
+        <td><a href="{_html.escape(rate_url)}" style="display:inline-block;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:500;background:#f7f9ff;border:1px solid #dfe3ee;color:#0b1b3a;text-decoration:none">Rate this alert</a></td>
       </tr></table>
 
       <!-- Footer -->
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:22px;padding-top:14px;border-top:1px solid #2a2d3a"><tr>
-        <td style="font-size:11.5px;color:#5b6172;line-height:1.6">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:22px;padding-top:14px;border-top:1px solid #dfe3ee"><tr>
+        <td style="font-size:11.5px;color:#7a849e;line-height:1.6">
           Alert <span style="font-family:JetBrains Mono,monospace">{_html.escape(full_id)}</span> · {_html.escape(time_local)} Tangier (UTC+01:00)
         </td>
-        <td align="right" style="font-size:11.5px;color:#5b6172">
+        <td align="right" style="font-size:11.5px;color:#7a849e">
           AI RCA Triage Platform <span style="font-family:JetBrains Mono,monospace">v0.1.0</span>
         </td>
       </tr></table>

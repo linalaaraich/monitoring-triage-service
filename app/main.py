@@ -2782,7 +2782,7 @@ _V2_FILTER_SEVERITIES = {"critical", "warning", "info", "none"}
 # on purpose: any token outside this set silently falls back to "no filter"
 # rather than letting a typo through.
 _V2_FILTER_ENVS = {"prod", "stg", "preprod", "uat", "int", "dev", "qa",
-                   "test", "sandbox", "canary", "unknown"}
+                   "test", "sandbox", "canary", "infra", "demo", "unknown"}
 # Family is a coarse alert-name bucket; matched as a substring LIKE on the
 # alert_name column. Keep this list short - it's surfaced in the dropdown.
 _V2_FILTER_FAMILIES = {

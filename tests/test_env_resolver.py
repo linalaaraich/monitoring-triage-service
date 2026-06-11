@@ -102,7 +102,9 @@ def test_env_resolver_service_token_inference():
     the NAMESPACE table + logical-ns map."""
     assert env_resolver(service="rental-backend") == "stg"
     assert env_resolver(service="kong") == "prod"  # NAMESPACE[kong]=network -> prod
-    assert env_resolver(service="prometheus") == "prod"
+    # 2026-06-11: the platform's own components now resolve "infra" (more
+    # specific than the observability->prod logical-namespace guess).
+    assert env_resolver(service="prometheus") == "infra"
 
 
 def test_env_resolver_unknown_falls_back_to_unknown():

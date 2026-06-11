@@ -117,7 +117,10 @@ NAMESPACE = {
 # legitimate envs in the dashboard.
 KNOWN_ENVS = {"prod", "production", "stg", "staging", "preprod", "uat",
               "int", "integration", "dev", "development", "test", "qa",
-              "sandbox", "canary"}
+              "sandbox", "canary",
+              # 2026-06-11 (Lina): the platform's own components and the
+              # otel-demo bed must not read "unknown" on the dashboard/email.
+              "infra", "demo"}
 
 # Short-form normalisation so the dashboard / email pill stays compact
 # (the design's pill width was sized for 4-char tokens).
@@ -170,7 +173,29 @@ _LOGICAL_NS_TO_ENV = {
     "network":       "prod",
     "observability": "prod",
     "kube-system":   "prod",
+    # 2026-06-11: the Astronomy Shop test bed is its own environment, not a
+    # gap — "demo" on every pill instead of "unknown".
+    "otel-demo":     "demo",
 }
+
+# 2026-06-11 — the observability platform's OWN components (hosts, stack
+# services, AI containers). Alerts about them are environment "infra": the
+# platform monitoring itself, not a workload env and not an "unknown" gap.
+# Aligned with the drain3 self-ingestion denylist names (BE-B3).
+_INFRA_SERVICES = {
+    "monitoring-vm", "k3s-node", "host-syslog", "gpu-stack",
+    "prometheus", "loki", "jaeger", "grafana", "otel-collector",
+    "node-exporter", "node_exporter", "cadvisor", "kube-state-metrics",
+    "dcgm-exporter", "ollama", "coredns", "drain3", "triage-service",
+}
+_INFRA_SERVICE_PREFIXES = ("ai-", "mcp-")
+
+
+def is_infra_service(service: str | None) -> bool:
+    svc = (service or "").strip().lower()
+    return bool(svc) and (
+        svc in _INFRA_SERVICES or svc.startswith(_INFRA_SERVICE_PREFIXES)
+    )
 
 
 def namespace_to_env(namespace: str | None) -> str | None:
@@ -246,6 +271,11 @@ def env_resolver(
     # Tier 6 - service-token inference via the logical NAMESPACE table
     svc = (service or "").strip().lower()
     if svc:
+        # 2026-06-11 - infra identity FIRST: it is more specific than the
+        # logical-namespace guess (k3s-node sits in the observability bucket
+        # but is the platform's own host, not a prod workload).
+        if is_infra_service(svc):
+            return "infra"
         logical_ns = NAMESPACE.get(svc)
         inferred = namespace_to_env(logical_ns)
         if inferred:
