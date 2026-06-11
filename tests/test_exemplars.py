@@ -75,7 +75,7 @@ def test_drain3_anomaly_routes_to_drain3_archetype():
         signal="log",
     )
     assert m is not None
-    assert m["id"] == "drain3-novelty-post-deploy"
+    assert m["id"] == "drain3-novelty-named-from-line"  # renamed 2026-06-11 (de-claimed)
 
 
 def test_tls_expiry_archetype():

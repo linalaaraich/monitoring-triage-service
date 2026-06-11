@@ -149,6 +149,31 @@ _BANNED_PHRASE_PATTERNS: list[re.Pattern] = [
 # (pipeline.py) prevent the bad row from poisoning future LLM prompts via
 # DA-3 / similar-decisions / high-value feedback lookups.
 # ---------------------------------------------------------------------------
+# 2026-06-11 (fabricated-RCA incident): unfilled EXEMPLAR template slots.
+# A copying model leaves them verbatim ("N minutes after the deployment",
+# "cluster #N never observed", "deploy at HH:MM", "v<X.Y.Z>"); a reasoning
+# model fills them. Their presence is proof of copy-paste, not analysis.
+_TEMPLATE_SLOT_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"\bN\s+minutes?\b"),
+    re.compile(r"\bcluster\s*#\s*N\b", re.I),
+    re.compile(r"\bHH:MM\b"),
+    re.compile(r"\bK\s+traces\b"),
+    re.compile(r"\bv<[^>]*>"),
+    re.compile(r"\{service\}"),
+)
+
+# 2026-06-11: deploy-ish CAUSE claims. The platform has NO deploy/release
+# data source (no MCP bridge knows about rollouts), so a narrative that
+# attributes the incident to a deploy is unfalsifiable BY CONSTRUCTION
+# unless the model's own cited evidence mentions one (e.g. a log line that
+# literally says a rollout happened).
+_DEPLOY_CLAIM_PATTERN = re.compile(
+    r"(?:most\s+recent|recent|latest|new)\s+(?:deploy(?:ment)?|rollout|release|upgrade)"
+    r"|deploy(?:ment)?\s+introduced|rollout\s+introduced|release\s+introduced",
+    re.I,
+)
+_DEPLOY_EVIDENCE_TOKENS = ("deploy", "rollout", "release", "helm", "image", "version", "upgrade")
+
 _PARROT_PLACEHOLDER_PATTERNS: tuple[re.Pattern, ...] = (
     # `service=X` / `service=Y` — single-letter placeholder taken straight
     # from a tutorial template. Bounded by word boundary to avoid
@@ -591,6 +616,38 @@ def validate(
         elif e is not None:
             evidence_strs.append(str(e))
     scan_targets = [combined] + evidence_strs
+    # --- 1.0c Template-slot leakage scan (2026-06-11). Literal unfilled
+    # exemplar slots ("N minutes", "cluster #N", "HH:MM") prove the model
+    # copied an archetype instead of reasoning — the fabricated drain3
+    # deploy-RCA shipped these verbatim at confidence 0.85.
+    for pattern in _TEMPLATE_SLOT_PATTERNS:
+        for target in scan_targets:
+            m = pattern.search(target)
+            if m:
+                phrase = m.group(0)
+                report.banned_phrase_hits.append(f"template-slot: {phrase!r}")
+                report.violations.append(
+                    f"unfilled template placeholder in narrative/evidence: "
+                    f"{phrase!r} — every number/time must come from the "
+                    "gathered evidence, never from an example."
+                )
+                break
+
+    # --- 1.0d Ungrounded deploy-claim scan (2026-06-11). No bridge exposes
+    # deploys/rollouts, so a deploy-as-cause claim is only admissible when
+    # the decision's own cited evidence mentions one.
+    if _DEPLOY_CLAIM_PATTERN.search(combined):
+        evidence_text = " ".join(evidence_strs).lower()
+        if not any(tok in evidence_text for tok in _DEPLOY_EVIDENCE_TOKENS):
+            report.banned_phrase_hits.append("ungrounded-deploy-claim")
+            report.violations.append(
+                "narrative attributes the incident to a deploy/rollout/release "
+                "but no cited evidence mentions one — the platform has no "
+                "deploy data source, so this claim is unverifiable. Name the "
+                "cause from the actual evidence (e.g. the novel log line) "
+                "instead."
+            )
+
     for pattern in _PARROT_PLACEHOLDER_PATTERNS:
         for target in scan_targets:
             m = pattern.search(target)

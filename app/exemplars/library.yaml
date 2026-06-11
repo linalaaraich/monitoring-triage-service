@@ -321,7 +321,7 @@ exemplars:
     lesson: "Order remediation by reversibility — cheap and reversible first, infrastructure changes last. Name the kill chain explicitly in the RCA."
     doc_anchor: "scenario-4--cascade-incident-4-alerts-collapsed-into-one-coherent-kill-chain-rca"
 
-  - id: drain3-novelty-post-deploy
+  - id: drain3-novelty-named-from-line
     # INTERNAL-WEBHOOK (audit 2026-05-22): Drain3AnomalyDetected is NOT a
     # Grafana alertrule — the drain3 background thread self-fires by POSTing
     # directly to `/webhook/drain3` (see `config.drain3_self_webhook_url` and
@@ -329,40 +329,49 @@ exemplars:
     # Grafana's alert routing entirely (no alert history, no silences), so
     # audit Grafana-rule cross-references should SKIP this exemplar — its
     # lack of a matching `alertrules.yml.j2` entry is by design, not drift.
-    archetype: "Drain3 self-fired on a brand-new error template post-deploy"
+    #
+    # REWRITTEN 2026-06-11 (fabricated-RCA incident): the previous version
+    # told a deploy-regression story with unfilled placeholders (N minutes,
+    # cluster #N, HH:MM, helm rollback actions) and a 0.82-0.92 band. The
+    # platform has NO deploy data source (no bridge knows about rollouts),
+    # so the model copied an unfalsifiable cause verbatim — placeholders
+    # included — while the REAL cause ("Product Catalog Fail Feature Flag
+    # Enabled") sat in the novel line it ignored. This version is structural:
+    # the cause comes FROM the line, external-event claims are forbidden
+    # without evidence, and confidence scales with how explicitly the line
+    # names its cause.
+    archetype: "Drain3 novel log template — cause named from the line itself"
     match:
       alertname: "^Drain3AnomalyDetected$"
       services: ["*"]
       signal: "log"
     decision: "ESCALATE"
-    confidence_band: "0.82-0.92"
-    one_line: "Recent deploy introduced a regression — Drain3 caught it via a novel error template that has never appeared in 14 days of prior logs."
-    human_cause: "The most recent deploy introduced a regression - a new error log line has appeared that has never been seen in the prior 14 days."
+    confidence_band: "0.50-0.85"
+    one_line: "A never-before-seen log template appeared; the cause is almost always written IN the line — quote it, name it, never guess an external event."
+    human_cause: "<one sentence that QUOTES or directly paraphrases the decisive novel line — e.g. 'product-catalog is failing because its fail feature flag is enabled' — never a guessed external event>"
     rca: |
-      The most recent deploy of {service} introduced a regression: a novel error log
-      template appeared N minutes after the helm rollout completed and has been
-      recurring since. Drain3 is the canary here — the template is genuinely new
-      (cluster #N never observed in the prior 14 days of logs), and the metric layer
-      is silent because the error rate is still below the fire threshold for
-      HighFrontendErrorRate / HighErrorRate. Trace evidence confirms the affected
-      operation: K traces tagged with db.error / status=error, all on requests that
-      hit the changed code path. The temporal alignment (deploy at HH:MM-N min →
-      first novel template at HH:MM) is the diagnostic — without log-template novelty,
-      this regression would have crept in below alert thresholds until enough users
-      hit it to move the rate.
+      Lead with what the novel template itself says: the decisive evidence for a
+      Drain3 fire is the verbatim line, and the cause is usually written in it
+      (a named exception, a feature flag, a refused connection, a missing config).
+      Quote or closely paraphrase the line, then state what it means for the
+      service. Cross-reference the three pillars scoped to the EMITTING service
+      and report what they actually returned — "metrics are silent" is only a
+      finding if you checked. DO NOT attribute the anomaly to a deploy, rollout,
+      release or any external event unless evidence of that event is present in
+      the gathered context: this platform has no deploy data source, so an
+      unsupported "recent deploy introduced this" is a fabrication, not a
+      diagnosis. Confidence scales with the line: a line that names its own cause
+      supports high confidence; a cryptic novel line supports a lower-confidence
+      named hypothesis plus a concrete verification step.
     evidence_shape:
-      - "Novel Drain3 cluster #N, first seen HH:MM (template: '<verbatim>')"
-      - "Cluster never observed in last 14 days"
-      - "K traces with db.error / status=error tagged to the affected operation"
-      - "Deploy of {service} v<X.Y.Z> at HH:MM-{N min}"
+      - "Verbatim novel template(s), quoted exactly as Drain3 captured them"
+      - "Which service(s) emitted the lines, and the novelty rate / line count"
+      - "What each pillar returned when scoped to the emitting service (including honest empties)"
     actions_shape:
-      - "helm rollback {service} 1 -n app — revert to the last stable release"
-      - "kubectl rollout status deploy/{service} -n app — confirm rollback completes"
-      - "Open a JIRA ticket against the v<X.Y.Z> changelog covering the affected operation"
-      - "If the pattern persists post-rollback: capture diagnostic state with a state-changing tool (kubectl exec ... mysql -e 'SHOW ENGINE INNODB STATUS')"
-    lesson: "Drain3 catches issues that don't trip metric thresholds. A new template + deploy correlation is a regression signature."
+      - "The action the line itself implies (e.g. disable the named feature flag, fix the named config)"
+      - "One concrete verification command an operator can run against the emitting service"
+    lesson: "For log-novelty alerts the cause is usually IN the line. Quote it. Never assert an external event (deploy, rollout) the evidence cannot show."
     doc_anchor: "scenario-5--drain3-self-fires-on-a-novel-post-deploy-error-template"
-
   - id: bounded-agency-resolves-inconclusive
     # FORWARD-LOOKING (audit 2026-04-28): regex names HighErrorRate /
     # HighFrontendErrorRate, neither of which is a provisioned Grafana

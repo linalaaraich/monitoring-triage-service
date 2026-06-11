@@ -922,6 +922,14 @@ class LLMClient:
                 "REMEMBER: a Drain3 alert ALWAYS has its evidence (the anomaly_summary templates). "
                 "'Insufficient data' is NEVER the right answer here — at minimum classify the templates "
                 "as benign (d) or shelve as un-correlated (c). Name what you see.\n"
+                "THE CAUSE IS IN THE LINE (2026-06-11): your human_cause MUST quote or directly "
+                "paraphrase the decisive novel template — e.g. a line saying 'Product Catalog Fail "
+                "Feature Flag Enabled' means the cause IS that feature flag; say so. NEVER attribute "
+                "the anomaly to a deploy, rollout, release or upgrade unless the gathered evidence "
+                "explicitly shows one — this platform has NO deploy data source, so an unsupported "
+                "deploy claim is a fabrication and will be rejected. Never emit template placeholders "
+                "(N minutes, cluster #N, HH:MM, {service}) — every number you write must come from "
+                "the evidence above.\n"
             )
 
         # Crash-loop / restart playbook (added 2026-06-10 after decision
