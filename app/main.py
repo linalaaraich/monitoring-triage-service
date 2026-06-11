@@ -2273,6 +2273,8 @@ from app.v2_mappings import (
     ALERT_NAME_PLAIN as _V2_ALERT_NAME_PLAIN,
     SERVICE_TYPE as _V2_SERVICE_TYPE,
     NAMESPACE as _V2_NAMESPACE,
+    display_namespace as _v2m_display_namespace,
+    display_service as _v2m_display_service,
     env_resolver,
 )
 
@@ -2727,16 +2729,16 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
         # to "unknown" — never a silent hardcoded "prod".
         "env": (r.get("env") or "").strip().lower()
                 or env_resolver(service=svc if svc != "—" else None),
-        "namespace": _V2_NAMESPACE.get(svc, svc[:20] or "—"),
+        "namespace": _v2m_display_namespace(_V2_NAMESPACE.get(svc, svc[:20] or "—")),
         "serviceType": _V2_SERVICE_TYPE.get(svc, "infra"),
-        "component": svc,
+        "component": _v2m_display_service(svc),
         "alertName": alert_name,
         "alertPlain": _V2_ALERT_NAME_PLAIN.get(alert_name, alert_name),
         "verdict": verdict,
         "severity": (r.get("severity") or "info").lower(),
         "indicator": indicator,
         "reason": reason,
-        "boldSubject": svc if svc and svc != "—" else "",
+        "boldSubject": _v2m_display_service(svc) if svc and svc != "—" else "",
         "actions": actions,
         "tags": tags,
         "confidence": confidence,
@@ -3534,19 +3536,6 @@ async def dashboard_v2_kpi():
     box-shadow: inset 2.5px 0 0 var(--accent-blue);
   }}
 
-  /* Top banner matches /dashboard — same page-banner vibe */
-  .kpi-banner {{
-    background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
-    border-bottom: 1px solid rgba(176,126,232,.35);
-    padding: 8px 22px;
-    font-size: 12.5px;
-    color: var(--text-soft);
-    display: flex; align-items: center; gap: 14px;
-  }}
-  .kpi-banner strong {{ color: var(--accent-purple); }}
-  .kpi-banner a {{ color: var(--accent-cyan); text-decoration: none; }}
-  .kpi-banner a:hover {{ text-decoration: underline; }}
-
   /* Main column */
   .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
   .kpi-header {{
@@ -3612,35 +3601,24 @@ async def dashboard_v2_kpi():
     line-height: 1.4;
   }}
 
-  /* Footer note — operator-cognitive-load doctrine pointer */
+  /* Footer note */
   .kpi-foot {{
     padding: 12px 22px 22px;
     font-size: 11.5px;
     color: var(--muted-2);
     border-top: 1px solid var(--border);
   }}
-  .kpi-foot strong {{ color: var(--muted); }}
-  .kpi-foot a {{ color: var(--accent-cyan); text-decoration: none; }}
-  .kpi-foot a:hover {{ text-decoration: underline; }}
 </style>
 </head>
 <body>
-
-<div class="kpi-banner">
-  <strong>KPI &middot; Evaluation</strong>
-  <span>Platform-health surface &mdash; reads from local rca_history + feedback tables.</span>
-  <span style="flex: 1"></span>
-  <a href="/dashboard">&larr; back to triage feed</a>
-  <a href="/dashboard">existing /dashboard</a>
-</div>
 
 <div class="kpi-shell">
   {sidebar_html}
   <main class="kpi-main">
     <div class="kpi-header">
       <div>
-        <div class="kpi-header__title">Platform health &middot; KPI overview</div>
-        <div class="kpi-header__sub">Six live numbers + two static stamps. Auto-refreshing every 60 s &middot; Casablanca timezone.</div>
+        <div class="kpi-header__title">Platform health</div>
+        <div class="kpi-header__sub">How well the platform is doing &mdash; live numbers, refreshed every minute.</div>
       </div>
       <div class="kpi-header__time">
         <span class="live-dot"></span>{_esc(now_tng)} GMT+1
@@ -3651,7 +3629,7 @@ async def dashboard_v2_kpi():
     </div>
 
     <div class="kpi-foot">
-      <strong>What you are looking at:</strong> each card answers one operator question. The big number is the answer; the muted line under it grounds the number in context. The six metric cards are computed live from the local <code>rca_history.db</code> (no external dependencies, MCP-invariant clean); the <em>MCP firewall</em> and <em>Tests passing</em> cards are last-known stamped figures, not live-probed (see each card&rsquo;s sub-line).
+      Each card answers one question &mdash; the big number is the answer. Auto-refresh: 60 s.
     </div>
   </main>
 </div>
@@ -3737,7 +3715,7 @@ async def dashboard_v2_services():
             top_alert = s["top_alertname"] or "—"
             row_html_parts.append(f"""
         <tr>
-          <td class="svc-cell-name"><a href="/dashboard?q={q_param}">{_esc(svc)}</a></td>
+          <td class="svc-cell-name"><a href="/dashboard?q={q_param}">{_esc(_v2m_display_service(svc))}</a></td>
           <td class="svc-cell-num">{s["total"]}</td>
           <td>{_fmt(actions)}</td>
           <td>{_fmt(verdicts)}</td>
@@ -3767,7 +3745,7 @@ async def dashboard_v2_services():
         table_html = """
     <div class="svc-empty">
       <div class="svc-empty__title">No services yet</div>
-      <div class="svc-empty__sub">No decisions in the last 7 days carry an <code>affected_service</code> label. As alerts flow through the pipeline, this page will populate.</div>
+      <div class="svc-empty__sub">No service activity in the last 7 days. As alerts arrive, this page will populate.</div>
     </div>"""
 
     # Sidebar mirrors /dashboard/kpi exactly so the chrome is consistent;
@@ -3865,19 +3843,6 @@ async def dashboard_v2_services():
     box-shadow: inset 2.5px 0 0 var(--accent-blue);
   }}
 
-  /* Top banner matches the KPI page */
-  .kpi-banner {{
-    background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
-    border-bottom: 1px solid rgba(176,126,232,.35);
-    padding: 8px 22px;
-    font-size: 12.5px;
-    color: var(--text-soft);
-    display: flex; align-items: center; gap: 14px;
-  }}
-  .kpi-banner strong {{ color: var(--accent-purple); }}
-  .kpi-banner a {{ color: var(--accent-cyan); text-decoration: none; }}
-  .kpi-banner a:hover {{ text-decoration: underline; }}
-
   .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
   .kpi-header {{
     padding: 18px 22px 8px;
@@ -3916,7 +3881,7 @@ async def dashboard_v2_services():
     text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
   }}
 
-  /* Services table — one row per affected_service */
+  /* Services table — one row per service */
   .svc-table-wrap {{ padding: 14px 22px 22px; }}
   .svc-table {{
     width: 100%;
@@ -3997,28 +3962,17 @@ async def dashboard_v2_services():
     color: var(--muted-2);
     border-top: 1px solid var(--border);
   }}
-  .kpi-foot strong {{ color: var(--muted); }}
-  .kpi-foot a {{ color: var(--accent-cyan); text-decoration: none; }}
-  .kpi-foot a:hover {{ text-decoration: underline; }}
 </style>
 </head>
 <body>
-
-<div class="kpi-banner">
-  <strong>Services</strong>
-  <span>Per-service rollup &mdash; last 7 days, reads from local rca_history.</span>
-  <span style="flex: 1"></span>
-  <a href="/dashboard">&larr; back to triage feed</a>
-  <a href="/dashboard/kpi">KPI overview</a>
-</div>
 
 <div class="kpi-shell">
   {sidebar_html}
   <main class="kpi-main">
     <div class="kpi-header">
       <div>
-        <div class="kpi-header__title">Services &middot; per-service summary</div>
-        <div class="kpi-header__sub">One row per <code>affected_service</code> seen in the last 7 days &middot; auto-refreshing every 60 s &middot; Casablanca timezone.</div>
+        <div class="kpi-header__title">Services</div>
+        <div class="kpi-header__sub">Health summary per monitored service, last 7 days.</div>
       </div>
       <div class="kpi-header__time">
         <span class="live-dot"></span>{_esc(now_tng)} GMT+1
@@ -4031,7 +3985,7 @@ async def dashboard_v2_services():
     </div>
 
     <div class="kpi-foot">
-      <strong>How to read this:</strong> click a service name to drop into the triage feed filtered to that service. Breakdown columns rank counts high-to-low. All data is live from <code>rca_history.db</code> &middot; MCP-invariant clean.
+      Click a service name to see its alerts in the triage feed. Auto-refresh: 60 s.
     </div>
   </main>
 </div>
@@ -4116,27 +4070,20 @@ async def dashboard_v2_alerts():
         v_color = _VERDICT_ACCENT.get(r.get("dominant_verdict", ""), "var(--muted)")
         s_color = _SEVERITY_ACCENT.get(r.get("dominant_severity", ""), "var(--muted)")
 
-        # Gate column: be honest about what we don't store. If the alert
-        # was gated at least once we KNOW the rule carries a
-        # recurrence_gate annotation in Grafana; but the parsed values
-        # (pre_llm=N, llm_dismiss=M, window=2h) are not on the rca_history
-        # row, so we render the "check Grafana rule" pointer rather than
-        # fabricate the numbers.
+        # Gate column: human label only — per-rule thresholds live on the
+        # Grafana rule, so we only say whether the filter has kicked in.
         if was_gated:
             gate_cell = (
                 '<span class="alerts-pill alerts-pill--gated" '
-                'title="At least one fire of this rule was absorbed by the pre-LLM recurrence gate. '
-                'Per-rule thresholds live on the Grafana rule and are not persisted on triage rows — '
-                'see annotation in monitoring-project/roles/grafana/templates/alertrules.yml.j2.">'
-                'gated &middot; (annotation not persisted — check Grafana rule)'
+                'title="At least one fire of this rule was held back automatically because it was a repeat.">'
+                'filtered'
                 '</span>'
             )
         else:
             gate_cell = (
                 '<span class="alerts-pill alerts-pill--ungated" '
-                'title="No fire of this rule was absorbed by the pre-LLM recurrence gate in the window. '
-                'The rule may not carry a recurrence_gate annotation, or the gate has not tripped yet.">'
-                'no gate seen'
+                'title="No fires of this rule were held back by the repeat-alert filter in this window.">'
+                '&mdash;'
                 '</span>'
             )
 
@@ -4168,9 +4115,8 @@ async def dashboard_v2_alerts():
       <div class="alerts-empty">
         <div class="alerts-empty__title">no alerts seen yet</div>
         <div class="alerts-empty__sub">
-          The triage service has not processed any alerts in the last 7 days.
-          New fires from Grafana will appear here as soon as they're persisted to
-          <code>rca_history</code>.
+          No alerts have come through in the last 7 days.
+          New ones will appear here as they arrive.
         </div>
       </div>"""
 
@@ -4275,19 +4221,6 @@ async def dashboard_v2_alerts():
     box-shadow: inset 2.5px 0 0 var(--accent-blue);
   }}
 
-  /* Banner */
-  .kpi-banner {{
-    background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02));
-    border-bottom: 1px solid rgba(176,126,232,.35);
-    padding: 8px 22px;
-    font-size: 12.5px;
-    color: var(--text-soft);
-    display: flex; align-items: center; gap: 14px;
-  }}
-  .kpi-banner strong {{ color: var(--accent-purple); }}
-  .kpi-banner a {{ color: var(--accent-cyan); text-decoration: none; }}
-  .kpi-banner a:hover {{ text-decoration: underline; }}
-
   /* Main column */
   .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
   .kpi-header {{
@@ -4300,40 +4233,6 @@ async def dashboard_v2_alerts():
   .kpi-header__time {{
     font-family: var(--font-mono); font-size: 11.5px;
     color: var(--muted); letter-spacing: 0.02em;
-  }}
-
-  /* Explainer block — tells operators how to tune a noisy alert without
-     making them hunt through Ansible. The page itself never writes to
-     Grafana; this is the procedural pointer. */
-  .alerts-explainer {{
-    margin: 16px 22px 0;
-    padding: 14px 16px;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--accent-cyan);
-    border-radius: 10px;
-    font-size: 12.5px;
-    color: var(--text-soft);
-    line-height: 1.55;
-  }}
-  .alerts-explainer h2 {{
-    margin: 0 0 6px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-  }}
-  .alerts-explainer code {{
-    font-family: var(--font-mono);
-    font-size: 11.5px;
-    background: var(--bg);
-    color: var(--accent-cyan);
-    padding: 1px 6px; border-radius: 4px;
-    border: 1px solid var(--border);
-  }}
-  .alerts-explainer .alerts-explainer__ref {{
-    margin-top: 6px;
-    font-size: 11.5px;
-    color: var(--muted);
   }}
 
   /* Counts strip */
@@ -4436,53 +4335,25 @@ async def dashboard_v2_alerts():
     color: var(--muted-2);
     border-top: 1px solid var(--border);
   }}
-  .alerts-foot strong {{ color: var(--muted); }}
-  .alerts-foot code {{
-    font-family: var(--font-mono);
-    background: var(--bg); padding: 1px 5px; border-radius: 4px;
-    border: 1px solid var(--border); color: var(--text-soft);
-  }}
 </style>
 </head>
 <body>
-
-<div class="kpi-banner">
-  <strong>Alerts &middot; per-rule summary</strong>
-  <span>Read-only roll-up of the last 7 days from <code>rca_history</code>.</span>
-  <span style="flex: 1"></span>
-  <a href="/dashboard">&larr; back to triage feed</a>
-  <a href="/dashboard/kpi">KPI &middot; Evaluation</a>
-</div>
 
 <div class="kpi-shell">
   {sidebar_html}
   <main class="kpi-main">
     <div class="kpi-header">
       <div>
-        <div class="kpi-header__title">Alerts &middot; per-rule view (7d)</div>
-        <div class="kpi-header__sub">One row per <code>alert_name</code> &middot; sorted by total fires &middot; auto-refresh 60 s &middot; Casablanca timezone.</div>
+        <div class="kpi-header__title">Alerts</div>
+        <div class="kpi-header__sub">Which alert rules fired over the last 7 days, and how noisy each one is.</div>
       </div>
       <div class="kpi-header__time">{_esc(now_tng)} GMT+1</div>
     </div>
 
-    <div class="alerts-explainer">
-      <h2>Tuning a noisy alert (recurrence gate)</h2>
-      To tune the recurrence gate for a noisy alert, edit <code>monitoring-project/roles/grafana/templates/alertrules.yml.j2</code>
-      and add or adjust <code>recurrence_gate: "pre_llm=N,llm_dismiss=M,window=2h"</code> on the rule.
-      Re-provision via ansible (<code>monitoring.yml --tags monitoring</code>). The gate parameters live on the
-      Grafana rule itself; they are not persisted on triage rows, so the table below shows only whether
-      the gate has tripped, not its current thresholds.
-      <div class="alerts-explainer__ref">
-        Reference: commit <code>db79ee7</code> raised <code>MediumCpuUsage</code>'s <code>llm_dismiss</code>
-        from 2 to 10 after this same emails-to-fires ratio surfaced it as the top emailer. Annotation writes
-        from the app are EPIC15 / Sprint-5 work &mdash; this page is read-only by design.
-      </div>
-    </div>
-
     <div class="alerts-counts">
-      <span><strong>{n_alerts}</strong> distinct alert rules seen</span>
-      <span><strong>{n_noisy}</strong> with emails/fires &gt; 50% (noise candidates)</span>
-      <span><strong>{n_gated}</strong> with a recurrence-gate trip in the window</span>
+      <span><strong>{n_alerts}</strong> alert rules seen</span>
+      <span><strong>{n_noisy}</strong> flagged noisy (most fires reach the inbox)</span>
+      <span><strong>{n_gated}</strong> quieted by the repeat-alert filter</span>
     </div>
 
     {empty_html}
@@ -4498,7 +4369,7 @@ async def dashboard_v2_alerts():
             <th>Dominant verdict</th>
             <th>Dominant severity</th>
             <th>Last fire</th>
-            <th>Recurrence gate</th>
+            <th>Repeat filter</th>
           </tr>
         </thead>
         <tbody>{table_body_html}</tbody>
@@ -4506,10 +4377,7 @@ async def dashboard_v2_alerts():
     </div>
 
     <div class="alerts-foot">
-      <strong>READ-ONLY surface.</strong> No Grafana API call, no annotation write &mdash; the gate-tuning
-      path is "edit the Ansible template + re-provision," per the explainer above. Auto-tuning the gate
-      from the triage service is EPIC15 / Sprint-5. MCP-invariant clean &middot; pulls from the local
-      <code>rca_history.db</code> via the canonical RCAStore reader.
+      Auto-refresh: 60 s.
     </div>
   </main>
 </div>
@@ -5142,7 +5010,7 @@ async def dashboard_sprint5_incidents():
             svc = inc.get("affected_service") or ""
             q_param = _urllib.quote_plus(svc) if svc else ""
             svc_cell = (
-                f'<a href="/dashboard?q={q_param}">{_esc(svc)}</a>'
+                f'<a href="/dashboard?q={q_param}">{_esc(_v2m_display_service(svc))}</a>'
                 if svc else "<span class='svc-muted'>—</span>"
             )
             verdict = inc.get("current_verdict") or "(none)"
@@ -5199,7 +5067,7 @@ async def dashboard_sprint5_incidents():
         table_html = """
     <div class="svc-empty">
       <div class="svc-empty__title">No open incidents</div>
-      <div class="svc-empty__sub">No incidents are currently open. As alerts with a fingerprint flow through the pipeline they are grouped one-per-fingerprint here. (Dismissed incidents are hidden.) If this is a fresh DB, run <code>backfill_incidents()</code> to populate from history.</div>
+      <div class="svc-empty__sub">Nothing is currently open. New alerts will be grouped into incidents here as they arrive.</div>
     </div>"""
 
     sidebar_html = """
@@ -5256,10 +5124,6 @@ async def dashboard_sprint5_incidents():
   .kpi-sidebar__item {{ display: block; padding: 8px 12px; border-radius: 8px; text-decoration: none; color: var(--text-soft); font-size: 13px; transition: background .12s; }}
   .kpi-sidebar__item:hover {{ background: var(--card-hi); color: var(--text); }}
   .kpi-sidebar__item--active {{ background: var(--card-hi); color: var(--text); border: 1px solid var(--border-hi); font-weight: 500; box-shadow: inset 2.5px 0 0 var(--accent-blue); }}
-  .kpi-banner {{ background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02)); border-bottom: 1px solid rgba(176,126,232,.35); padding: 8px 22px; font-size: 12.5px; color: var(--text-soft); display: flex; align-items: center; gap: 14px; }}
-  .kpi-banner strong {{ color: var(--accent-purple); }}
-  .kpi-banner a {{ color: var(--accent-cyan); text-decoration: none; }}
-  .kpi-banner a:hover {{ text-decoration: underline; }}
   .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
   .kpi-header {{ padding: 18px 22px 8px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; justify-content: space-between; }}
   .kpi-header__title {{ font-size: 18px; font-weight: 600; color: var(--text); }}
@@ -5292,21 +5156,13 @@ async def dashboard_sprint5_incidents():
 </head>
 <body>
 
-<div class="kpi-banner">
-  <strong>Incidents</strong>
-  <span>One row per alert fingerprint &mdash; grouped from the triage feed. Reads the local incidents table.</span>
-  <span style="flex: 1"></span>
-  <a href="/dashboard">&larr; back to triage feed</a>
-  <a href="/dashboard/kpi">KPI overview</a>
-</div>
-
 <div class="kpi-shell">
   {sidebar_html}
   <main class="kpi-main">
     <div class="kpi-header">
       <div>
-        <div class="kpi-header__title">Incidents &middot; grouped by fingerprint</div>
-        <div class="kpi-header__sub">One row per <code>alert_fingerprint</code> &middot; dismissed hidden &middot; auto-refreshing every 60 s &middot; Casablanca timezone.</div>
+        <div class="kpi-header__title">Incidents</div>
+        <div class="kpi-header__sub">Repeated alerts grouped into one line per ongoing issue.</div>
       </div>
       <div class="kpi-header__time">
         <span class="live-dot"></span>{_esc(now_tng)} GMT+1
@@ -5319,7 +5175,7 @@ async def dashboard_sprint5_incidents():
     </div>
 
     <div class="kpi-foot">
-      <strong>What you are looking at:</strong> each row is one incident &mdash; the same flapping rule that produces dozens of feed rows collapses to a single line. <em>Fires</em> is the total contributing alerts; <em>Duration</em> is last seen minus first seen. Verdict / severity reflect the most-recent fire. Currently-dismissed incidents are hidden.
+      Each row is one incident. <em>Fires</em> counts how many times it alerted; <em>Duration</em> is how long it has been going on. Auto-refresh: 60 s.
     </div>
   </main>
 </div>
@@ -5373,7 +5229,7 @@ async def dashboard_sprint5_anomalies():
         )
         novel_html = f"<ul class='anom-list'>{novel_html}</ul>"
     else:
-        novel_html = "<div class='anom-empty'>No novel templates in the current miner window.</div>"
+        novel_html = "<div class='anom-empty'>No new log patterns in the current window.</div>"
 
     # (c) Recurrence-gate fires — persisted, real historical view.
     rec = {"total": 0, "by_alert": []}
@@ -5390,11 +5246,11 @@ async def dashboard_sprint5_anomalies():
         )
         rec_html = f"""
       <table class="anom-table">
-        <thead><tr><th>Alert family</th><th>Gated fires (24h)</th></tr></thead>
+        <thead><tr><th>Alert</th><th>Held back (24h)</th></tr></thead>
         <tbody>{rec_rows}</tbody>
       </table>"""
     else:
-        rec_html = "<div class='anom-empty'>No pre-LLM recurrence-gate fires in the last 24 h.</div>"
+        rec_html = "<div class='anom-empty'>No repeated alerts were held back in the last 24 h.</div>"
 
     now_tng = datetime.now(timezone.utc).astimezone(
         timezone(timedelta(hours=1))
@@ -5454,10 +5310,6 @@ async def dashboard_sprint5_anomalies():
   .kpi-sidebar__item {{ display: block; padding: 8px 12px; border-radius: 8px; text-decoration: none; color: var(--text-soft); font-size: 13px; transition: background .12s; }}
   .kpi-sidebar__item:hover {{ background: var(--card-hi); color: var(--text); }}
   .kpi-sidebar__item--active {{ background: var(--card-hi); color: var(--text); border: 1px solid var(--border-hi); font-weight: 500; box-shadow: inset 2.5px 0 0 var(--accent-blue); }}
-  .kpi-banner {{ background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02)); border-bottom: 1px solid rgba(176,126,232,.35); padding: 8px 22px; font-size: 12.5px; color: var(--text-soft); display: flex; align-items: center; gap: 14px; }}
-  .kpi-banner strong {{ color: var(--accent-purple); }}
-  .kpi-banner a {{ color: var(--accent-cyan); text-decoration: none; }}
-  .kpi-banner a:hover {{ text-decoration: underline; }}
   .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
   .kpi-header {{ padding: 18px 22px 8px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; justify-content: space-between; }}
   .kpi-header__title {{ font-size: 18px; font-weight: 600; color: var(--text); }}
@@ -5466,10 +5318,8 @@ async def dashboard_sprint5_anomalies():
 
   .anom-sections {{ padding: 18px 22px 22px; display: flex; flex-direction: column; gap: 16px; }}
   .anom-card {{ background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px 18px; border-left: 3px solid var(--accent-cyan); }}
-  .anom-card--soft {{ border-left-color: var(--border-hi); }}
   .anom-card__head {{ display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }}
   .anom-card__title {{ font-size: 14px; font-weight: 600; color: var(--text); }}
-  .anom-card__src {{ font-size: 11px; color: var(--muted-2); font-family: var(--font-mono); }}
   .anom-card__q {{ font-size: 11.5px; color: var(--muted); margin-bottom: 12px; }}
   .anom-stat-row {{ display: flex; gap: 18px; margin-bottom: 12px; }}
   .anom-stat {{ display: flex; flex-direction: column; gap: 2px; }}
@@ -5484,30 +5334,18 @@ async def dashboard_sprint5_anomalies():
   .anom-fam {{ color: var(--text); font-weight: 500; }}
   .anom-num {{ font-family: var(--font-mono); color: var(--accent-yellow); font-weight: 600; }}
   .anom-empty {{ font-size: 12.5px; color: var(--muted-2); padding: 6px 0; }}
-  .anom-note {{ font-size: 12.5px; color: var(--muted); line-height: 1.5; background: var(--bg-soft); border: 1px dashed var(--border); border-radius: 8px; padding: 12px 14px; }}
-  .anom-note strong {{ color: var(--text-soft); }}
-  .anom-note code {{ font-family: var(--font-mono); background: var(--card); padding: 1px 5px; border-radius: 4px; font-size: 11px; }}
   .kpi-foot {{ padding: 12px 22px 22px; font-size: 11.5px; color: var(--muted-2); border-top: 1px solid var(--border); }}
-  .kpi-foot strong {{ color: var(--muted); }}
 </style>
 </head>
 <body>
-
-<div class="kpi-banner">
-  <strong>Anomalies</strong>
-  <span>Detective-signal surface &mdash; aggregates the four pipeline signals. Honest about what isn't persisted yet.</span>
-  <span style="flex: 1"></span>
-  <a href="/dashboard">&larr; back to triage feed</a>
-  <a href="/dashboard/kpi">KPI overview</a>
-</div>
 
 <div class="kpi-shell">
   {sidebar_html}
   <main class="kpi-main">
     <div class="kpi-header">
       <div>
-        <div class="kpi-header__title">Anomalies &middot; detective signals</div>
-        <div class="kpi-header__sub">Four pipeline signals, aggregated not recomputed &middot; auto-refreshing every 60 s &middot; Casablanca timezone.</div>
+        <div class="kpi-header__title">Anomalies</div>
+        <div class="kpi-header__sub">Unusual patterns the platform has spotted in logs and alerts.</div>
       </div>
       <div class="kpi-header__time">
         <span class="live-dot"></span>{_esc(now_tng)} GMT+1
@@ -5518,52 +5356,31 @@ async def dashboard_sprint5_anomalies():
 
       <div class="anom-card">
         <div class="anom-card__head">
-          <span class="anom-card__title">(a) Drain3 novel templates</span>
-          <span class="anom-card__src">DrainAnalyzer.get_stats()</span>
+          <span class="anom-card__title">New log patterns</span>
         </div>
-        <div class="anom-card__q">Newest low-frequency log templates the miner is tracking right now.</div>
+        <div class="anom-card__q">Log messages that don't look like anything seen before &mdash; often the first sign of a new problem.</div>
         <div class="anom-stat-row">
-          <div class="anom-stat"><span class="anom-stat__n">{_esc(total_clusters)}</span><span class="anom-stat__l">total clusters</span></div>
+          <div class="anom-stat"><span class="anom-stat__n">{_esc(total_clusters)}</span><span class="anom-stat__l">known patterns</span></div>
           <div class="anom-stat"><span class="anom-stat__n">{_esc(anomaly_rate)}</span><span class="anom-stat__l">recent anomaly rate</span></div>
         </div>
         {novel_html}
-        <div class="anom-note" style="margin-top:12px"><strong>Live signal, not persisted:</strong> these come from the in-memory Drain3 miner state. They reflect the current window only; there is no historical store of novel-template counts over time yet.</div>
       </div>
 
       <div class="anom-card">
         <div class="anom-card__head">
-          <span class="anom-card__title">(c) Recurrence-gate fires</span>
-          <span class="anom-card__src">rca_history.triage_decision</span>
+          <span class="anom-card__title">Repeated alerts held back</span>
         </div>
-        <div class="anom-card__q">Pre-LLM recurrence-gate fires in the last 24 h (<code>recurrence_gated_pre_llm</code>). The one detective signal with a real historical view.</div>
+        <div class="anom-card__q">Alerts automatically held back in the last 24 hours because they were repeats of a known issue.</div>
         <div class="anom-stat-row">
-          <div class="anom-stat"><span class="anom-stat__n">{int(rec["total"])}</span><span class="anom-stat__l">gated fires (24h)</span></div>
+          <div class="anom-stat"><span class="anom-stat__n">{int(rec["total"])}</span><span class="anom-stat__l">held back (24h)</span></div>
         </div>
         {rec_html}
-      </div>
-
-      <div class="anom-card anom-card--soft">
-        <div class="anom-card__head">
-          <span class="anom-card__title">(b) Entity-baseline &sigma;-claims</span>
-          <span class="anom-card__src">entity_baselines.py</span>
-        </div>
-        <div class="anom-card__q">How many &sigma; a metric sits above its 7-day per-service baseline.</div>
-        <div class="anom-note"><strong>Signal present in pipeline; not yet persisted for historical view.</strong> Baselines are computed on-demand from Prometheus through the MCP bridge at fire time and rendered into the LLM prompt &mdash; they are never written to <code>rca_history</code>. Surfacing a live value here would require a direct Prometheus read, which would violate the MCP-only-read invariant for these read-aggregation pages. Persisting the &sigma;-claim per decision is a future schema add.</div>
-      </div>
-
-      <div class="anom-card anom-card--soft">
-        <div class="anom-card__head">
-          <span class="anom-card__title">(d) Adaptive-threshold widened-but-not-fired ratio</span>
-          <span class="anom-card__src">(no persisted store)</span>
-        </div>
-        <div class="anom-card__q">Fraction of adaptive-threshold evaluations that widened but did not fire.</div>
-        <div class="anom-note"><strong>Signal present in pipeline; not yet persisted for historical view.</strong> Adaptive-threshold behaviour is only referenced in the LLM reasoning prompt &mdash; there are no widen/fire counters written to any store, so the widened-but-not-fired ratio is not computable here without fabricating numbers. This section is intentionally honest rather than showing a made-up value.</div>
       </div>
 
     </div>
 
     <div class="kpi-foot">
-      <strong>What you are looking at:</strong> the four detective signals the platform already produces. (a) Drain3 and (c) recurrence-gate are surfaced from real data; (b) entity-baseline and (d) adaptive-threshold are flagged honestly as not-yet-persisted rather than fabricated.
+      Auto-refresh: 60 s.
     </div>
   </main>
 </div>
@@ -5655,11 +5472,11 @@ async def dashboard_sprint5_stats():
         rate_disp = f"{rate * 100:.0f}%" if rate is not None else "—"
         fp_html = f"""
       <div class="stats-fp__big">{_esc(rate_disp)}</div>
-      <div class="stats-fp__sub">{int(fp.get("overrides", 0))} of {int(fp.get("rated", 0))} rated alerts had the verdict corrected by an operator (<code>verdict_was_right = 'no'</code>).</div>"""
+      <div class="stats-fp__sub">{int(fp.get("overrides", 0))} of {int(fp.get("rated", 0))} reviewed alerts had their verdict corrected by an operator.</div>"""
     else:
         fp_html = """
       <div class="stats-fp__big stats-muted">n/a</div>
-      <div class="stats-fp__sub">No operator ratings in the last 7 days, so the false-positive proxy isn't yet measurable. It wires up automatically once operators start grading alerts on the rate page (<code>feedback.verdict_was_right</code>).</div>"""
+      <div class="stats-fp__sub">No operator reviews in the last 7 days yet &mdash; this fills in automatically as alerts get rated.</div>"""
 
     sidebar_html = """
   <aside class="kpi-sidebar">
@@ -5715,10 +5532,6 @@ async def dashboard_sprint5_stats():
   .kpi-sidebar__item {{ display: block; padding: 8px 12px; border-radius: 8px; text-decoration: none; color: var(--text-soft); font-size: 13px; transition: background .12s; }}
   .kpi-sidebar__item:hover {{ background: var(--card-hi); color: var(--text); }}
   .kpi-sidebar__item--active {{ background: var(--card-hi); color: var(--text); border: 1px solid var(--border-hi); font-weight: 500; box-shadow: inset 2.5px 0 0 var(--accent-blue); }}
-  .kpi-banner {{ background: linear-gradient(180deg, rgba(176,126,232,.10), rgba(176,126,232,.02)); border-bottom: 1px solid rgba(176,126,232,.35); padding: 8px 22px; font-size: 12.5px; color: var(--text-soft); display: flex; align-items: center; gap: 14px; }}
-  .kpi-banner strong {{ color: var(--accent-purple); }}
-  .kpi-banner a {{ color: var(--accent-cyan); text-decoration: none; }}
-  .kpi-banner a:hover {{ text-decoration: underline; }}
   .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
   .kpi-header {{ padding: 18px 22px 8px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; justify-content: space-between; }}
   .kpi-header__title {{ font-size: 18px; font-weight: 600; color: var(--text); }}
@@ -5755,26 +5568,17 @@ async def dashboard_sprint5_stats():
   .stats-fp__sub code, .stats-card__q code {{ font-family: var(--font-mono); background: var(--bg-soft); padding: 1px 5px; border-radius: 4px; font-size: 11px; }}
   .stats-empty {{ font-size: 12.5px; color: var(--muted-2); padding: 8px 0; }}
   .kpi-foot {{ padding: 12px 22px 22px; font-size: 11.5px; color: var(--muted-2); border-top: 1px solid var(--border); }}
-  .kpi-foot strong {{ color: var(--muted); }}
 </style>
 </head>
 <body>
-
-<div class="kpi-banner">
-  <strong>Stats</strong>
-  <span>Aggregate insights &mdash; last 7 days, reads from local rca_history + feedback.</span>
-  <span style="flex: 1"></span>
-  <a href="/dashboard">&larr; back to triage feed</a>
-  <a href="/dashboard/kpi">KPI overview</a>
-</div>
 
 <div class="kpi-shell">
   {sidebar_html}
   <main class="kpi-main">
     <div class="kpi-header">
       <div>
-        <div class="kpi-header__title">Stats &middot; aggregate insights</div>
-        <div class="kpi-header__sub">Read-only rollups over the last 7 days &middot; auto-refreshing every 60 s &middot; Casablanca timezone.</div>
+        <div class="kpi-header__title">Stats</div>
+        <div class="kpi-header__sub">Trends from the last 7 days &mdash; the noisiest alerts and the most-affected services.</div>
       </div>
       <div class="kpi-header__time">
         <span class="live-dot"></span>{_esc(now_tng)} GMT+1
@@ -5789,7 +5593,7 @@ async def dashboard_sprint5_stats():
       </div>
       <div class="stats-card">
         <div class="stats-card__title">Most-escalated services</div>
-        <div class="stats-card__q">Top 5 services by <code>escalate</code> verdict count.</div>
+        <div class="stats-card__q">Top 5 services by escalated alerts.</div>
         {escalated_html}
       </div>
       <div class="stats-card stats-card--wide">
@@ -5799,13 +5603,13 @@ async def dashboard_sprint5_stats():
       </div>
       <div class="stats-card">
         <div class="stats-card__title">False-positive proxy</div>
-        <div class="stats-card__q">Operator verdict overrides from the feedback table.</div>
+        <div class="stats-card__q">How often a person corrected the platform's verdict.</div>
         {fp_html}
       </div>
     </div>
 
     <div class="kpi-foot">
-      <strong>What you are looking at:</strong> every number is a pure aggregate over the local <code>rca_history</code> (and <code>feedback</code>) tables &mdash; no external calls, MCP-invariant clean. The false-positive proxy is the closest honest signal the store can give until operators grade more alerts.
+      Auto-refresh: 60 s.
     </div>
   </main>
 </div>

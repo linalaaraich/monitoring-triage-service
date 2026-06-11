@@ -312,4 +312,9 @@ async def test_services_route_title_marker(services_app_client):
     resp = await services_app_client.get("/dashboard/services")
     body = resp.text
     assert "Services" in body
-    assert "per-service summary" in body
+    # Presentation polish (2026-06-11): plain-language sub, no banner strip,
+    # no dev-facing provenance copy.
+    assert "Health summary per monitored service" in body
+    assert "kpi-banner" not in body
+    assert "rca_history" not in body
+    assert "back to triage feed" not in body

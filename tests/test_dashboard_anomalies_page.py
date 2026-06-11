@@ -1,9 +1,12 @@
 """S5-INC-04 — /dashboard/anomalies real page (detective signals).
 
 SSR-verified through the ASGI transport (render, not curl). Asserts 200, theme
-head-script in <head>, all four signal sections present, and that the
-recurrence-gate signal renders a seeded persisted fire. Signals (b) and (d)
-carry the honest "not yet persisted" note.
+head-script in <head>, and the two real-data sections (new log patterns +
+repeated-alerts-held-back) including a seeded recurrence-gate fire.
+
+Presentation polish (2026-06-11): the not-persisted placeholder cards for
+signals (b) entity-baseline and (d) adaptive-threshold were removed, along
+with the kpi-banner strip — asserted absent here.
 """
 import os
 import tempfile
@@ -56,13 +59,18 @@ async def test_anomalies_page_renders_all_sections(client_with_anomalies):
     head = body.split("</head>", 1)[0]
     assert "obs-rca-theme" in head
     assert 'setAttribute("data-theme"' in head
-    # All four signal sections present.
-    assert "Drain3 novel templates" in body
-    assert "Recurrence-gate fires" in body
-    assert "Entity-baseline" in body
-    assert "Adaptive-threshold" in body
-    # Honest "not yet persisted" note on the two unpersisted signals.
-    assert "not yet persisted for historical view" in body
+    # The two real-data signal sections present, with human titles.
+    assert "New log patterns" in body
+    assert "Repeated alerts held back" in body
+    # The not-persisted placeholder cards are gone (presentation polish).
+    assert "Entity-baseline" not in body
+    assert "Adaptive-threshold" not in body
+    assert "not persisted" not in body
+    assert "not yet persisted" not in body
+    # And so are the banner strip + other dev-facing copy.
+    assert "kpi-banner" not in body
+    assert "back to triage feed" not in body
+    assert "rca_history" not in body
     # Seeded recurrence-gate fire surfaced.
     assert "FlappyCPU" in body
 

@@ -10,10 +10,9 @@ Covers:
     of 500ing.
   * Noisy-row highlight class actually applies — rows where the email
     ratio exceeds 0.5 render with class="alerts-row alerts-row--noisy".
-  * The explainer block content is present (operator-tuning pointer).
-  * Honest annotation reporting — pages with a gate-tripped alert render
-    the "annotation not persisted — check Grafana rule" pointer rather
-    than fabricating gate parameters that aren't on the row.
+  * Presentation polish (2026-06-11): the dev-facing explainer block,
+    kpi-banner strip, and "annotation not persisted" gate text are gone;
+    gate-tripped rows render the human "filtered" pill instead.
 """
 from __future__ import annotations
 
@@ -299,31 +298,35 @@ async def test_alerts_route_noisy_row_class_applies(alerts_app_client):
 
 
 @pytest.mark.asyncio
-async def test_alerts_route_explainer_block_present(alerts_app_client):
-    """The explainer block must surface the Ansible tuning pointer."""
-    resp = await alerts_app_client.get("/dashboard/alerts")
-    body = resp.text
-    # Spec: must reference the Ansible template path + the recurrence_gate
-    # annotation format + the re-provision command + the db79ee7 reference.
-    assert "alertrules.yml.j2" in body
-    assert "recurrence_gate" in body
-    assert "pre_llm=N,llm_dismiss=M,window=2h" in body
-    assert "monitoring.yml --tags monitoring" in body
-    assert "db79ee7" in body
-    assert "MediumCpuUsage" in body  # referenced in the tuning callout
-
-
-@pytest.mark.asyncio
-async def test_alerts_route_honest_annotation_reporting(alerts_app_client):
-    """When a row was gate-tripped, the cell must surface the honest
-    'annotation not persisted — check Grafana rule' pointer rather
-    than fabricating the gate parameters.
+async def test_alerts_route_no_dev_facing_copy(alerts_app_client):
+    """Presentation polish (2026-06-11): the Ansible tuning explainer,
+    kpi-banner strip, and internals-explaining footer are gone — the page
+    must not leak dev-facing provenance text to a non-engineer audience.
     """
     resp = await alerts_app_client.get("/dashboard/alerts")
     body = resp.text
-    # MediumCpuUsage was gated → the page should carry the honest pointer.
-    assert "annotation not persisted" in body
-    assert "check Grafana rule" in body
+    assert "kpi-banner" not in body
+    assert "alertrules.yml.j2" not in body
+    assert "pre_llm=N,llm_dismiss=M,window=2h" not in body
+    assert "monitoring.yml --tags monitoring" not in body
+    assert "db79ee7" not in body
+    assert "back to triage feed" not in body
+    assert "not persisted" not in body
+    assert "rca_history" not in body
+    # The seeded alert names still render (data, not dev copy).
+    assert "MediumCpuUsage" in body
+
+
+@pytest.mark.asyncio
+async def test_alerts_route_gate_cell_human_label(alerts_app_client):
+    """When a row was gate-tripped, the cell renders the human 'filtered'
+    pill — no internal annotation plumbing in the visible text.
+    """
+    resp = await alerts_app_client.get("/dashboard/alerts")
+    body = resp.text
+    # MediumCpuUsage was gated → the gated pill renders with the human label.
+    assert "alerts-pill--gated" in body
+    assert ">filtered<" in body.replace("\n", "")
 
 
 @pytest.mark.asyncio
