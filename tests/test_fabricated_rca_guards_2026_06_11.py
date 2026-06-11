@@ -166,3 +166,45 @@ def test_fire_one_payload_carries_services(monkeypatch):
     monkeypatch.setattr(settings, "drain3_component_rate_threshold", 9.0)
     asyncio.get_event_loop().run_until_complete(da.maybe_fire_alerts(batch))
     assert sent[("system", "all")] == ["product-catalog", "frontend"]
+
+
+# --- Prod-mimic battery follow-ups (N1/N2/N4) --------------------------------
+
+def test_humanize_verdict_token():
+    from app.main import _humanize_verdict_token
+    assert _humanize_verdict_token("see_previous_rca:abc-123") == "recurrence"
+    assert _humanize_verdict_token("escalate") == "escalate"
+    assert _humanize_verdict_token("triage_suppressed") == "triage suppressed"
+
+
+def test_actionable_tag_suppressed_on_dismiss():
+    from app.main import _v2_transform_row
+    from datetime import datetime, timezone
+    base = {"id": "a"*32, "alert_name": "TargetDown", "affected_service": "monitoring",
+            "timestamp": datetime.now(timezone.utc).isoformat(), "severity": "critical",
+            "triage_decision": "investigate", "rca_quality": "actionable",
+            "rca_report": "{}", "llm_confidence": "0.4"}
+    dismiss = dict(base, llm_verdict="dismiss")
+    escal = dict(base, llm_verdict="escalate")
+    now = datetime.now(timezone.utc)
+    assert "actionable" not in _v2_transform_row(dismiss, now_utc=now)["tags"]
+    assert "actionable" in _v2_transform_row(escal, now_utc=now)["tags"]
+
+
+def test_drain3_alert_carries_namespace_hint():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.models import Drain3Webhook
+    from app.pipeline import TriagePipeline
+    p = TriagePipeline.__new__(TriagePipeline)
+    captured = {}
+
+    async def fake_process(alert, source, env=None):
+        captured["alert"] = alert
+
+    p._process_alert = fake_process
+    p._resolve_env = lambda *a, **k: "prod"
+    w = Drain3Webhook(anomalous_lines=["x"], new_templates=["t"], service="spring-boot",
+                      tier="component", scope="spring-boot", services=["spring-boot"])
+    asyncio.get_event_loop().run_until_complete(p.process_drain3_webhook(w))
+    assert captured["alert"].labels.get("namespace") == "app"

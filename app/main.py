@@ -2279,6 +2279,19 @@ from app.v2_mappings import (
 )
 
 
+def _humanize_verdict_token(token: str) -> str:
+    """N1 (2026-06-11 prod-mimic battery): legacy rows stored pointer tokens
+    like `see_previous_rca:<uuid>` IN the verdict column; the services page
+    rendered them raw (9 occurrences live). Collapse internals to operator
+    words; real verdicts pass through."""
+    t = (token or "").lower()
+    if t.startswith("see_previous_rca"):
+        return "recurrence"
+    if t in ("escalate", "dismiss", "inconclusive"):
+        return t
+    return t.replace("_", " ")
+
+
 def _v2_humanize_duration(seconds: float) -> str:
     """'3 min ago', '1 h 24 m', '6 d 2 h' — operator-readable durations."""
     if seconds < 0:
@@ -2628,7 +2641,12 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
     tags = []
     q = (r.get("rca_quality") or "").lower()
     td = (r.get("triage_decision") or "").lower()
-    if q == "actionable":
+    # N2 (2026-06-11 prod-mimic battery): rca_quality grades the PROSE, but
+    # "actionable" rendered on a DISMISS verdict reads as a call to action on
+    # a row whose whole point is "nothing to do" (live: TargetDown dismissed
+    # at 0.40 wearing an actionable tag). Suppress the tag for dismissals;
+    # the honest-negative tags (data-starved/needs-review) still show.
+    if q == "actionable" and verdict_lower != "dismiss":
         tags.append("actionable")
     if q == "data_starved":
         tags.append("data-starved")
@@ -3706,7 +3724,7 @@ async def dashboard_v2_services():
                     return "<span class='svc-muted'>—</span>"
                 items = sorted(d.items(), key=lambda kv: kv[1], reverse=True)
                 return " &middot; ".join(
-                    f"<span class='svc-pair'>{_esc(k)} <b>{v}</b></span>" for k, v in items
+                    f"<span class='svc-pair'>{_esc(_humanize_verdict_token(k))} <b>{v}</b></span>" for k, v in items
                 )
             last_fire_display = s["last_fire"] or "—"
             # Trim the timestamp to YYYY-MM-DD HH:MM (drop microseconds + tz)

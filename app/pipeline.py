@@ -284,15 +284,24 @@ class TriagePipeline:
         # is a wider blast radius, so bump it to high severity.
         _severity = "high" if tier == "application" else "warning"
         _tier_label = {"component": "Component", "application": "Application", "system": "System"}.get(tier, "System")
-        alert = GrafanaAlert(
-            status="firing",
-            labels={
+        # N4 (2026-06-11): namespace hint for the deploy-bridge + kube context
+        # scoping — derived from the logical NAMESPACE map when the emitting
+        # service is a known tenant (spring-boot -> app, demo services -> their
+        # k8s namespace via the map); omitted when unknown.
+        from app.v2_mappings import NAMESPACE as _ns_map
+        _ns_hint = _ns_map.get(primary_service) or ""
+        _labels = {
                 "alertname": "Drain3AnomalyDetected",
                 "service": primary_service,
                 "severity": _severity,
                 "signal": "log",
                 "tier": tier,
-            },
+        }
+        if _ns_hint:
+            _labels["namespace"] = _ns_hint
+        alert = GrafanaAlert(
+            status="firing",
+            labels=_labels,
             annotations={
                 "summary": f"Drain3 {_tier_label}-tier anomaly ({scope}): {len(webhook.anomalous_lines)} anomalous log lines (rate {webhook.anomaly_rate:.2%})",
                 "description": rich_description,
