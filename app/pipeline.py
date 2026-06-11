@@ -497,6 +497,15 @@ class TriagePipeline:
         """
         if not settings.triage_suppression_enabled:
             return None
+        # 2026-06-11: criticals NEVER Layer-2 suppress. Live finding
+        # (decision e10e341d): a critical KubeWorkloadDown re-fire was
+        # silenced because the PREVIOUS outage's recovery investigation had
+        # dismissed ("condition resolved") within the lookback — so a brand-
+        # new critical outage produced no page. Mirrors the 111ea41 stress
+        # fix that exempted criticals from the shelved-in-disguise gate:
+        # noise control is for noise, not for criticals.
+        if (alert.severity or "").lower() == "critical":
+            return None
         recent = await self.store.get_recent_decision_for_alert(
             alert_name=alert.alertname,
             affected_service=alert.service,

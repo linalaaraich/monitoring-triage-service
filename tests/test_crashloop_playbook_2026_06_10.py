@@ -882,3 +882,35 @@ def test_exemplar_block_carries_numeral_guard(monkeypatch):
     user = captured["messages"][-1]["content"]
     if "ANALOGY for shape and tone" in user:   # exemplar matched for this alert
         assert "NEVER copy them" in user
+
+
+def test_kube_summary_pending_without_crashes_rules_out_oom():
+    """66c98bcc: clean evidence + Pending pod still got 'likely OOMKilled' —
+    the summary must explicitly rule OOM out when own-pod terminations are 0."""
+    series = [
+        {"metric": {"kpi": "spec_replicas", "deployment": "ad"}, "values": [[0, "1"]]},
+        {"metric": {"kpi": "replicas_available", "deployment": "ad"}, "values": [[0, "0"]]},
+        {"metric": {"__name__": "kube_pod_status_phase", "exported_pod": "ad-x",
+                    "phase": "Pending"}, "values": [[0, "1"]]},
+    ]
+    out = _summarize_kube_workload_state(_range_result(series), "ad")
+    assert "cannot be SCHEDULED" in out and "NOT a crash and NOT OOM" in out
+
+
+import pytest as _pytest
+
+@_pytest.mark.asyncio
+async def test_layer2_suppression_never_silences_criticals(crashloop_store):
+    """e10e341d: a critical KubeWorkloadDown re-fire was Layer-2 suppressed by
+    the prior outage's recovery-dismiss. Criticals must bypass Layer 2."""
+    from app.pipeline import TriagePipeline
+    pipeline = TriagePipeline.__new__(TriagePipeline)
+    pipeline.store = MagicMock()
+    pipeline.store.get_recent_decision_for_alert = AsyncMock(
+        return_value={"llm_verdict": "dismiss", "triage_decision": "investigate"}
+    )
+    crit = _crashloop_alert(severity="critical")
+    assert crit.severity == "critical"
+    assert await pipeline._check_suppression(crit) is None
+    warn = _crashloop_alert(severity="warning")
+    assert await pipeline._check_suppression(warn) == "recent_dismissed_history"

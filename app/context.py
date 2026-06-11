@@ -204,11 +204,25 @@ def _summarize_kube_workload_state(data: dict | None, service: str) -> str | Non
             )
         lines.append(state)
     if pending:
-        lines.append(
+        line = (
             f"Non-running pods of {service}: " + "; ".join(sorted(set(pending))[:6])
             + ". A Pending pod that never schedules (e.g. unsatisfiable nodeSelector/"
             "resources) keeps the deployment at 0 available."
         )
+        if not terminations:
+            # 2026-06-11: explicit negative — with clean history and scoped
+            # evidence the model STILL guessed "likely OOMKilled" for a
+            # Pending outage (decision 66c98bcc); OOM is its generic-bias
+            # answer for k8s unavailability, so rule it out in words when
+            # the evidence rules it out.
+            line += (
+                f" => READY VERDICT: {service} is down because its pod cannot be "
+                "SCHEDULED (Pending) — a placement/configuration problem (node "
+                "selector, resources, taints). It is NOT a crash and NOT OOM: "
+                f"{service}'s pods have ZERO recent terminations. Do not mention "
+                "OOM or memory limits in your cause."
+            )
+        lines.append(line)
     if terminations:
         lines.append(
             f"Recent container terminations of {service} (last_terminated_reason): "
