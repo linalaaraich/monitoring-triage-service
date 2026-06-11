@@ -89,6 +89,12 @@ class Drain3Webhook(BaseModel):
     # Defaults preserve every existing caller (single system-wide fire).
     tier: str = "system"          # component | application | system
     scope: str = "all"            # service name | app name | "all"
+    # Fix C (2026-06-11, fabricated-RCA incident): the REAL services that
+    # emitted the flagged lines, dominant first. Lets the pipeline scope the
+    # three-pillar cross-reference to a service that actually exists instead
+    # of the synthetic "drain3" label (which made every pillar return empty
+    # and turned "metrics are silent" into an artifact).
+    services: list[str] = Field(default_factory=list)
 
 
 # --- LLM decision ---

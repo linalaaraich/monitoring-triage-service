@@ -109,3 +109,60 @@ def test_drain3_playbook_requires_quoting_the_line():
     user = captured["m"][-1]["content"]
     assert "THE CAUSE IS IN THE LINE" in user
     assert "NO deploy data source" in user
+
+
+# --- C + E (approved follow-up wave) -----------------------------------------
+
+from app.pipeline import _has_corroborating_evidence
+from app.models import Drain3Webhook, GatheredContext
+
+
+def test_drain3_webhook_carries_emitting_services():
+    w = Drain3Webhook(anomalous_lines=["x"], services=["product-catalog", "frontend"])
+    assert w.services[0] == "product-catalog"
+
+
+def test_empty_context_has_no_corroborating_evidence():
+    assert not _has_corroborating_evidence(GatheredContext(sources_available=3))
+    assert not _has_corroborating_evidence(
+        GatheredContext(sources_available=3, metrics={"status": "success", "result": []})
+    )
+
+
+def test_any_source_counts_as_corroboration():
+    assert _has_corroborating_evidence(GatheredContext(sources_available=3, anomaly_summary="NOVEL: flag enabled"))
+    assert _has_corroborating_evidence(GatheredContext(sources_available=3, kube_workload_summary="Deployment x: available=0"))
+    assert _has_corroborating_evidence(GatheredContext(sources_available=3, annotated_logs=["[ANOMALY] boom"]))
+    assert _has_corroborating_evidence(GatheredContext(sources_available=3, traces=[{"traceID": "t"}]))
+    assert _has_corroborating_evidence(GatheredContext(sources_available=3, metrics={"result": [{"metric": {}, "values": [[0, "1"]]}]}))
+
+
+def test_fire_one_payload_carries_services(monkeypatch):
+    """The analyzer names the real emitters, dominant first (system tier)."""
+    import asyncio
+    from app.drain_analyzer import DrainAnalyzer, BatchResult, ScopeCounts
+
+    da = DrainAnalyzer.__new__(DrainAnalyzer)
+    da._tier_alert_ts = {}
+    batch = BatchResult(
+        total_lines=100, total_anomalous=12,
+        per_service={
+            "product-catalog": ScopeCounts(lines=40, anomalous=10, new_templates=["t"], sample_lines=["l"]),
+            "frontend": ScopeCounts(lines=40, anomalous=2),
+            "quiet-svc": ScopeCounts(lines=20, anomalous=0),
+        },
+    )
+    sent = {}
+
+    async def fake_fire_one(tier, scope, counts, services=None):
+        sent[(tier, scope)] = services
+
+    da._fire_one = fake_fire_one
+    # monkeypatch thresholds so only system tier fires
+    from app.config import settings
+    monkeypatch.setattr(settings, "drain3_alert_rate_threshold", 0.05)
+    monkeypatch.setattr(settings, "drain3_alert_min_lines", 10)
+    monkeypatch.setattr(settings, "drain3_app_rate_threshold", 9.0)
+    monkeypatch.setattr(settings, "drain3_component_rate_threshold", 9.0)
+    asyncio.get_event_loop().run_until_complete(da.maybe_fire_alerts(batch))
+    assert sent[("system", "all")] == ["product-catalog", "frontend"]

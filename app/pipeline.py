@@ -33,6 +33,29 @@ from app.v2_mappings import env_resolver
 logger = logging.getLogger(__name__)
 
 
+def _has_corroborating_evidence(ctx) -> bool:
+    """Fix E (2026-06-11): does ANY gathered source corroborate a verdict?
+
+    True when at least one of: non-empty Prometheus result, service-scoped
+    log lines, traces, a kube-state summary, or drain3 anomaly lines. False
+    means the pipeline gathered nothing — a high-confidence "actionable"
+    verdict on top of that is a guess and gets demoted at persist time."""
+    if ctx is None:
+        return False
+    if (ctx.anomaly_summary or "").strip():
+        return True
+    if getattr(ctx, "kube_workload_summary", None):
+        return True
+    if ctx.annotated_logs:
+        return True
+    if ctx.traces:
+        return True
+    metrics = ctx.metrics
+    if isinstance(metrics, dict) and metrics.get("result"):
+        return True
+    return False
+
+
 def _is_shelved_in_disguise(decision, quality: str, severity: str = "warning") -> bool:
     """Return True when the LLM picked ESCALATE but every other signal
     says this RCA isn't operator-actionable.
@@ -233,7 +256,18 @@ class TriagePipeline:
                 "SYSTEM-tier log anomaly: the novel-template rate is elevated "
                 "across the platform as a whole (many services at once)."
             )
+        # Fix C (2026-06-11): scope the alert to the dominant EMITTING service
+        # when the analyzer named one — the synthetic "drain3" label made the
+        # three-pillar fetch query a service that doesn't exist, so every
+        # pillar came back empty and the model leaned on the exemplar instead
+        # of evidence (the fabricated deploy-RCA incident).
+        primary_service = (webhook.services[0] if webhook.services else webhook.service)
         evidence_parts = [tier_lede, f"Anomaly rate: {webhook.anomaly_rate:.2%} ({len(webhook.anomalous_lines)} lines flagged in batch)."]
+        if len(webhook.services) > 1:
+            evidence_parts.append(
+                "Emitting services (most anomalous first): "
+                + ", ".join(webhook.services[:5])
+            )
         if templates:
             evidence_parts.append("New log templates seen for the first time:")
             for t in templates:
@@ -254,7 +288,7 @@ class TriagePipeline:
             status="firing",
             labels={
                 "alertname": "Drain3AnomalyDetected",
-                "service": webhook.service,
+                "service": primary_service,
                 "severity": _severity,
                 "signal": "log",
                 "tier": tier,
@@ -268,7 +302,7 @@ class TriagePipeline:
             # drain3 batches on the same service don't collapse into one
             # dedup window.
             fingerprint=drain3_fingerprint(
-                webhook.service, webhook.new_templates, webhook.anomalous_lines,
+                primary_service, webhook.new_templates, webhook.anomalous_lines,
             ),
         )
 
@@ -1451,6 +1485,23 @@ class TriagePipeline:
             decision.suggested_actions, decision.evidence,
             human_cause=getattr(decision, "human_cause", None),
         )
+
+        # Fix E (2026-06-11, fabricated-RCA incident): a confident
+        # "actionable" verdict with ZERO corroborating evidence from any
+        # source (all pillars empty, no anomaly lines, no kube facts) is a
+        # guess wearing a verdict's clothes — the fabricated deploy-RCA
+        # shipped at 0.85 on exactly this shape. Demote: cap confidence at
+        # 0.5 and tag needs_review so an operator looks before trusting it.
+        if quality == "actionable" and decision.confidence > 0.5 \
+                and not _has_corroborating_evidence(ctx):
+            logger.warning(
+                "Empty-evidence demotion: %s/%s actionable at conf=%.2f with "
+                "no corroborating evidence from any source — capping to 0.5 "
+                "+ needs_review.",
+                alert.alertname, alert.service, decision.confidence,
+            )
+            decision.confidence = 0.5
+            quality = "needs_review"
 
         # 2026-06-04 quarantine-on-save (Stage E follow-up). The validator
         # runs at first-pass and on retry, but if the LLM still parrots

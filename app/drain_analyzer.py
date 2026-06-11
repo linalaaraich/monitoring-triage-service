@@ -677,9 +677,28 @@ class DrainAnalyzer:
                 )
                 candidates = candidates[:cap]
             for scope, counts in candidates:
-                await self._fire_one(tier, scope, counts)
+                # Fix C (2026-06-11): name the REAL emitting services so the
+                # pipeline can scope the cross-reference to them.
+                if tier == "component":
+                    emitters = [scope]
+                elif tier == "application":
+                    members = batch.app_components.get(scope, set())
+                    emitters = sorted(
+                        members,
+                        key=lambda svc: batch.per_service.get(svc, ScopeCounts()).anomalous,
+                        reverse=True,
+                    )
+                else:  # system
+                    emitters = [
+                        svc for svc, sc in sorted(
+                            batch.per_service.items(),
+                            key=lambda kv: kv[1].anomalous, reverse=True,
+                        ) if sc.anomalous > 0
+                    ]
+                await self._fire_one(tier, scope, counts, services=emitters)
 
-    async def _fire_one(self, tier: str, scope: str, counts: "ScopeCounts") -> None:
+    async def _fire_one(self, tier: str, scope: str, counts: "ScopeCounts",
+                        services: list[str] | None = None) -> None:
         """Fire a single drain3 self-alert for (tier, scope), respecting the
         per-(tier, scope) cooldown."""
         import time as _time
@@ -702,6 +721,7 @@ class DrainAnalyzer:
             "service": scope if tier != "system" else "drain3",
             "tier": tier,
             "scope": scope,
+            "services": (services or [])[:5],
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         try:
