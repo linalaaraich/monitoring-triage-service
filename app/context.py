@@ -113,6 +113,78 @@ def _is_kube_workload_alert(alert) -> bool:
     return name.startswith("Kube") or name in _KUBE_WORKLOAD_ALERTS
 
 
+# Fix F (2026-06-11): deploy-bridge check ------------------------------------
+# Until today the platform had NO deploy data source, so a deploy-as-cause
+# RCA could only ever be fabricated (one shipped; the validator now rejects
+# ungrounded deploy claims). The deploy MCP (:8096) derives rollouts from
+# kube-state-metrics series already in Prometheus. For the two alert classes
+# where "did someone just deploy?" is a live question — kube-workload alerts
+# and Drain3 log-novelty alerts — we make ONE extra MCP call scoped to the
+# alert's namespace+service and render the answer deterministically. Both
+# directions are evidence: a rollout minutes before the alert is a groundable
+# cause candidate; an empty answer RULES deploy-regression OUT.
+_DEPLOY_CHECK_WINDOW = "2h"
+
+
+def _is_deploy_check_alert(alert) -> bool:
+    return _is_kube_workload_alert(alert) or (alert.alertname or "") == "Drain3AnomalyDetected"
+
+
+def _fmt_minutes(minutes: float) -> str:
+    """'14 min' below 2h, '3.2 h' above — keeps the prompt line readable."""
+    if minutes >= 120:
+        return f"{minutes / 60:.1f} h"
+    return f"{minutes:.0f} min"
+
+
+def _summarize_recent_deploys(
+    deploys, service: str, alert_epoch: float | None
+) -> str | None:
+    """Deterministically render the deploy bridge's answer in plain English.
+
+    `deploys` is the /tools/recent_deploys JSON: a list of rollout records
+    (newest RS per deployment inside the window), [] meaning "nothing rolled".
+    Returns None only on an unusable shape — an EMPTY list is a meaningful
+    grounded negative and gets its own sentence.
+    """
+    if not isinstance(deploys, list):
+        return None
+    if not deploys:
+        return (
+            f"No deploys of {service} in the last {_DEPLOY_CHECK_WINDOW} — "
+            "deploy-regression can be RULED OUT as the cause."
+        )
+    lines = []
+    for d in deploys[:3]:
+        if not isinstance(d, dict):
+            continue
+        deployment = d.get("deployment", service)
+        replicaset = d.get("replicaset", "?")
+        rollout_epoch = _parse_alert_time(d.get("rollout_time_iso", ""))
+        age_minutes = d.get("age_minutes")
+        if alert_epoch is not None and rollout_epoch is not None:
+            delta_min = (alert_epoch - rollout_epoch) / 60
+            if delta_min >= 0:
+                when = f"rolled {_fmt_minutes(delta_min)} before this alert"
+            else:
+                when = (
+                    f"rolled {_fmt_minutes(-delta_min)} AFTER this alert fired "
+                    "(cannot have caused it)"
+                )
+        elif isinstance(age_minutes, (int, float)):
+            when = f"rolled {_fmt_minutes(age_minutes)} ago"
+        else:
+            when = "rolled recently"
+        line = f"Recent rollout: deployment {deployment} {when} (replicaset {replicaset}"
+        prior = d.get("prior_replicaset")
+        prior_age = d.get("prior_replicaset_age_minutes")
+        if prior and isinstance(prior_age, (int, float)):
+            line += f", replacing {prior} which had run {_fmt_minutes(prior_age)}"
+        line += ")."
+        lines.append(line)
+    return "\n".join(lines) if lines else None
+
+
 def _summarize_kube_workload_state(data: dict | None, service: str) -> str | None:
     """Deterministically pre-interpret the kube-state context result into
     plain-English facts (2026-06-10 iteration 5).
@@ -429,6 +501,22 @@ class ContextGatherer:
                     ctx.deep_trace = deep
                     ctx.deep_trace_ms = deep_ms
 
+        # Fix F (2026-06-11): ONE extra MCP call to the deploy bridge for
+        # kube-workload + Drain3 alerts — "did someone just deploy this
+        # service?" answered from real kube-state-metrics rollout data,
+        # through the bridge (MCP-only invariant), never Prometheus directly.
+        # Non-fatal: a bridge miss just means no deploy line in the prompt,
+        # and the validator keeps rejecting ungrounded deploy claims.
+        if _is_deploy_check_alert(alert) and alert.service and alert.service != "unknown":
+            try:
+                deploys, deploy_ms = await self._fetch_recent_deploys(alert)
+                ctx.recent_deploys_summary = _summarize_recent_deploys(
+                    deploys, alert.service, alert_epoch
+                )
+                ctx.total_ms += deploy_ms
+            except Exception as exc:
+                logger.warning("Deploy bridge check failed (non-fatal): %s", exc)
+
         ctx.errors = errors
 
         window_desc = (
@@ -507,6 +595,25 @@ class ContextGatherer:
                 # Fallback also empty — return primary (the LLM prompt will
                 # note the miss rather than hallucinate).
         return data, ms
+
+    async def _fetch_recent_deploys(self, alert: GrafanaAlert) -> tuple[list, int]:
+        """Ask the deploy MCP for rollouts of this alert's service (Fix F).
+
+        Scoped to the alert's namespace + service over a fixed 2h lookback.
+        Returns the bridge's JSON list (possibly empty — a meaningful
+        grounded negative) plus elapsed ms. Raises on bridge failure; the
+        caller treats that as non-fatal.
+        """
+        params = {
+            "namespace": alert.labels.get("namespace", ""),
+            "service": alert.service,
+            "window": _DEPLOY_CHECK_WINDOW,
+        }
+        return await self._mcp_call(
+            server="deploy",
+            url=f"{settings.deploy_mcp_url}/tools/recent_deploys",
+            params=params,
+        )
 
     async def _fetch_loki(
         self, alert: GrafanaAlert, abs_window: tuple[float, float] | None

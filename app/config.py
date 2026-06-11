@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     jaeger_mcp_url: str = "http://jaeger-mcp:8093"
     drain3_mcp_url: str = "http://drain3-mcp:8094"
     rca_history_mcp_url: str = "http://rca-history-mcp:8095"
+    # Fix F (2026-06-11): deploy/rollout bridge — derives rollouts from
+    # kube-state-metrics series already in Prometheus, so "a recent deploy
+    # caused this" becomes a groundable claim (and "no deploys" a grounded
+    # negative). MCP-only invariant: triage talks to the bridge, never to
+    # Prometheus directly.
+    deploy_mcp_url: str = "http://deploy-mcp:8096"
 
     # Loki direct (for Drain3 background ingestion)
     loki_api_url: str = "http://loki:3100"

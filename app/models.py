@@ -197,6 +197,13 @@ class GatheredContext(BaseModel):
     # PodCrashLooping alerts — the 14b doesn't infer "available=0 == down"
     # from raw series (decisions 13b15c81/1b177fa4), so code does.
     kube_workload_summary: Optional[str] = None
+    # Fix F (2026-06-11): deterministic plain-English summary of the deploy
+    # bridge's /tools/recent_deploys answer for kube-workload + Drain3
+    # alerts. Either names a real rollout ("deployment ad rolled 14 min
+    # before this alert…") or explicitly rules deploys out ("No deploys of
+    # ad in the last 2h — deploy-regression can be RULED OUT."). None when
+    # the alert class doesn't qualify or the bridge call failed (non-fatal).
+    recent_deploys_summary: Optional[str] = None
 
 
 # --- RCA history record ---

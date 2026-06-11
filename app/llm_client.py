@@ -1080,6 +1080,24 @@ class LLMClient:
         else:
             kube_workload_block = ""
 
+        # Fix F (2026-06-11): deploy-bridge line. Deterministic, built in
+        # app/context.py from the deploy MCP's /tools/recent_deploys answer.
+        # Either grounds a deploy claim ("deployment ad rolled 14 min before
+        # this alert…") — citable evidence that satisfies the validator's
+        # ungrounded-deploy-claim scan — or explicitly rules deploys out.
+        # The system is now honest in BOTH directions.
+        if context.recent_deploys_summary:
+            recent_deploys_block = (
+                "### Recent deploys (checked via deploy bridge)\n"
+                f"{context.recent_deploys_summary}\n"
+                "If this names a rollout shortly before the alert, treat it as a "
+                "PRIME cause candidate and cite the replicaset in your evidence. "
+                "If it rules deploys out, do NOT attribute the incident to a "
+                "deploy/rollout/release.\n\n"
+            )
+        else:
+            recent_deploys_block = ""
+
         user_content = f"""## Alert Details
 - **Name:** {alert.alertname}
 - **Severity:** {alert.severity}
@@ -1106,7 +1124,7 @@ The observed value above is ground-truth signal from Prometheus at the moment th
 {exemplar_block}
 ## Pre-Gathered Context
 
-{kube_workload_block}### Metrics (Prometheus, last {settings.prometheus_range_minutes}min)
+{kube_workload_block}{recent_deploys_block}### Metrics (Prometheus, last {settings.prometheus_range_minutes}min)
 {_cap_json(context.metrics) if context.metrics else "[Prometheus] returned no series for service=" + alert.service + " — rare-but-possible, treat as MCP miss not app silence. The alert value above is still authoritative."}
 {anomaly_block}
 ### Logs ({"⚠ AMBIENT FALLBACK — NOT ALERT-SPECIFIC" if context.loki_is_fallback else "Loki, service-scoped, Drain3-annotated"}, last {settings.loki_log_limit} lines)
