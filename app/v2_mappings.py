@@ -198,7 +198,7 @@ _DEMO_SERVICES = {
     "frontend-proxy", "image-provider", "payment", "product-catalog",
     "product-reviews", "quote", "recommendation", "shipping", "flagd",
     "kafka", "valkey-cart", "accounting", "fraud-detection",
-    "load-generator", "llm", "postgresql",
+    "load-generator", "llm", "postgresql", "flagd-ui", "valkey", "currencyservice",
 }
 
 

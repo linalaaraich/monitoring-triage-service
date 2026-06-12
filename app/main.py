@@ -2336,6 +2336,20 @@ _DASH_UID_TRACING = "tracing-overview"
 _DASH_UID_OTEL    = "otel-collector-health"
 
 
+def _infer_evidence_source(text: str) -> str:
+    """2026-06-12: classify an evidence line by which pillar it came from so
+    the detail page labels it correctly (was: everything → "Prometheus").
+    Returns 'loki' | 'jaeger' | 'prom' (default)."""
+    t = (text or "").lower()
+    if any(k in t for k in ("loki", "log line", "log template", "returned 0 lines",
+                            "annotated log", " logs ", "drain3", "novel template")):
+        return "loki"
+    if any(k in t for k in ("jaeger", "trace", "span", "traceid", "trace_id",
+                            "db.statement", "operation", "0 traces")):
+        return "jaeger"
+    return "prom"
+
+
 def _safe_http_url(url) -> str:
     """FE-H2 (2026-06-04) — defense-in-depth href-scheme allowlist.
 
@@ -2620,8 +2634,15 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
             ev_link = _safe_http_url(_grafana_deep_link_for_alert(alert_name, svc))
             for e in parsed[:5]:
                 if isinstance(e, str):
-                    evidence.append({"source": "prom", "text": e, "link": ev_link})
+                    # 2026-06-12: infer the source from the text instead of
+                    # labelling EVERY item "Prometheus" — a cross-source RCA
+                    # was rendering its Loki log lines + Jaeger traces all
+                    # under a Prometheus tag, hiding the very cross-signal
+                    # story the platform is built on.
+                    evidence.append({"source": _infer_evidence_source(e), "text": e, "link": ev_link})
                 elif isinstance(e, dict):
+                    if not (e.get("source") or "").strip():
+                        e = {**e, "source": _infer_evidence_source(str(e.get("text", "")))}
                     # Existing dicts may carry their own link or none. If
                     # the link is empty / placeholder ("Grafana" / "#"),
                     # overwrite with the contextual URL so the row is
@@ -2719,9 +2740,20 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
     reasoning_steps = []
     llm_reasoning_text = r.get("llm_reasoning") or ""
     if llm_reasoning_text:
-        # Split on newlines or numbered-list markers (1. 2. etc)
+        # 2026-06-12: the investigation-log format is "1. checked X -> Y; 2.
+        # checked Z -> W; 3. ..." — usually ONE line, semicolon-joined, with
+        # numbered markers and NO newlines. The old split (newline / ". Cap")
+        # found no delimiter and collapsed the whole chain to a single "1
+        # steps" item. Split primarily on the numbered markers so each step
+        # shows separately (Lina wants the 1->2->3 thought process visible).
         import re as _re_steps
-        candidates = _re_steps.split(r"\n\s*|\.\s+(?=[A-Z])", llm_reasoning_text)
+        # Break right before "N." markers (1./2./3. ...), also tolerating a
+        # leading marker and "; " / newline joins.
+        parts = _re_steps.split(r"(?:^|[;\n]\s*)\s*\d+\.\s+", llm_reasoning_text)
+        candidates = [p for p in parts if p and p.strip()]
+        if len(candidates) <= 1:
+            # No numbered markers — fall back to sentence/newline split.
+            candidates = _re_steps.split(r"\n\s*|;\s+|\.\s+(?=[A-Z])", llm_reasoning_text)
         for c in candidates:
             c = c.strip().lstrip("0123456789.) ").strip()
             if c and len(c) > 4:
