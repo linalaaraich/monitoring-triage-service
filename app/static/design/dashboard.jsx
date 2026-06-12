@@ -209,7 +209,14 @@ function AlertRow({ a, expanded, onToggle, onCopy }) {
           </span>
         </td>
         <td><CompPill c={a.component}/></td>
-        <td style={{ color: "var(--text)", fontSize: 13.5, fontWeight: 500, maxWidth: 320 }}>{a.alertPlain}</td>
+        <td style={{ color: "var(--text)", fontSize: 13.5, fontWeight: 500, maxWidth: 320 }}>
+          {a.alertPlain}
+          {(a.consolidated || []).length > 0 && <span title="Co-fired alerts consolidated into this incident — expand for the list" style={{
+            marginLeft: 8, fontSize: 10.5, fontWeight: 600, color: "var(--accent-yellow)",
+            padding: "1px 7px", borderRadius: 10, background: "rgba(232,220,160,.10)",
+            border: "1px solid rgba(232,220,160,.35)", whiteSpace: "nowrap",
+          }}>+{a.consolidated.length} co-fire{a.consolidated.length > 1 ? "s" : ""}</span>}
+        </td>
         <td><VerdictPill v={a.verdict}/></td>
         <td><SeverityPill s={a.severity}/></td>
         <td style={{ width: 110 }}>
@@ -267,6 +274,25 @@ function ExpandedDetail({ a }) {
             <div style={{ fontSize: 13, color: "var(--muted)" }}>No safe action — see detail page.</div>
           )}
         </div>
+
+        {(a.consolidated || []).length > 0 && <div style={{ marginTop: 16 }}>
+          <div className="section-label">Same incident — consolidated co-fires</div>
+          {/* 2026-06-12 (Lina): one root cause fires several alert types for
+              the same workload; siblings fold into this row instead of
+              cluttering the feed. Each stays a real, clickable decision. */}
+          {a.consolidated.map(c => (
+            <a key={c.uuid || c.id} href={`/dashboard/alert/${c.id}`} style={{
+              display: "flex", alignItems: "center", gap: 10, padding: "6px 10px",
+              marginTop: 6, borderRadius: 8, border: "1px solid var(--border)",
+              background: "var(--bg-soft)", textDecoration: "none",
+            }}>
+              <span className="mono" style={{ fontSize: 11, color: "var(--muted)", fontFeatureSettings: '"tnum"' }}>{c.timeShort || "—"}</span>
+              <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 500, flex: 1 }}>{c.alertPlain || c.alertName}</span>
+              <VerdictPill v={c.verdict}/>
+              <span style={{ color: "var(--accent-cyan)", fontSize: 11.5 }}>view →</span>
+            </a>
+          ))}
+        </div>}
 
         <div style={{ marginTop: 16, display: "flex", flexWrap: "wrap", gap: 6 }}>
           {(a.tags || []).slice(0, 3).map(t => (

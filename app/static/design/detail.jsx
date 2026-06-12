@@ -603,6 +603,17 @@ function DetailPage({ a, openReasoning = false, openRaw = false }) {
         <DetailHeader a={a}/>
         <div style={{ padding: "24px 28px 40px", display: "grid", gridTemplateColumns: "1fr 320px", gap: 28, maxWidth: 1480, margin: "0 auto", width: "100%" }}>
           <main>
+            {/* 2026-06-12 co-fire consolidation: this escalation was folded
+                into a family sibling's notification — say so up front, with
+                a link to the primary that actually paged. */}
+            {a.consolidatedInto && <div style={{
+              display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
+              marginBottom: 18, borderRadius: 10, border: "1px solid rgba(232,220,160,.35)",
+              background: "rgba(232,220,160,.08)", fontSize: 13, color: "var(--text-soft)",
+            }}>
+              <span>Co-fired with a sibling alert for the same incident — the notification was consolidated; no separate email was sent for this row.</span>
+              <a href={`/dashboard/alert/${String(a.consolidatedInto).slice(0, 8)}`} style={{ color: "var(--accent-cyan)", whiteSpace: "nowrap", textDecoration: "none" }}>view the alert that paged →</a>
+            </div>}
             <CauseSection a={a}/>
             <ActionSection a={a}/>
             <HistorySection a={a}/>

@@ -97,6 +97,15 @@ class Settings(BaseSettings):
     critical_flap_window_minutes: int = 360
     critical_flap_sample_every: int = 4
 
+    # 2026-06-12 co-fire consolidation (Lina): one root cause fires several
+    # alert TYPES for the same workload (Down + ReplicasDeficit + CrashLooping)
+    # → one notification naming all contributors instead of 2-3 emails for
+    # one fact. Families in app/correlation.py; grouping requires same
+    # service + this window. Every alert is still fully investigated and
+    # visible — only the notification and feed grouping consolidate.
+    cofire_consolidation_enabled: bool = True
+    cofire_window_minutes: int = 10
+
     # DA-3 — cross-row verdict coherence. When a NON-duplicate fire happens
     # for a fingerprint that had a prior decision within this window, the
     # pipeline fetches that prior decision's cause + RCA and injects it into

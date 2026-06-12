@@ -2752,6 +2752,11 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
         # in the same tone as recurrence-gated so the operator sees WHY the
         # row has no verdict/confidence instead of a bare PENDING.
         tags.append("recurrence-suppressed")
+    if action_taken == "consolidated":
+        # 2026-06-12 co-fire consolidation: this escalation was folded into a
+        # family sibling's notification — the row keeps its full verdict, the
+        # tag explains why no email count shows for it.
+        tags.append("consolidated")
     if not tags:
         tags = ["—"]
 
@@ -2870,6 +2875,12 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
         # without null guards in places)
         "reasoning": reasoning_steps,
         "related": [],  # populated by the detail route, not the dashboard route
+        # 2026-06-12 co-fire consolidation — full uuid of the primary decision
+        # this row's notification was folded into (None for normal rows), and
+        # the list of sibling rows folded into THIS row (populated by the
+        # dashboard route's grouping pass, empty everywhere else).
+        "consolidatedInto": r.get("consolidated_into") or None,
+        "consolidated": [],
         # Per-row Grafana/Loki/Jaeger deep-links so the dashboard expanded-row
         # quick-action anchors (D2) point somewhere real — the same routing the
         # detail route's CIRES_LINKS uses, computed per alert shape.
@@ -3193,6 +3204,32 @@ async def dashboard_v2(
             now_utc=now_utc,
             incident_fire_counts=incident_fire_counts,
         ))
+
+    # 2026-06-12 co-fire grouping (Lina): a consolidated sibling renders
+    # INSIDE its primary's row (one expandable incident row, not N), when the
+    # primary is on the same page — they fire seconds apart so they almost
+    # always are. If the primary fell outside the page/slab, the sibling
+    # stays a standalone row wearing its "consolidated" tag (honest
+    # fallback; its detail page still links the incident). Nothing is
+    # dropped — every contributor stays reachable.
+    by_uuid = {a["uuid"]: a for a in alerts if a.get("uuid")}
+    grouped_away = set()
+    for a in alerts:
+        target = a.get("consolidatedInto")
+        if not target:
+            continue
+        primary = by_uuid.get(target)
+        if primary is None or primary is a:
+            continue
+        primary["consolidated"].append({
+            "id": a["id"], "uuid": a["uuid"],
+            "alertName": a["alertName"], "alertPlain": a["alertPlain"],
+            "timeShort": a["timeShort"], "verdict": a["verdict"],
+            "severity": a["severity"], "component": a["component"],
+        })
+        grouped_away.add(a["uuid"])
+    if grouped_away:
+        alerts = [a for a in alerts if a["uuid"] not in grouped_away]
     alerts_json = _safe_script_json(alerts)
 
     # ─── TopBar + sidebar stats (computed from the same slab; no new DB hits) ───

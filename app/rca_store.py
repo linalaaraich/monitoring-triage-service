@@ -270,6 +270,10 @@ class RCAStore:
             # rows only, old rows stay NULL.
             ("exemplar_id",         "TEXT"),
             ("exemplar_score",      "REAL"),
+            # 2026-06-12 co-fire consolidation — primary decision id when this
+            # row's notification was consolidated into a family sibling's page
+            # (action_taken="consolidated"). Nullable; new rows only.
+            ("consolidated_into",   "TEXT"),
         ]
         for name, sql_type in new_columns:
             if name not in cols:
@@ -351,9 +355,9 @@ class RCAStore:
                 alert_instance, alert_component, alert_signal, observed_value,
                 promql_expr, suggested_actions, evidence, diagnostic_steps,
                 anomaly_summary, correlated_alerts, env, excluded_from_lookup,
-                exemplar_id, exemplar_score)
+                exemplar_id, exemplar_score, consolidated_into)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.id,
                 record.timestamp.isoformat(),
@@ -385,6 +389,7 @@ class RCAStore:
                 int(getattr(record, "excluded_from_lookup", 0) or 0),
                 getattr(record, "exemplar_id", None),
                 getattr(record, "exemplar_score", None),
+                getattr(record, "consolidated_into", None),
             ),
         )
         # S5-INC-01 write-time maintenance: keep the incidents table live as
@@ -1046,6 +1051,34 @@ class RCAStore:
         )
         row = await cursor.fetchone()
         return int(row["n"]) if row else 0
+
+    async def get_recent_emailed_for_alertnames(
+        self,
+        alertnames: list[str] | tuple[str, ...],
+        affected_service: str | None,
+        window_seconds: int,
+    ) -> dict | None:
+        """Most recent EMAILED escalation among `alertnames` for a service
+        within the window. DB fallback for co-fire consolidation: the
+        in-process CofireRegistry forgets primaries on restart, and without
+        this a sibling arriving just after a restart would re-page the same
+        incident."""
+        if not alertnames or not affected_service:
+            return None
+        since = (_utc_now() - timedelta(seconds=window_seconds)).isoformat()
+        placeholders = ",".join("?" for _ in alertnames)
+        cursor = await self._db.execute(
+            f"""SELECT id, timestamp, alert_name, affected_service
+               FROM rca_history
+               WHERE alert_name IN ({placeholders})
+                 AND affected_service = ?
+                 AND action_taken = 'emailed'
+                 AND timestamp > ?
+               ORDER BY timestamp DESC LIMIT 1""",
+            (*alertnames, affected_service, since),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
     async def get_recent_decision_for_family_scope(
         self,

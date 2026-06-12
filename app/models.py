@@ -282,6 +282,12 @@ class RCARecord(BaseModel):
     # archetype it used. Nullable; old rows stay NULL (no backfill).
     exemplar_id: Optional[str] = None
     exemplar_score: Optional[float] = None
+    # 2026-06-12 co-fire consolidation — when a family sibling already paged
+    # for this (family, service) window, this row's escalation is consolidated
+    # into that primary decision: action_taken="consolidated" and this field
+    # holds the primary's decision id. The row keeps its own full verdict —
+    # only the duplicate notification is suppressed.
+    consolidated_into: Optional[str] = None
 
 
 # --- Health ---

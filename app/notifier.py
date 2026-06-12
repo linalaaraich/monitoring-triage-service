@@ -405,6 +405,7 @@ class EmailNotifier:
         history_count: int = 0,
         ctx: GatheredContext | None = None,
         correlated: list[dict] | None = None,
+        cofire: list[dict] | None = None,
     ):
         # SF-6 (2026-05-23) — v2 email shape, per the supervisor-approved
         # Claude Design output. Brief subject + 4-button body. Operator-
@@ -412,7 +413,8 @@ class EmailNotifier:
         # metrics, brief not verbose, one ACTION not a list.
         subject = self._v2_subject(alert, decision, record)
         body = self._build_v2_escalation_body(
-            alert, decision, record, history_count, ctx, correlated or []
+            alert, decision, record, history_count, ctx, correlated or [],
+            cofire or [],
         )
         await self._send(subject, body)
 
@@ -700,6 +702,7 @@ class EmailNotifier:
         history_count: int,
         ctx: GatheredContext | None,
         correlated: list[dict],
+        cofire: list[dict] | None = None,
     ) -> str:
         """Brief operator-readable HTML email (per design's email.jsx).
 
@@ -800,6 +803,34 @@ class EmailNotifier:
                 '</td></tr></table>'
             )
 
+        # Co-fire consolidation block (2026-06-12) — when family siblings
+        # fired for the same workload in this window, this ONE email covers
+        # them all: name every contributor so nothing is hidden, and tell
+        # the operator no separate email is coming for the siblings.
+        cofire_block_html = ""
+        if cofire:
+            from app.v2_mappings import ALERT_NAME_PLAIN
+            sib_items = "".join(
+                f'<li style="margin:3px 0;color:#0b1b3a;line-height:1.5">'
+                f'<strong>{_html.escape(ALERT_NAME_PLAIN.get(c.get("alertname", ""), c.get("alertname", "")))}</strong>'
+                f' <span style="color:#5b6b8b;font-family:JetBrains Mono,monospace;font-size:11px">({_html.escape(c.get("alertname", ""))})</span></li>'
+                for c in cofire
+            )
+            cofire_block_html = (
+                '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+                'width="100%" style="background:#fdf8ec;border:1px solid #eadfbb;'
+                'border-radius:10px;margin-bottom:10px"><tr><td style="padding:12px 14px">'
+                '<div style="font-size:10.5px;font-weight:600;color:#8a6d1a;'
+                'text-transform:uppercase;letter-spacing:.1px;margin-bottom:6px">'
+                'Same incident — co-fired alerts</div>'
+                f'<div style="font-size:13px;line-height:1.5;color:#0b1b3a;margin-bottom:4px">'
+                f'These alerts fired together for <strong>{_html.escape(alert.service or "this workload")}</strong> '
+                f'and describe the same issue. They are consolidated into this notification '
+                f'— no separate email will follow.</div>'
+                f'<ul style="margin:4px 0 0;padding-left:20px">{sib_items}</ul>'
+                '</td></tr></table>'
+            )
+
         # First suggested action only — design shows one inline + says "more on detail page".
         action_cmd = "—"
         if decision.suggested_actions:
@@ -869,6 +900,8 @@ class EmailNotifier:
         <div style="font-size:10.5px;font-weight:600;color:#5b6b8b;text-transform:uppercase;letter-spacing:.1px;margin-bottom:6px">Why</div>
         <div style="font-size:14px;line-height:1.5;color:#0b1b3a">{reason_short}</div>
       </td></tr></table>
+
+      {cofire_block_html}
 
       <!-- Suggested action block -->
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f7f9ff;border:1px solid #dfe3ee;border-radius:10px;margin-bottom:18px"><tr><td style="padding:12px 14px">

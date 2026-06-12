@@ -402,6 +402,18 @@ class TriagePipeline:
             env = self._resolve_env(alert)
         pipeline_start = time.monotonic()
 
+        # Co-fire tracking (2026-06-12): register family alerts on arrival so
+        # a sibling's escalation email can NAME this one as a co-fire while
+        # it's still mid-investigation. Untracked in the finally below.
+        from app.correlation import registry as _cofire_registry
+        _cofire_registry.track_arrival(alert.alertname, alert.service, alert.fingerprint)
+        try:
+            await self._process_alert_inner(alert, source, env, pipeline_start)
+        finally:
+            _cofire_registry.untrack(alert.alertname, alert.service, alert.fingerprint)
+
+    async def _process_alert_inner(self, alert: GrafanaAlert, source: str,
+                                   env: str, pipeline_start: float):
         # Step 1: Deduplication (P1.6 — fingerprint-window).
         # On second+ fire of the same fingerprint within the window, persist
         # a short-path `suppressed_duplicate` record linking to the prior
@@ -654,6 +666,79 @@ class TriagePipeline:
             f"({suppressed_since + 1}/{budget} before the next sampled "
             f"re-investigation)."
         )
+
+    async def _cofire_claim_or_consolidate(
+        self, alert: GrafanaAlert, record
+    ) -> dict | None:
+        """Co-fire consolidation decision for an ESCALATE verdict.
+
+        Returns the primary {decision_id, alertname} this escalation must
+        consolidate into, or None if this alert is (now) the primary and
+        should send the email. Atomic under the registry lock so two family
+        siblings finishing simultaneously can't both page.
+
+        The in-memory registry is the fast path; a DB fallback covers a
+        process restart (registry wiped) so a sibling arriving just after a
+        redeploy doesn't re-page an already-paged incident. Both paths are
+        bounded by cofire_window_minutes.
+        """
+        from app.correlation import cofire_family, family_members, registry
+        if not settings.cofire_consolidation_enabled:
+            return None
+        fam = cofire_family(alert.alertname)
+        if not fam or not alert.service:
+            return None
+        window = settings.cofire_window_minutes * 60
+        async with registry.lock:
+            existing = registry.claim_primary(
+                alert.alertname, alert.service, record.id, window
+            )
+            if existing is not None:
+                return {
+                    "decision_id": existing.decision_id,
+                    "alertname": existing.alertname,
+                }
+            siblings = [a for a in family_members(fam) if a != alert.alertname]
+            try:
+                row = await self.store.get_recent_emailed_for_alertnames(
+                    siblings, alert.service, window
+                )
+            except Exception as exc:
+                logger.warning("co-fire DB fallback failed (non-fatal): %s", exc)
+                row = None
+            if row:
+                registry.release_primary(alert.alertname, alert.service, record.id)
+                return {"decision_id": row["id"], "alertname": row["alert_name"]}
+            return None
+
+    def _cofire_contributors(
+        self, alert: GrafanaAlert, correlated: list[dict] | None
+    ) -> list[dict]:
+        """Family siblings to NAME in this primary's escalation email:
+        ones currently mid-investigation (in-flight registry) plus ones
+        already persisted in the ±5m correlation window. Same service only —
+        a different service is a different problem and pages on its own."""
+        from app.correlation import cofire_family, family_members, registry
+        if not settings.cofire_consolidation_enabled:
+            return []
+        fam = cofire_family(alert.alertname)
+        if not fam or not alert.service:
+            return []
+        out = registry.siblings_in_flight(
+            alert.alertname, alert.service, alert.fingerprint
+        )
+        seen = {c["alertname"] for c in out}
+        members = set(family_members(fam)) - {alert.alertname}
+        for c in correlated or []:
+            name = c.get("alert_name")
+            if (
+                name in members
+                and name not in seen
+                and c.get("affected_service") == alert.service
+            ):
+                out.append({"alertname": name, "fingerprint": ""})
+                seen.add(name)
+        return out
 
     async def _investigate_and_act(
         self, alert: GrafanaAlert, source: str, pipeline_start: float,
@@ -1719,20 +1804,43 @@ class TriagePipeline:
         # cleaner but persisting before emailing breaks ordering guarantees
         # elsewhere; wrap-and-log is the safer change.
         if decision.decision == Decision.ESCALATE and not is_shelved_in_disguise:
-            try:
-                await self.notifier.send_escalation(
-                    alert, decision, record, history["count"], ctx=ctx,
-                    correlated=correlated,
-                )
-                emails_sent.labels(type="escalation").inc()
+            # Co-fire consolidation (2026-06-12): if a family sibling already
+            # paged for this (family, service) window, fold this escalation
+            # into that incident instead of sending a second email for the
+            # same root cause. The row keeps its full verdict — nothing is
+            # hidden, only the duplicate notification.
+            primary = await self._cofire_claim_or_consolidate(alert, record)
+            if primary is not None:
+                record.action_taken = "consolidated"
+                record.consolidated_into = primary["decision_id"]
                 alerts_processed.labels(decision="escalate").inc()
-            except Exception as notify_exc:
-                logger.error(
-                    "Escalation email failed for %s (%s) — decision still recorded",
-                    alert.alertname, notify_exc, exc_info=True,
+                logger.info(
+                    "Alert %s (%s) ESCALATE consolidated into co-fire primary "
+                    "%s (%s) — no separate email",
+                    alert.alertname, alert.service,
+                    primary["decision_id"][:8], primary["alertname"],
                 )
-                emails_sent.labels(type="escalation_failed").inc()
-                alerts_processed.labels(decision="escalate").inc()
+            else:
+                cofire = self._cofire_contributors(alert, correlated)
+                try:
+                    await self.notifier.send_escalation(
+                        alert, decision, record, history["count"], ctx=ctx,
+                        correlated=correlated, cofire=cofire,
+                    )
+                    emails_sent.labels(type="escalation").inc()
+                    alerts_processed.labels(decision="escalate").inc()
+                except Exception as notify_exc:
+                    logger.error(
+                        "Escalation email failed for %s (%s) — decision still recorded",
+                        alert.alertname, notify_exc, exc_info=True,
+                    )
+                    # Release the primary claim so a co-fired sibling can
+                    # still page — otherwise it would consolidate into a
+                    # notification nobody received.
+                    from app.correlation import registry as _reg
+                    _reg.release_primary(alert.alertname, alert.service, record.id)
+                    emails_sent.labels(type="escalation_failed").inc()
+                    alerts_processed.labels(decision="escalate").inc()
         elif is_shelved_in_disguise:
             alerts_processed.labels(decision="shelved").inc()
             logger.info(
