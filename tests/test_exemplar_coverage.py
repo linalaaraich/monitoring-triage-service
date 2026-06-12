@@ -71,10 +71,19 @@ _TITLE_RE = re.compile(r"^\s*title:\s*(\S+)\s*$")
 
 
 def _live_rule_titles() -> list[str] | None:
-    if not _ALERTRULES.exists():
+    # The live alertrules template lives in a SIBLING repo (monitoring-project)
+    # that isn't checked out in CI (which only has the triage repo) — and may
+    # be present-but-unreadable. Any access problem → fall back to the snapshot
+    # below, so the coverage test runs everywhere; it reads the live file only
+    # when it's actually available (local dev).
+    try:
+        if not _ALERTRULES.exists():
+            return None
+        text = _ALERTRULES.read_text()
+    except (OSError, PermissionError):
         return None
     titles = []
-    for line in _ALERTRULES.read_text().splitlines():
+    for line in text.splitlines():
         m = _TITLE_RE.match(line)
         if m:
             titles.append(m.group(1))
