@@ -135,6 +135,25 @@ def test_gate_skips_when_traces_too_short():
     assert g._should_fetch_deep_trace(_make_alert("HighP95Latency"), traces) is False
 
 
+def test_gate_fires_for_realistic_otel_demo_slow_trace():
+    """2026-06-12 regression: the otel-demo bed's real slow-but-successful
+    traces under an induced downstream fault sit ~200ms-1s. The old 500ms
+    floor declined to drill them; the gate must now engage at the bed's
+    actual slow-trace magnitude (live induction saw a 282ms downstream
+    recommendation span inside a 1003ms frontend trace)."""
+    g = ContextGatherer()
+    assert g._should_fetch_deep_trace(
+        _make_alert("HighDemoFrontendP95Latency"), [{"trace_id": "t", "duration_ms": 282}]
+    ) is True
+
+
+def test_gate_boundary_at_min_ms():
+    g = ContextGatherer()
+    floor = g._DEEP_TRACE_MIN_MS
+    assert g._should_fetch_deep_trace(_make_alert("HighP95Latency"), [{"trace_id": "t", "duration_ms": floor}]) is True
+    assert g._should_fetch_deep_trace(_make_alert("HighP95Latency"), [{"trace_id": "t", "duration_ms": floor - 1}]) is False
+
+
 def test_pick_slowest_returns_max_duration_trace_id():
     g = ContextGatherer()
     traces = [

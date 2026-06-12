@@ -803,13 +803,28 @@ class ContextGatherer:
 
     _LATENCY_ALERTNAME_PATTERN = _re.compile(r"^.*P95Latency$|^.*ErrorRate$", _re.IGNORECASE)
 
+    # 2026-06-12: lowered 500 -> 200ms. The 500ms floor was tuned against the
+    # spring-boot/kong path (single-service, multi-second OOM-driven traces).
+    # On the otel-demo microservice bed the REAL slow-but-successful traces
+    # under an induced downstream fault (recommendationCacheFailure) sit
+    # intermittently at ~200ms-1s — and the 10-trace find_traces SAMPLE often
+    # catches only the sub-500ms ones in any given evaluation, so the gate
+    # kept declining to drill even while a 1s trace existed seconds earlier
+    # (live: HighDemoFrontendP95Latency fired with p95=9.9s but the sampled
+    # slowest was 144ms, gate=False, no span breakdown). For an alert that is
+    # ALREADY latency-flavoured and firing, a 200ms trace is well worth the
+    # ONE extra non-fatal MCP roundtrip to surface the downstream span. Floor,
+    # not zero, so a genuinely all-fast sample (healthy blip / false positive)
+    # still skips the drill.
+    _DEEP_TRACE_MIN_MS = 200
+
     def _should_fetch_deep_trace(self, alert: GrafanaAlert, traces: list[dict]) -> bool:
         """Decide whether the deep-trace MCP call is worth firing.
 
         Three gates: (a) the alertname matches the latency / error-rate
         pattern; (b) we have at least one trace from find_traces; (c) the
-        slowest trace's duration is meaningful (>= 500ms — short traces
-        rarely warrant a span breakdown).
+        slowest trace's duration is meaningful (>= _DEEP_TRACE_MIN_MS — very
+        short traces rarely warrant a span breakdown).
         """
         if not traces:
             return False
@@ -822,7 +837,7 @@ class ContextGatherer:
         )
         if slowest is None:
             return False
-        return (slowest.get("duration_ms", 0) or 0) >= 500
+        return (slowest.get("duration_ms", 0) or 0) >= self._DEEP_TRACE_MIN_MS
 
     def _pick_slowest_trace_id(self, traces: list[dict]) -> str | None:
         candidates = [t for t in traces if isinstance(t, dict) and t.get("trace_id")]
