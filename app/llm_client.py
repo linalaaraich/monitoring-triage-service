@@ -257,11 +257,13 @@ EXPECTED OUTPUT:
 
 A curated library of best-practice RCA scenarios is maintained at
 `docs/happy-path-scenarios.md` in the triage-service repo (with structured
-versions in `app/exemplars/library.yaml`). Eleven archetypes are covered:
-OOM-loop, upstream-latency attribution, synthetic-blip dismiss, cascade
-incidents, Drain3 novelty post-deploy, bounded-agency retry, adaptive-threshold
-no-op, closed-loop feedback, CrashLoopBackOff from bad config, network/firewall
-attribution, and pre-failure TLS expiry.
+versions in `app/exemplars/library.yaml`). The archetypes cover:
+OOM-loop, upstream-latency attribution, service-self p95 saturation,
+demo-frontend downstream-latency, brief TargetDown scrape-miss dismiss,
+cascade incidents, Drain3 log novelty, bounded-agency retry, Kubernetes
+workload replica deficit, closed-loop feedback, CrashLoopBackOff from bad
+config, OOM crash-loop restart, network/firewall attribution, and pre-failure
+TLS expiry.
 
 For every alert, the prompt builder pre-selects the exemplar that best matches
 on alertname + service + deployment_type + signal, and injects it into the
@@ -663,6 +665,12 @@ class LLMClient:
             metric_facts, prior_decision=prior_decision,
             corrective_feedback=corrective_feedback,
         )
+        # Finding #3 — capture the exemplar the prompt builder just selected
+        # (set synchronously inside _build_prompt, no await between) so we can
+        # stamp it onto the returned decision regardless of which return path
+        # we take below.
+        _ex_id = getattr(self, "_last_exemplar_id", None)
+        _ex_score = getattr(self, "_last_exemplar_score", None)
         if tool_result_block:
             if tool_result_block.startswith("## Crash-loop evidence"):
                 # Iteration 3b (2026-06-10): PROMOTE pre-interpreted facts to
@@ -697,9 +705,16 @@ class LLMClient:
         raw_response = await self._call_ollama_with_resilience(messages)
         duration_ms = int((time.monotonic() - start) * 1000)
 
+        def _stamp(dec):
+            # Finding #3 — record which exemplar the prompt builder used.
+            if dec is not None:
+                dec.exemplar_id = _ex_id
+                dec.exemplar_score = _ex_score
+            return dec
+
         if raw_response is None:
             # Circuit open or retries exhausted -- fallback already counted
-            return _build_fallback_decision(), duration_ms
+            return _stamp(_build_fallback_decision()), duration_ms
 
         logger.info("LLM response received in %dms", duration_ms)
         logger.debug("Raw LLM response: %s", raw_response)
@@ -743,7 +758,7 @@ class LLMClient:
             # Second parse failure -> fallback
             logger.error("LLM JSON parse failed after retry -- falling back to NEEDS_HUMAN_REVIEW")
             triage_fallback_total.labels(reason="parse_failure").inc()
-            return _build_fallback_decision(), duration_ms
+            return _stamp(_build_fallback_decision()), duration_ms
 
         # --- AI-02: INCONCLUSIVE handling ---
         if decision.decision == Decision.INCONCLUSIVE:
@@ -763,7 +778,7 @@ class LLMClient:
         if _SEV_RANK.get(decision.severity, 1) < _SEV_RANK.get(alert.severity, 1):
             decision.severity = alert.severity
 
-        return decision, duration_ms
+        return _stamp(decision), duration_ms
 
     async def request_tool_or_decide(
         self,
@@ -946,13 +961,19 @@ class LLMClient:
         # app/exemplars/library.yaml and render it as a structural reference.
         # See app/exemplars/__init__.py for matching logic and decisions-log.html#D17
         # for why this lives in its own library (not in rca_history.db).
-        exemplar = exemplars_lib.find_for_alert(
+        exemplar, exemplar_score = exemplars_lib.find_for_alert_scored(
             alertname=alert.alertname,
             service=alert.service,
             deployment_type=deployment_type,
             signal=signal,
             severity=alert.severity,
         )
+        # Finding #3 (2026-06-12): stash the selection so investigate() /
+        # request_tool_or_decide() can persist (exemplar_id, exemplar_score)
+        # onto the decision. Read back synchronously right after _build_prompt
+        # returns (before any await), so there is no cross-alert race.
+        self._last_exemplar_id = exemplar.get("id") if exemplar else None
+        self._last_exemplar_score = exemplar_score
         exemplar_block = ""
         if exemplar:
             rendered = exemplars_lib.format_for_prompt(exemplar)

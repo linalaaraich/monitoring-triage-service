@@ -133,9 +133,9 @@ def test_format_for_prompt_includes_required_sections():
 
 
 def test_format_for_prompt_handles_dismiss_with_empty_actions():
-    """DISMISS archetypes (synthetic-blip, adaptive-threshold) have empty
-    actions_shape. The renderer should produce a section explaining this,
-    not silently drop it."""
+    """DISMISS archetypes (e.g. synthetic-blip) have empty actions_shape.
+    The renderer should produce a section explaining this, not silently
+    drop it."""
     m = ex.find_for_alert(
         alertname="TargetDown",
         service="monitoring",
@@ -150,8 +150,13 @@ def test_format_for_prompt_handles_dismiss_with_empty_actions():
 
 def test_list_all_returns_all_exemplars():
     items = ex.list_all()
-    assert len(items) == 15  # +oom-crashloop-restart (2026-06-10)
+    # 2026-06-12 (findings #1/#5): -adaptive-threshold-noop (deleted, stale
+    # fiction) +workload-replica-deficit +demo-frontend-downstream-latency.
+    assert len(items) == 16
     ids = {item["id"] for item in items}
+    assert "workload-replica-deficit" in ids
+    assert "demo-frontend-downstream-latency" in ids
+    assert "adaptive-threshold-noop" not in ids  # deleted, finding #5
     assert "oom-crashloop-restart" in ids
     assert "oom-loop" in ids
     assert "upstream-latency-attribution" in ids
@@ -175,3 +180,46 @@ def test_get_by_id_unknown_returns_none():
 
 def test_format_for_prompt_none_returns_empty():
     assert ex.format_for_prompt(None) == ""
+
+
+# ---------------------------------------------------------------------------
+# Finding #4 — explicit priority tie-break, independent of YAML order.
+# ---------------------------------------------------------------------------
+
+def test_reordering_library_does_not_change_selection(monkeypatch):
+    """Selection must be driven by (score, priority, id) — NOT file order. We
+    reverse the in-memory exemplar list and confirm the same exemplar wins the
+    KubePodCrashLooping tie (crashloop-bad-config, priority 1 > the equal-score
+    oom-crashloop-restart at priority 0)."""
+    lib = ex._load_library()
+    original = list(lib["exemplars"])
+    try:
+        before = ex.find_for_alert(
+            alertname="KubePodCrashLooping", service="spring-boot",
+            deployment_type="k8s",
+        )
+        # Reverse the list in place; find_for_alert reads the same cached dict.
+        lib["exemplars"] = list(reversed(original))
+        after = ex.find_for_alert(
+            alertname="KubePodCrashLooping", service="spring-boot",
+            deployment_type="k8s",
+        )
+    finally:
+        lib["exemplars"] = original
+    assert before["id"] == "crashloop-bad-config"
+    assert after["id"] == before["id"], "selection changed when library was reordered"
+
+
+def test_find_for_alert_scored_returns_score():
+    m, score = ex.find_for_alert_scored(
+        alertname="KubeWorkloadDown", service="accounting",
+        deployment_type="k8s", signal="availability", severity="critical",
+    )
+    assert m["id"] == "workload-replica-deficit"
+    assert score > 0.0
+
+
+def test_default_selection_scores_zero():
+    m, score = ex.find_for_alert_scored(alertname="TotallyUnknownAlert")
+    assert m["id"] == "generic-sre-shape"
+    assert score == 0.0

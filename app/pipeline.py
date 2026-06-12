@@ -1639,6 +1639,9 @@ class TriagePipeline:
             correlated_alerts=_json.dumps(correlated) if correlated else None,
             excluded_from_lookup=1 if should_quarantine else 0,
             env=env,
+            # Finding #3 — which exemplar archetype the prompt builder used.
+            exemplar_id=getattr(decision, "exemplar_id", None),
+            exemplar_score=getattr(decision, "exemplar_score", None),
         )
 
         # Step 8: Act on decision. A notifier failure (SMTP hiccup, template

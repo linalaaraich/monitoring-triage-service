@@ -252,6 +252,13 @@ class RCAStore:
             # backfill_incidents() links them. Set at save_decision write time
             # for new rows that carry a fingerprint.
             ("incident_id",         "TEXT"),
+            # 2026-06-12 (finding #3) — which exemplar archetype the prompt
+            # builder selected for this decision, and its match score. Lets the
+            # /dashboard/stats "RCA archetypes used" table answer "which
+            # archetypes actually help". Nullable; backfill not required — new
+            # rows only, old rows stay NULL.
+            ("exemplar_id",         "TEXT"),
+            ("exemplar_score",      "REAL"),
         ]
         for name, sql_type in new_columns:
             if name not in cols:
@@ -331,9 +338,10 @@ class RCAStore:
                 related_alerts, investigation_duration_ms, rca_quality,
                 alert_instance, alert_component, alert_signal, observed_value,
                 promql_expr, suggested_actions, evidence, diagnostic_steps,
-                anomaly_summary, correlated_alerts, env, excluded_from_lookup)
+                anomaly_summary, correlated_alerts, env, excluded_from_lookup,
+                exemplar_id, exemplar_score)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.id,
                 record.timestamp.isoformat(),
@@ -363,6 +371,8 @@ class RCAStore:
                 record.correlated_alerts,
                 record.env,
                 int(getattr(record, "excluded_from_lookup", 0) or 0),
+                getattr(record, "exemplar_id", None),
+                getattr(record, "exemplar_score", None),
             ),
         )
         # S5-INC-01 write-time maintenance: keep the incidents table live as
@@ -1741,12 +1751,44 @@ class RCAStore:
             "rate": (overrides / rated) if rated > 0 else None,
         }
 
+        # 5) RCA archetypes used (finding #3) — per-exemplar count + actionable
+        #    rate over the window. Only rows that recorded an exemplar_id (new
+        #    rows since the 2026-06-12 migration) count; old NULL rows are
+        #    excluded so the table answers "which archetypes actually help".
+        archetypes_used: list[dict] = []
+        try:
+            cur = await self._db.execute(
+                """SELECT exemplar_id,
+                          COUNT(*) AS total,
+                          SUM(CASE WHEN rca_quality = 'actionable' THEN 1 ELSE 0 END) AS actionable
+                   FROM rca_history
+                   WHERE timestamp > ?
+                     AND exemplar_id IS NOT NULL AND TRIM(exemplar_id) != ''
+                   GROUP BY exemplar_id
+                   ORDER BY total DESC""",
+                (since,),
+            )
+            for r in await cur.fetchall():
+                total = int(r["total"] or 0)
+                actionable = int(r["actionable"] or 0)
+                archetypes_used.append({
+                    "exemplar_id": r["exemplar_id"],
+                    "count": total,
+                    "actionable": actionable,
+                    "actionable_rate": (actionable / total) if total else None,
+                })
+        except Exception as exc:
+            # Pre-migration DBs (column absent) — degrade gracefully, the page
+            # just shows an empty archetype table.
+            logger.warning("archetypes_used aggregate skipped (non-fatal): %s", exc)
+
         return {
             "days": days,
             "noisiest_alerts": noisiest,
             "escalated_services": escalated_services,
             "verdict_by_family": verdict_by_family,
             "false_positive": false_positive,
+            "archetypes_used": archetypes_used,
         }
 
     async def get_recurrence_gate_fires(self, hours: int = 24, limit: int = 20) -> dict:

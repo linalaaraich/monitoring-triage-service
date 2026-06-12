@@ -53,27 +53,27 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.88-0.95"
     one_line: "JVM heap saturating cgroup limit because the JVM defaults aren't tuned for the container — OOM-kill cycle confirmed."
-    human_cause: "employees-backend is in an OOM-kill loop, restarting every 12 minutes because the JVM heap is capped at only 256 MB."
+    human_cause: "employees-backend is in an OOM-kill loop, restarting every <N> minutes because the JVM heap is capped at only <N>Mi."
     rca: |
-      employees-backend is in a steady-state OOM-kill loop: every ~12 minutes the JVM heap
+      employees-backend is in a steady-state OOM-kill loop: every ~<N> minutes the JVM heap
       exhausts, the kernel kills the container, and the pod restarts. The mechanism is
-      a JVM-vs-cgroup mismatch — JAVA_TOOL_OPTIONS is unset so the JVM uses ~25% of the
-      cgroup as heap (the default), which produces ~256 MB effective heap for a 1 GiB
+      a JVM-vs-cgroup mismatch — JAVA_TOOL_OPTIONS is unset so the JVM uses ~<X>% of the
+      cgroup as heap (the default), which produces ~<N>Mi effective heap for the
       container limit. Normal traffic exhausts that. The metric proof:
-      container_memory_working_set_bytes peaked near the cgroup limit in two saw-tooth
-      cycles over 30 min; Loki shows multiple `java.lang.OutOfMemoryError: Java heap
-      space` lines about 12 minutes apart matching the restart counter; GC pause time
-      climbs in the 60-90s leading up to each crash. The cycle postdates the most recent
+      container_memory_working_set_bytes peaked near the cgroup limit in saw-tooth
+      cycles over the window; Loki shows multiple `java.lang.OutOfMemoryError: Java heap
+      space` lines about <N> minutes apart matching the restart counter; GC pause time
+      climbs in the seconds leading up to each crash. The cycle postdates the most recent
       deploy — the regression is recent.
     evidence_shape:
-      - "container_memory_working_set_bytes peaked at X% of limit, repeating every ~N min"
-      - "kube_pod_container_status_restarts_total = N (+M in last 30m)"
-      - "K× 'java.lang.OutOfMemoryError: Java heap space' lines (Drain3 cluster #N, novel since HH:MM)"
-      - "GC pause sum climbing in the 60-90 s before each OOM"
+      - "container_memory_working_set_bytes peaked at <X>% of limit, repeating every ~<N> min"
+      - "kube_pod_container_status_restarts_total = <N> (+<M> in the recent window)"
+      - "<K>× 'java.lang.OutOfMemoryError: Java heap space' lines (Drain3 cluster, novel since the alert window)"
+      - "GC pause sum climbing in the seconds before each OOM"
       - "Pattern starts at deploy timestamp"
     actions_shape:
-      - "kubectl set resources deploy/{service} -n app --limits=memory=2Gi --requests=memory=1Gi — raise the ceiling out of OOMKill range"
-      - "kubectl set env deploy/{service} -n app JAVA_TOOL_OPTIONS='-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError' — pin heap to 75% of cgroup, exit on OOM cleanly"
+      - "kubectl set resources deploy/{service} -n app --limits=memory=<N>Gi --requests=memory=<N>Gi — raise the ceiling out of OOMKill range"
+      - "kubectl set env deploy/{service} -n app JAVA_TOOL_OPTIONS='-XX:MaxRAMPercentage=<X> -XX:+ExitOnOutOfMemoryError' — pin heap to <X>% of cgroup, exit on OOM cleanly"
       - "kubectl rollout restart deploy/{service} -n app — clear leaked state after the limit change"
       - "If the leak persists post-restart: helm rollback {service} — revert while the leak is investigated"
     lesson: "Three pillars converged: memory metrics + OOM logs + GC-skewed traces. Drain3 added recency. Deploy timestamp tied it to a code change."
@@ -148,16 +148,16 @@ exemplars:
       observed value back as a description of "users experiencing slowness" —
       the alert already said that.
     evidence_shape:
-      - "p95 = X ms (translate to plain language: '95% of requests took longer than X/1000 s')"
-      - "Top N traces: longest single span = Y ms in <span name>; total = Z ms"
+      - "p95 = <N> ms (translate to plain language: '95% of requests took longer than <N> ms')"
+      - "Top <N> traces: longest single span = <M> ms in <span name>; total = <Z> ms"
       - "If JDBC: hikari_active_connections / hikari_pending_threads ratio"
       - "If GC: jvm_gc_pause_seconds_sum trend over alert window"
       - "If thread pool: tomcat_threads_busy_threads / tomcat_threads_max"
       - "Loki: query template + frequency for slow-query / pool-exhausted / GC-pause lines"
     actions_shape:
-      - "JDBC pool: kubectl set env deploy/{service} -n app SPRING_DATASOURCE_HIKARI_MAXIMUMPOOLSIZE=40 — if traces show pool-acquisition waits"
-      - "GC pauses: kubectl set env deploy/{service} -n app JAVA_TOOL_OPTIONS='-XX:+UseG1GC -XX:MaxGCPauseMillis=200' + kubectl rollout restart"
-      - "Thread pool: kubectl set env deploy/{service} -n app SERVER_TOMCAT_THREADS_MAX=400 + kubectl rollout restart"
+      - "JDBC pool: kubectl set env deploy/{service} -n app SPRING_DATASOURCE_HIKARI_MAXIMUMPOOLSIZE=<N> — if traces show pool-acquisition waits"
+      - "GC pauses: kubectl set env deploy/{service} -n app JAVA_TOOL_OPTIONS='-XX:+UseG1GC -XX:MaxGCPauseMillis=<N>' + kubectl rollout restart"
+      - "Thread pool: kubectl set env deploy/{service} -n app SERVER_TOMCAT_THREADS_MAX=<N> + kubectl rollout restart"
       - "Slow query: kubectl exec -n app deploy/mysql -- mysql -e 'EXPLAIN <slow query>' — capture plan; durable fix is index/query rewrite"
       - "If unclear from traces: kubectl rollout restart deploy/{service} -n app — cheapest reversible action to clear in-process state while diagnosis continues"
     lesson: "When the alert subject is the slow service, the trace breakdown is the diagnostic — not 'observed value above threshold'. The four common causes (pool, GC, downstream, query) each have a distinct trace signature."
@@ -180,11 +180,11 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.90-0.98"
     one_line: "A specific resource is exhausted — the cgroup limit, the JVM heap, or the host's physical memory. Name which from the metric breakdown."
-    human_cause: "employees-backend is sitting at 98% of its memory cap for more than 5 minutes - the next request will trigger an OOM-kill."
+    human_cause: "employees-backend is sitting at <X>% of its memory cap for several minutes - the next request will trigger an OOM-kill."
     rca: |
       The host or pod has hit a hard resource ceiling — this is not seasonal
-      noise. CriticalCpuUsage means the CPU has been at >90% for the rule's
-      sustained window; CriticalMemoryUsage means the cgroup or host memory
+      noise. CriticalCpuUsage means the CPU has been above the critical threshold
+      for the rule's sustained window; CriticalMemoryUsage means the cgroup or host memory
       is near the limit. Diagnose by mechanism: for memory, check whether
       working_set is hugging the cgroup limit (OOMKill imminent — different
       from OS memory pressure); for CPU, check whether cpu_throttled_time
@@ -202,9 +202,9 @@ exemplars:
       - "Loki: grep -i 'OutOfMemoryError|GC overhead|killed' for confirmation"
       - "Trace span breakdown: which operation dominates?"
     actions_shape:
-      - "kubectl set resources deploy/{service} -n app --limits=memory=2Gi --requests=memory=1Gi — raise ceiling out of OOMKill range"
-      - "kubectl set env deploy/{service} -n app JAVA_TOOL_OPTIONS='-XX:MaxRAMPercentage=75' — pin JVM heap to 75% of cgroup"
-      - "kubectl scale deploy/{service} -n app --replicas=N — distribute load if traffic genuinely demands it"
+      - "kubectl set resources deploy/{service} -n app --limits=memory=<N>Gi --requests=memory=<N>Gi — raise ceiling out of OOMKill range"
+      - "kubectl set env deploy/{service} -n app JAVA_TOOL_OPTIONS='-XX:MaxRAMPercentage=<X>' — pin JVM heap to <X>% of cgroup"
+      - "kubectl scale deploy/{service} -n app --replicas=<N> — distribute load if traffic genuinely demands it"
       - "kubectl rollout undo deploy/{service} -n app — if a recent deploy caused the regression"
     lesson: "Critical-severity resource alerts mean the customer is in pain. Name a specific failing resource (cgroup memory cap, JVM heap default, CPU throttle), not 'the system is stressed'. Resize, rollback, or scale — match the action to the named cause."
     doc_anchor: "scenario-1--spring-boot-oom-kill-loop-caught-in-a-single-cycle"
@@ -250,14 +250,20 @@ exemplars:
       - "Memory: container_memory_working_set on the collector pod"
     actions_shape:
       - "kubectl rollout restart daemonset/otel-collector -n observability — clears stuck queues"
-      - "kubectl set env daemonset/otel-collector -n observability OTEL_BATCH_TIMEOUT=5s OTEL_BATCH_SEND_BATCH_SIZE=1024 — tune throughput"
+      - "kubectl set env daemonset/otel-collector -n observability OTEL_BATCH_TIMEOUT=<N>s OTEL_BATCH_SEND_BATCH_SIZE=<N> — tune throughput"
       - "kubectl scale daemonset/otel-collector -n observability --replicas=N — if running as Deployment not DaemonSet"
       - "If exporter target is the bottleneck (Jaeger / Prometheus / Loki down): restart that target via the appropriate deployment_type"
     lesson: "The collector itself is rarely the cause — it's the canary. Find which exporter or upstream is back-pressuring before tuning collector resources."
     doc_anchor: "cross-cutting-properties-demonstrated-by-these-scenarios"
 
   - id: synthetic-blip-dismiss
-    archetype: "Brief target-down / probe-miss with no corroborating signal"
+    # REWRITTEN 2026-06-12 (finding #5): the prior version's "synthetic blip"
+    # framing predated the real-induction-only philosophy (no synthetic
+    # /webhook POSTs — every fire is induced from real data). The behaviour it
+    # describes is still real and current, though: a genuine TargetDown that is
+    # a brief scrape miss the target self-recovers from, with nothing
+    # corroborating. Kept + rewritten to current reality, numberless.
+    archetype: "Brief TargetDown scrape miss — target self-recovered, nothing corroborates"
     match:
       alertname: "^TargetDown$"
       services: ["*"]
@@ -265,19 +271,20 @@ exemplars:
     decision: "DISMISS"
     confidence_band: "0.75-0.90"
     one_line: "Transient scrape collision or network jitter — target self-recovered before triage finished, no corroborating anomaly anywhere."
-    human_cause: "Brief scrape blip on the target - it missed two checks then recovered on its own. No real outage."
+    human_cause: "Brief scrape blip on the target - it missed a couple of checks then recovered on its own. No real outage."
     rca: |
-      This is transient scrape jitter, not an outage: the target missed two consecutive
+      This is transient scrape jitter, not an outage: the target missed a few consecutive
       scrape intervals, then recovered, and has been steadily up since — all of this
       before the triage pipeline finished gathering context. No alert correlated within
-      ±5 minutes; no novel Drain3 log templates; host-level CPU/memory/network metrics
-      show no perturbation in the window. The signature matches a brief network blip
-      or a scrape-time collision (Prometheus and the target's own work overlapping in
-      a way that blocks the scrape), not an actual service event. The right verdict is
-      DISMISS without action — paging on this would be noise.
+      the ±<N> min window; no novel Drain3 log templates; host-level CPU/memory/network
+      metrics show no perturbation in the window. The signature matches a brief network
+      blip or a scrape-time collision (Prometheus and the target's own work overlapping
+      in a way that blocks the scrape), not an actual service event. Confirm the target
+      is up NOW and was the alert's recovery already received — if so the breach already
+      ended. The right verdict is DISMISS without action — paging on this would be noise.
     evidence_shape:
-      - "up{instance=...} time series: 1,1,...,0,0,1,1,1,... (two zeros, then recovery)"
-      - "No correlated alerts in ±5m window"
+      - "up{instance=...} time series: a short run of zeros bracketed by ones (recovered)"
+      - "No correlated alerts in the ±<N> min window"
       - "No novel Drain3 templates and no rate change"
       - "Host metrics (CPU, memory, network) unaffected"
     actions_shape: []   # DISMISS path: no remediation
@@ -297,7 +304,7 @@ exemplars:
       deployment_types: ["docker-vm"]
     decision: "ESCALATE"
     confidence_band: "0.88-0.96"
-    one_line: "Single root cause (disk pressure / ingest backpressure) produced N symptoms within ~12 min — treat as one incident, fix at the source."
+    one_line: "Single root cause (disk pressure / ingest backpressure) produced <N> symptoms within a few minutes — treat as one incident, fix at the source."
     human_cause: "The monitoring VM disk is filling up, which is causing Loki to drop log ingest and Grafana to lose datasource visibility - one root cause, multiple symptoms."
     rca: |
       Multiple alerts in this window are symptoms of a single infrastructure-layer
@@ -394,7 +401,7 @@ exemplars:
       but few traces and minimal logs there because the requests don't get far enough
       to log anything). A bounded-agency MCP retry pulled K traces from the upstream
       service and showed the diagnostic pattern: most upstream calls return 5xx in
-      <50ms — too fast to be timeouts, which means the upstream is rejecting at
+      well under the timeout — too fast to be timeouts, which means the upstream is rejecting at
       admission rather than failing during work. That admission-time rejection
       signature points to one of three saturation modes: tomcat thread pool exhausted,
       circuit-breaker tripped, or HTTP connection pool drained. The frontend itself
@@ -402,47 +409,24 @@ exemplars:
       users.
     evidence_shape:
       - "Initial: error rate up from baseline; alerting service traces empty"
-      - "Bounded-agency tool: jaeger.get_traces(service={upstream}, status=503, limit=25)"
-      - "K of N retrieved upstream traces returned 5xx in <50ms — admission-time rejection"
+      - "Bounded-agency tool: jaeger.get_traces(service={upstream}, status=503, limit=<N>)"
+      - "<K> of <N> retrieved upstream traces returned 5xx well under the timeout — admission-time rejection"
       - "{service} itself is healthy by other metrics"
     actions_shape:
       - "kubectl exec -n app deploy/{upstream} -- curl -s localhost:8080/actuator/metrics/<saturation_metric> — capture the smoking gun (still allowed because it changes nothing but proves the cause)"
-      - "kubectl set env deploy/{upstream} -n app SERVER_TOMCAT_THREADS_MAX=400 — raise saturation ceiling if confirmed"
+      - "kubectl set env deploy/{upstream} -n app SERVER_TOMCAT_THREADS_MAX=<N> — raise saturation ceiling if confirmed"
       - "kubectl rollout restart deploy/{upstream} -n app — apply env change cleanly"
     lesson: "A targeted single retry > scolding the model. Determinism is preserved (same inputs → same retry → same answer)."
     doc_anchor: "scenario-6--bounded-agency-retry-from-inconclusive-to-escalate-in-one-extra-mcp-query"
 
-  - id: adaptive-threshold-noop
-    archetype: "Adaptive-threshold rule absorbs a known seasonal traffic spike"
-    match:
-      alertname: "^(Pod)?(High|Medium)CpuUsage$"
-      services: ["*"]
-      signal: "metric"
-    decision: "DISMISS"
-    confidence_band: "0.80-0.95"
-    one_line: "Static-threshold blind spot to traffic seasonality — current value is a normal time-of-day ramp, not a degradation."
-    human_cause: "Normal time-of-day traffic ramp - same pattern as the prior 4 weeks at this hour. The alert rule's static threshold is the problem, not the system."
-    rca: |
-      This is the static threshold misfiring on a normal traffic ramp, not a real
-      degradation: the current value is +0.4σ above the same-hour baseline from one
-      week ago (stddev_over_time + offset 7d), well within the natural seasonality of
-      the load curve. The shape matches the prior 4 weeks at this same day-of-week
-      and time-of-day — Tuesday-9am and Thursday-2pm both look like this, every week.
-      Logs and traces are quiet — no error rate change, no novel templates, no slow
-      spans. The alert is signal about the rule design (static threshold can't track
-      traffic seasonality), not about the system's actual health. Firing-but-no-action
-      patterns like this are how operators learn to ignore alerts; the right response
-      is to fix the rule.
-    evidence_shape:
-      - "Current: X% (above static threshold T%)"
-      - "Same-hour-same-day baseline (last 7d): mean X'%, σ Y%"
-      - "Z-score: (X - X') / Y = +N.Mσ (within ±1σ band)"
-      - "No log or trace anomaly in window"
-    actions_shape:
-      - "Edit monitoring-project/roles/grafana/templates/alertrules.yml.j2: replace static threshold with stddev_over_time + offset 7d > 3 — remediates the false-positive class durably"
-      - "ansible-playbook -i inventory/tailnet.yml playbooks/grafana.yml — apply the rule change"
-    lesson: "The right output for a seasonal spike is to FIX THE RULE, not to page. Operating quiet on non-events is as valuable as catching real ones."
-    doc_anchor: "scenario-7--adaptive-threshold-us-54-keeps-the-system-quiet-through-a-normal-tuesday-morning-ramp"
+  # adaptive-threshold-noop DELETED 2026-06-12 (finding #5, stale-fiction
+  # purge): the platform's adaptive/seasonal-threshold rules were replaced by
+  # static thresholds on 2026-06-03, so this archetype described a DISMISS-on-
+  # seasonal-ramp verdict the system can no longer produce. Removing it means
+  # HighCpuUsage / MediumCpuUsage / PodHighCpuUsage now fall to the generic
+  # default — that is a conscious choice, recorded in the INTENTIONAL_DEFAULT
+  # allowlist in tests/test_exemplar_coverage.py (a CPU-saturation archetype
+  # is a possible future addition, not a silent gap).
 
   - id: closed-loop-feedback-override
     archetype: "Operator override on a similar prior alert forces escalation"
@@ -473,7 +457,7 @@ exemplars:
       — the routing reflects the most recent ground truth, not the LLM's judgement
       alone.
     evidence_shape:
-      - "LLM verdict (this pass): DISMISS, confidence ~0.79"
+      - "LLM verdict (this pass): DISMISS, confidence ~0.<NN>"
       - "Recent operator override: <YYYY-MM-DD>, similarity=high (alertname + time-of-day + service)"
       - "Override window active for next K days"
     actions_shape:
@@ -493,6 +477,12 @@ exemplars:
     # rule ships.
     # FORWARD-LOOKING
     archetype: "App boot failure / CrashLoopBackOff from a bad config or migration"
+    # Finding #4 (2026-06-12): explicit tie-break. On KubePodCrashLooping for
+    # the employees-* services this scores EQUAL to oom-crashloop-restart
+    # (both 0.80). It was placed BEFORE oom-crashloop-restart in the file so it
+    # won the positional tie; priority 1 (> the default 0) now makes that win
+    # deterministic and independent of YAML order.
+    priority: 1
     match:
       alertname: "^(KubePodCrashLooping|TargetDown)$"
       # WS-1 (2026-06-04): `employees-*` are the operator-facing aliases.
@@ -543,7 +533,7 @@ exemplars:
     decision: "ESCALATE"
     confidence_band: "0.70-0.90"
     one_line: "Container is OOMKilled every cycle — memory limit too small for the workload; restart counter staircases until the limit is raised."
-    human_cause: "accounting is being OOMKilled about every 17 minutes - its 120Mi memory limit is too small for the workload, so the kernel kills it and the pod restarts."
+    human_cause: "accounting is being OOMKilled about every <N> minutes - its <N>Mi memory limit is too small for the workload, so the kernel kills it and the pod restarts."
     rca: |
       The pod is in a kernel-enforced OOM-kill loop: the container's working set
       grows past its cgroup memory limit, the kernel kills it (exit 137), kubelet
@@ -562,12 +552,102 @@ exemplars:
       - "kube_pod_container_resource_limits{resource='memory'} = X Mi vs container_memory_working_set_bytes hugging X"
       - "Logs often CLEAN — the kernel kills the process mid-flight; absence of app errors does NOT mean absence of cause"
     actions_shape:
-      - "kubectl -n {namespace} set resources deploy/{service} --limits=memory=<2-4x current> — lift the ceiling out of OOMKill range"
+      - "kubectl -n {namespace} set resources deploy/{service} --limits=memory=<K>x-current — lift the ceiling out of OOMKill range"
       - "Persist the new limit through the GitOps path (helm values / ansible) so the next deploy doesn't regress it"
       - "Watch increase(kube_pod_container_status_restarts_total[30m]) flatten to 0 to confirm remediation"
       - "If the working set keeps growing after the bump: memory leak — capture a heap profile and helm rollback to the last good revision"
     lesson: "Restart alerts are retrospective: name the kill reason from last_terminated_reason, check whether the loop is STILL active, and never read current-state calm as 'no anomalies'."
     doc_anchor: "scenario-1--spring-boot-oom-kill-loop-caught-in-a-single-cycle"
+
+  - id: workload-replica-deficit
+    # Finding #1a (2026-06-12 coverage-drift fix): KubeWorkloadDown and
+    # KubeWorkloadReplicasDeficit (monitoring-project, signal=availability,
+    # component=k8s, severity=critical, namespace-generic) matched NO archetype
+    # and fell to the generic default. These are kube-state-metrics replica
+    # alerts: the lead is the replica deficit itself, NOT a crash loop. The
+    # diagnostic split is scheduling-vs-crash — name WHICH from kube-state.
+    # Numberless per finding #2. priority 0 (no positional tie to defend).
+    archetype: "Kubernetes workload replica deficit — desired > available replicas"
+    match:
+      alertname: "^Kube(Workload(Down|ReplicasDeficit))$"
+      services: ["*"]
+      deployment_types: ["k8s"]
+      signal: "availability"
+      severity: ["critical"]
+    decision: "ESCALATE"
+    confidence_band: "0.80-0.95"
+    one_line: "A deployment has fewer Ready replicas than desired — name the mechanism (unschedulable Pending, scaled-to-zero, or crash) from kube-state, don't assume a crash loop."
+    human_cause: "The <service> deployment is running fewer pods than it should - <N> of <K> replicas are unavailable, so capacity is degraded or the service is down."
+    rca: |
+      The lead is a replica deficit, read straight from kube-state-metrics:
+      kube_deployment_spec_replicas exceeds kube_deployment_status_replicas_available
+      for this deployment, so the workload is running below its desired capacity (down
+      entirely when available reaches <0>). This is an AVAILABILITY alert, not a crash
+      alert — do NOT default to "CrashLoopBackOff" without evidence. Name the mechanism
+      from the cluster state: pods stuck Pending (unschedulable — insufficient
+      CPU/memory on any node, an unsatisfiable nodeSelector/affinity, or a missing
+      PVC) point at scheduling; pods Running-but-not-Ready point at a failing readiness
+      probe or slow boot; a spec of <0> replicas means it was scaled to zero (often
+      deliberate — check before escalating); pods CrashLoopBackOff point at a boot
+      failure (then cross-reference the crash-loop archetype). Pick ONE from the pod
+      phase + waiting reason; the deficit count and the unschedulable/Pending evidence
+      are the proof.
+    evidence_shape:
+      - "kube_deployment_spec_replicas{deployment='{service}'} = <K> vs kube_deployment_status_replicas_available = <M> (deficit <N>)"
+      - "kube_pod_status_phase{phase='Pending'} / waiting reason — unschedulable vs ImagePullBackOff vs CrashLoopBackOff"
+      - "If Pending: kubectl describe events name the reason (Insufficient cpu/memory, no nodes match affinity, unbound PVC)"
+      - "Was the deployment scaled to <0> on purpose? (spec replicas = <0> is intent, not failure)"
+    actions_shape:
+      - "kubectl -n {namespace} describe deploy/{service} — read the Conditions + recent events to name scheduling-vs-crash"
+      - "kubectl -n {namespace} get pods -l app={service} -o wide — find which pods are Pending/CrashLoopBackOff/NotReady"
+      - "If scaled to zero unintentionally: kubectl -n {namespace} scale deploy/{service} --replicas=<K> — restore desired count"
+      - "If unschedulable: free node capacity (evict/cordon-fix) or relax the resource request/affinity; if crash-looping, follow the crash-loop remediation (rollout undo)"
+    lesson: "Replica-deficit alerts are availability signals — name the mechanism (Pending/unschedulable, scaled-to-zero, or crash) from kube-state. Never assume crash loop by default; the pod phase tells you which it is."
+    doc_anchor: "cross-cutting-properties-demonstrated-by-these-scenarios"
+
+  - id: demo-frontend-downstream-latency
+    # Finding #1a (2026-06-12 coverage-drift fix): HighDemoFrontendP95Latency
+    # (otel-demo Astronomy Shop frontend, service=frontend, signal=metric,
+    # component=api, severity=warning) matched NO archetype — service-self and
+    # kong-upstream both regex-miss the "DemoFrontend" name — and fell to the
+    # generic default. This is a cross-service latency case: the frontend is a
+    # thin BFF and the slow DOWNSTREAM gRPC span IS the cause. Cite the trace
+    # span breakdown. Numberless per finding #2.
+    archetype: "otel-demo frontend p95 — the slow downstream span IS the cause"
+    match:
+      alertname: "^HighDemoFrontendP95Latency$"
+      services: ["frontend", "*"]
+      deployment_types: ["k8s"]
+      signal: "metric"
+    decision: "ESCALATE"
+    confidence_band: "0.80-0.92"
+    one_line: "The Astronomy Shop frontend is a thin BFF; its p95 is dominated by one slow downstream gRPC service — name that service from the trace span breakdown, not the frontend."
+    human_cause: "The shop frontend is slow because one downstream service it calls (e.g. checkout, cart or recommendation) is slow - the frontend itself is just waiting on it."
+    rca: |
+      The otel-demo frontend is a Backend-for-Frontend: almost none of the reported p95
+      is the frontend's own work — it fans out gRPC calls to downstream services
+      (checkout, cart, recommendation, product-catalog, currency) and returns when the
+      slowest one returns. So the cause is cross-service: the trace span breakdown
+      shows the frontend span as a thin wrapper and one downstream child span consuming
+      the large majority of total request time. Name THAT downstream service and its
+      slow operation — that is the diagnosis, not "the frontend is slow". On this bed
+      the usual trigger is a flagd feature-flag fault (e.g. a *FailFeatureFlag* / latency
+      fault toggled on) injecting latency or errors into a specific service, so check
+      the active flagd flags and the downstream service's own p95. Do NOT explain the
+      alert by quoting the p95 value back as "users see slowness" — the alert already
+      said that; the trace says WHERE.
+    evidence_shape:
+      - "Top traces: frontend span ~<N>ms (thin) vs downstream <service> span ~<M>ms — downstream dominates total"
+      - "Per-downstream p95: which of checkout / cart / recommendation / product-catalog regressed"
+      - "flagd active flags — is a fault/latency feature flag enabled on the slow service?"
+      - "Loki on the downstream service: slow-call / error lines in the window"
+    actions_shape:
+      - "Open the slowest trace and read the span tree — identify the downstream service + operation that dominates"
+      - "Check flagd: if a fault/latency flag is enabled on that service, disable it (the flagd UI / configmap) — usually the whole cause on this bed"
+      - "kubectl -n otel-demo rollout restart deploy/{downstream_service} — clear stuck state once the flag is cleared"
+      - "If genuinely saturated (no flag): scale or tune the named downstream service, not the frontend"
+    lesson: "For a BFF-style frontend, the p95 lives in a downstream span. Cite the trace breakdown and name the slow downstream service — fixing the frontend would do nothing."
+    doc_anchor: "cross-cutting-properties-demonstrated-by-these-scenarios"
 
   - id: network-firewall-attribution
     # PARTIALLY FORWARD-LOOKING (audit 2026-04-28): regex names
@@ -606,7 +686,7 @@ exemplars:
       - "node_network_transmit_packets_total: K% drop at HH:MM (coincident with terraform apply at HH:MM-N)"
     actions_shape:
       - "Confirm the diff: cd {iac_repo} && terraform plan -target=module.{module} — non-destructive"
-      - "RESTORE SERVICE: terraform apply with the prior CIDR/policy values (cheap, reversible) — clears 5xx in <30s"
+      - "RESTORE SERVICE: terraform apply with the prior CIDR/policy values (cheap, reversible) — clears 5xx in seconds"
       - "FIX FORWARD: git revert <commit-sha> on the change in {iac_repo}, push, re-apply through CI"
       - "GUARD: add OPA/Conftest policy in .github/workflows/terraform.yml that fails any plan narrowing intra-cluster CIDRs"
     lesson: "Single-pillar metrics say 'target is up' — but the trace + log + packet-rate combination is the whole story. Restore-of-service before root-cause diagnosis under outage. Always check the IaC commit log."
@@ -648,7 +728,7 @@ exemplars:
       - "kubectl rollout restart deploy/cert-manager -n cert-manager — kick a fresh renewal"
       - "kubectl annotate certificate {name} -n {ns} cert-manager.io/issue-temporary-certificate='true' --overwrite — buy headroom with a temporary cert"
       - "Restore the broken challenge path: git revert <commit-sha> on the ingress/route edit, then ansible-playbook ..."
-      - "Add a redundant alert at expiry < 14 days (lead time) by editing alertrules.yml.j2 + ansible-playbook playbooks/grafana.yml"
+      - "Add a redundant alert at expiry < <N> days (lead time) by editing alertrules.yml.j2 + ansible-playbook playbooks/grafana.yml"
     lesson: "Pre-failure alerts are gold — fire while everything still works. The right action sequence buys time (temporary cert) before fixing the root cause."
     doc_anchor: "scenario-11--tls-certificate-near-expiry-caught-before-users-see-a-single-failure"
 
@@ -666,8 +746,8 @@ default:
     a stalled process, a config drift, a recent deploy regression, an exhausted disk,
     a broken upstream link. Then explain HOW you know: which metric values, which
     log templates, which trace span breakdowns, which pillar is silent and why. Use
-    plain language for raw expressions (translate "p95 = 8487 ms" into "95% of
-    requests took longer than 8.5 seconds"); the raw form goes in evidence. Finish
+    plain language for raw expressions (translate "p95 = <N> ms" into "95% of
+    requests took longer than <N> seconds"); the raw form goes in evidence. Finish
     with 2-4 concrete state-changing remediations ordered by reversibility — cheap
     reverts first, infrastructure-level changes last. Never let "value above
     threshold" be the conclusion; that is the alert restating itself.

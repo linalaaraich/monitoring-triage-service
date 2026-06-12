@@ -64,6 +64,39 @@ async def test_stats_page_renders_aggregates(client_with_stats):
     assert "spring-boot" in body
     # False-positive proxy section present.
     assert "False-positive proxy" in body
+    # Finding #3 — RCA archetypes-used card present (renders even when empty).
+    assert "RCA archetypes used" in body
+
+
+@pytest.mark.asyncio
+async def test_stats_page_renders_archetype_table_with_data():
+    """Finding #3 — when decisions recorded an exemplar_id, the archetype card
+    shows the per-archetype row + its actionable rate."""
+    db_path = os.path.join(tempfile.gettempdir(), "test_dash_stats_arch.db")
+    if os.path.exists(db_path):
+        os.unlink(db_path)
+    store = RCAStore(db_path)
+    await store.init_db()
+    now = datetime.utcnow()
+    await store.save_decision(RCARecord(
+        alert_name="KubeWorkloadDown", alert_fingerprint="fp-arch",
+        affected_service="accounting", llm_verdict="escalate",
+        action_taken="emailed", rca_quality="actionable",
+        exemplar_id="workload-replica-deficit", exemplar_score=1.1,
+        timestamp=now))
+    saved = app_main._store
+    app_main._store = store
+    transport = ASGITransport(app=app_main.app, raise_app_exceptions=False)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.get("/dashboard/stats")
+        assert r.status_code == 200
+        assert "workload-replica-deficit" in r.text
+    finally:
+        app_main._store = saved
+        await store.close()
+        if os.path.exists(db_path):
+            os.unlink(db_path)
 
 
 @pytest.mark.asyncio

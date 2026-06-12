@@ -135,6 +135,12 @@ class LLMDecision(BaseModel):
     # LLMs may also emit this directly when they want to ask for investigation
     # rather than commit to remediation — both paths are supported.
     diagnostic_steps: list[str] = Field(default_factory=list)
+    # 2026-06-12 (finding #3) — set by llm_client.investigate from the exemplar
+    # the prompt builder selected, so the pipeline can persist it onto the
+    # RCARecord. Not part of the LLM's JSON output (the model never sets these);
+    # populated server-side after parsing. None when no exemplar was selected.
+    exemplar_id: Optional[str] = None
+    exemplar_score: Optional[float] = None
 
     # Small 3B-parameter models frequently return `evidence` as a list of
     # dict objects (e.g. {"metric": "...", "value": 4.7}) instead of the
@@ -270,6 +276,12 @@ class RCARecord(BaseModel):
     # Default 0 means "include in lookups" — same semantics as the ALTER
     # column default in rca_store.init_db.
     excluded_from_lookup: int = 0
+    # 2026-06-12 (finding #3) — the exemplar archetype the prompt builder
+    # selected for this decision + its match score. Threaded from
+    # llm_client._build_prompt (via LLMDecision) so each decision records WHICH
+    # archetype it used. Nullable; old rows stay NULL (no backfill).
+    exemplar_id: Optional[str] = None
+    exemplar_score: Optional[float] = None
 
 
 # --- Health ---

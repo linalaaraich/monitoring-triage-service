@@ -5501,6 +5501,7 @@ async def dashboard_sprint5_stats():
     escalated = agg.get("escalated_services", [])
     families = agg.get("verdict_by_family", [])
     fp = agg.get("false_positive", {})
+    archetypes = agg.get("archetypes_used", [])
 
     now_tng = datetime.now(timezone.utc).astimezone(
         timezone(timedelta(hours=1))
@@ -5552,6 +5553,30 @@ async def dashboard_sprint5_stats():
     </table>"""
     else:
         families_html = "<div class='stats-empty'>No verdicts recorded in the last 7 days.</div>"
+
+    # ── RCA archetypes used (finding #3) — exemplar_id, count, actionable-rate.
+    if archetypes:
+        arch_rows = []
+        for a in archetypes:
+            rate = a.get("actionable_rate")
+            rate_disp = f"{rate * 100:.0f}%" if rate is not None else "—"
+            arch_rows.append(f"""
+        <tr>
+          <td class="stats-fam-name">{_esc(a.get("exemplar_id"))}</td>
+          <td class="stats-fam-total">{int(a.get("count", 0))}</td>
+          <td class="stats-fam-total">{rate_disp}</td>
+        </tr>""")
+        archetypes_html = f"""
+    <table class="stats-table">
+      <thead><tr><th>Archetype (exemplar id)</th><th>Used</th><th>Actionable rate</th></tr></thead>
+      <tbody>{"".join(arch_rows)}
+      </tbody>
+    </table>"""
+    else:
+        archetypes_html = (
+            "<div class='stats-empty'>No archetype usage recorded in the last 7 days yet "
+            "&mdash; this fills in as new decisions record which exemplar they used.</div>"
+        )
 
     # ── False-positive proxy card.
     if fp.get("wired"):
@@ -5687,6 +5712,11 @@ async def dashboard_sprint5_stats():
         <div class="stats-card__title">Verdict mix per alert family</div>
         <div class="stats-card__q">How each alert family was triaged (top 10 by fires).</div>
         {families_html}
+      </div>
+      <div class="stats-card stats-card--wide">
+        <div class="stats-card__title">RCA archetypes used (7d)</div>
+        <div class="stats-card__q">Which exemplar archetype the prompt builder selected per decision, and how often that decision came out actionable. Answers "which archetypes actually help".</div>
+        {archetypes_html}
       </div>
       <div class="stats-card">
         <div class="stats-card__title">False-positive proxy</div>

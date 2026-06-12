@@ -28,7 +28,11 @@ Match scoring:
   - signal match           (+0.20)
   - severity match         (+0.10)
 
-Highest score wins. Ties broken by library order (deterministic).
+Highest score wins. Ties are broken by an explicit integer `priority`
+field (higher wins), NOT by library order — see finding #4 (2026-06-12):
+relying on file position made selection fragile to reordering. Default
+priority is 0; archetypes that must win a positional tie carry a higher
+priority so reordering the YAML never changes which exemplar is selected.
 """
 from __future__ import annotations
 
@@ -71,6 +75,12 @@ def _load_library() -> dict[str, Any]:
         ex["_deployment_types"] = set(match.get("deployment_types") or [])
         ex["_signal"] = match.get("signal")
         ex["_severities"] = set(match.get("severity") or [])
+        # Finding #4 (2026-06-12): explicit integer tie-break, independent of
+        # YAML order. Higher priority wins when two exemplars score equal.
+        try:
+            ex["_priority"] = int(ex.get("priority", 0) or 0)
+        except (TypeError, ValueError):
+            ex["_priority"] = 0
     logger.info("Loaded %d exemplars from %s", len(exemplars), _LIBRARY_PATH)
     return {"exemplars": exemplars, "default": data.get("default")}
 
@@ -110,6 +120,54 @@ def _score_exemplar(
     return score
 
 
+def find_for_alert_scored(
+    alertname: str,
+    service: str = "",
+    deployment_type: str = "unknown",
+    signal: str = "",
+    severity: str = "warning",
+) -> tuple[dict[str, Any] | None, float]:
+    """Like find_for_alert but also returns the selection score.
+
+    Returns (exemplar, score). The score is 0.0 when the default is
+    returned (no exemplar's alertname regex matched). Used by the pipeline
+    to persist (exemplar_id, exemplar_score) on each decision — finding #3.
+
+    Tie-break (finding #4): when two exemplars score equal, the one with the
+    higher `priority` integer wins. Ties on (score, priority) fall back to the
+    exemplar id (lexicographic) purely so selection is fully deterministic and
+    independent of YAML file order.
+    """
+    lib = _load_library()
+    exemplars = lib.get("exemplars") or []
+    default = lib.get("default")
+
+    best_ex: dict[str, Any] | None = None
+    best_key: tuple[float, int, str] | None = None
+    for ex in exemplars:
+        s = _score_exemplar(ex, alertname, service, deployment_type, signal, severity)
+        if s <= 0.0:
+            continue  # alertname regex didn't match — not eligible
+        # Higher score wins; ties → higher priority; then lower id (stable).
+        key = (s, ex.get("_priority", 0), _neg_id(ex.get("id", "")))
+        if best_key is None or key > best_key:
+            best_key = key
+            best_ex = ex
+
+    if best_ex is None:
+        return default, 0.0
+    return best_ex, float(best_key[0]) if best_key else 0.0
+
+
+def _neg_id(s: str) -> str:
+    """Stable tie-break helper: we want a *lower* id to win the final tie, so
+    invert the comparison by returning a string that sorts in reverse. Python
+    tuples compare element-wise ascending and we keep `key > best_key`, so to
+    make the smaller id win we negate via a reversed-codepoint transform.
+    Kept tiny + total-order-preserving (per-char complement)."""
+    return "".join(chr(0x10FFFF - ord(c)) for c in s)
+
+
 def find_for_alert(
     alertname: str,
     service: str = "",
@@ -123,23 +181,10 @@ def find_for_alert(
     All inputs are strings (no app-internal types) so this can be called from
     the prompt builder, the MCP server, and tests without import cycles.
     """
-    lib = _load_library()
-    exemplars = lib.get("exemplars") or []
-    default = lib.get("default")
-
-    best_score = 0.0
-    best_ex: dict[str, Any] | None = None
-    for ex in exemplars:
-        s = _score_exemplar(ex, alertname, service, deployment_type, signal, severity)
-        if s > best_score:
-            best_score = s
-            best_ex = ex
-
-    # If nothing matched the alertname regex at all, fall back to default
-    if best_ex is None:
-        return default
-
-    return best_ex
+    ex, _score = find_for_alert_scored(
+        alertname, service, deployment_type, signal, severity
+    )
+    return ex
 
 
 def format_for_prompt(exemplar: dict[str, Any] | None) -> str:
@@ -250,6 +295,7 @@ def get_by_id(exemplar_id: str) -> dict[str, Any] | None:
 
 __all__ = [
     "find_for_alert",
+    "find_for_alert_scored",
     "format_for_prompt",
     "list_all",
     "get_by_id",
