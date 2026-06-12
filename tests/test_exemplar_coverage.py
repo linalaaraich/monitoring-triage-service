@@ -59,14 +59,12 @@ _SYNTHETIC_ALERTNAMES = [
 # generic rule is a CONSCIOUS choice recorded here, not silent drift. Adding a
 # rule to this set must come with a rationale comment.
 INTENTIONAL_DEFAULT = {
-    # 2026-06-12 (finding #5): adaptive-threshold-noop was deleted (the
-    # platform's adaptive rules became static thresholds 2026-06-03), so the
-    # High/Medium CPU family no longer has a DISMISS-seasonal archetype. The
-    # generic three-pillar default is the correct shape for "CPU is high" until
-    # a dedicated CPU-saturation archetype is justified by real incidents.
-    "HighCpuUsage",
-    "MediumCpuUsage",
-    "PodHighCpuUsage",
+    # 2026-06-12: the High/Medium CPU family was briefly waived here when the
+    # stale adaptive-threshold-noop archetype was deleted — then immediately
+    # given a proper `warning-resource-saturation` archetype (finding #1: don't
+    # leave common rules on the generic default). No standing waivers: every
+    # live rule now maps to a real archetype. Add an entry here ONLY with a
+    # written rationale if a genuinely-generic rule appears.
 }
 
 _TITLE_RE = re.compile(r"^\s*title:\s*(\S+)\s*$")

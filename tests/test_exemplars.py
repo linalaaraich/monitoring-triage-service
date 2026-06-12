@@ -152,7 +152,7 @@ def test_list_all_returns_all_exemplars():
     items = ex.list_all()
     # 2026-06-12 (findings #1/#5): -adaptive-threshold-noop (deleted, stale
     # fiction) +workload-replica-deficit +demo-frontend-downstream-latency.
-    assert len(items) == 16
+    assert len(items) == 17
     ids = {item["id"] for item in items}
     assert "workload-replica-deficit" in ids
     assert "demo-frontend-downstream-latency" in ids

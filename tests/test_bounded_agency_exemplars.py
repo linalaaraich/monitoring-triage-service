@@ -53,7 +53,7 @@ async def test_execute_list_exemplars_returns_catalogue():
     assert "result" in result
     items = result["result"]
     assert isinstance(items, list)
-    assert len(items) == 16  # 2026-06-12: -adaptive-threshold-noop +workload-replica-deficit +demo-frontend-downstream-latency
+    assert len(items) == 17  # 2026-06-12: -adaptive-threshold-noop +workload-replica-deficit +demo-frontend-downstream-latency
     # Each item should have the catalogue shape (id + archetype + gist)
     sample = items[0]
     assert "id" in sample

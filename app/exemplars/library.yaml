@@ -209,6 +209,50 @@ exemplars:
     lesson: "Critical-severity resource alerts mean the customer is in pain. Name a specific failing resource (cgroup memory cap, JVM heap default, CPU throttle), not 'the system is stressed'. Resize, rollback, or scale — match the action to the named cause."
     doc_anchor: "scenario-1--spring-boot-oom-kill-loop-caught-in-a-single-cycle"
 
+  - id: warning-resource-saturation
+    # 2026-06-12 (Lina exemplar audit, finding #1): High/Medium Cpu/Memory
+    # were orphaned to generic-sre-shape when the stale adaptive-threshold-noop
+    # was removed. This is the warning-tier analogue of critical-resource-
+    # saturation: name WHAT is hot and whether it's sustained — a CPU/memory
+    # rise that has not yet hit the critical ceiling. Numberless by design.
+    archetype: "Warning-tier CPU / memory rise on a service or node — name the hot component"
+    match:
+      alertname: "^(Pod)?(High|Medium)(Cpu|Memory)Usage$"
+      services: ["employees-backend", "employees-db", "employees-gateway", "spring-boot", "spring-boot-app", "springboot-app", "kong", "frontend", "k3s-node", "monitoring-vm"]
+      deployment_types: ["k8s", "systemd"]
+      signal: "metric"
+      severities: ["warning"]
+    priority: 0
+    decision: "ESCALATE"
+    confidence_band: "0.55-0.85"
+    one_line: "A CPU or memory rise crossed the warning bar — name the hottest container/process and whether it is sustained or a transient spike."
+    human_cause: "<service> CPU has been above the warning threshold for <N> minutes — the <component> process is the dominant consumer; not yet critical but trending up."
+    rca: |
+      A resource crossed the WARNING bar — below the critical ceiling, so the
+      task is to name what is consuming it and whether it is sustained (a real
+      trend that will page soon) or a transient spike (a batch job, a deploy
+      warm-up, a GC pause). For CPU: identify the hottest container from
+      per-container usage, and check cpu_cfs_throttled to tell cgroup throttling
+      from genuine host demand. For memory: compare working_set against the
+      limit to gauge headroom before the critical/OOM line. Cross-reference
+      logs for a triggering event (a flood, a slow query storm, a leak) and
+      traces for whether the load originates from this service's own request
+      handling vs a neighbour. A warning that is transient and self-resolving
+      can be monitored; one that is sustained and climbing should be sized
+      (raise headroom / scale) before it reaches the critical tier.
+    evidence_shape:
+      - "Per-container CPU/memory usage — which container/process is hottest"
+      - "container_cpu_cfs_throttled_seconds_total — cgroup throttle vs host demand"
+      - "working_set vs limit — headroom before the critical/OOM line"
+      - "Loki: a triggering event (flood, query storm, leak) in the window?"
+      - "Is it sustained across the window or a single-scrape spike?"
+    actions_shape:
+      - "Identify the hottest container before acting — do not blanket-restart"
+      - "If sustained + climbing: raise the resource ceiling or scale the deployment"
+      - "If a transient spike that self-resolved: monitor, no remediation"
+    lesson: "A warning-tier resource alert is a chance to act BEFORE the critical page. Name the hot component and judge sustained-vs-spike; only act if it's a real trend."
+    doc_anchor: "scenario-1--spring-boot-oom-kill-loop-caught-in-a-single-cycle"
+
   - id: otel-collector-degradation
     # F-5 fix (audit 2026-04-28 PM): both OTel collector alert rules
     # (OTelCollectorHighSpanDropRate, OTelCollectorDown) had no exemplar.
