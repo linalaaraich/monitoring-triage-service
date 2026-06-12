@@ -4,7 +4,11 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # Ollama
     ollama_url: str = "http://ollama:11434"
-    ollama_model: str = "llama3.1:8b"
+    # 2026-06-12: default aligned to the live deployment (qwen2.5:14b since
+    # the 05-21 GPU migration; compose/ansible set it explicitly, but the
+    # in-code fallback should match reality — flagged by the architecture
+    # deep-dive as a code-vs-live drift).
+    ollama_model: str = "qwen2.5:14b"
     ollama_timeout: int = 300
     ollama_request_timeout: int = 30
     # 2026-06-10: context window for every chat call. Was a hardcoded 16384 —

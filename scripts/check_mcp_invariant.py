@@ -10,8 +10,9 @@ What this lint catches
 1. Direct connection strings to raw observability stack ports
      :9090 (Prometheus), :3100 (Loki), :16686 (Jaeger) — anywhere in app/.
      The MCP path is :8091 (prom-mcp), :8092 (loki-mcp), :8093 (jaeger-mcp),
-     :8095 (rca-history-mcp). If you need to talk to Prometheus, talk to
-     the MCP — never to Prometheus directly.
+     :8094 (drain3-mcp), :8095 (rca-history-mcp), :8096 (deploy-mcp). If you
+     need to talk to Prometheus, talk to the MCP — never to Prometheus
+     directly.
 
 2. Direct `import aiosqlite` outside the canonical writer (rca_store.py)
      and boot-time code (main.py lifespan). Read paths must go through
