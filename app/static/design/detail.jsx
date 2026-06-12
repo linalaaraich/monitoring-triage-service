@@ -174,8 +174,7 @@ function HistorySection({ a }) {
               return clickable
                 ? <a key={i} href={`/dashboard/alert/${h.id}`} style={{ textDecoration: "none", color: "inherit", display: "block" }} className="hist-link">{Row}</a>
                 : <div key={i}>{Row}</div>;
-            })
-            ))}
+            })}
           </div>
         )}
       </div>

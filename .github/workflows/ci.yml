@@ -41,5 +41,13 @@ jobs:
       - name: MCP-only invariant lint
         run: python scripts/check_mcp_invariant.py
 
+      # A .jsx syntax error blanks every page that loads the file while
+      # still returning HTTP 200 (browser-side Babel compile failure) —
+      # see test_jsx_compile_gate.py for the 2026-06-12 incident.
+      - name: JSX compile gate
+        run: |
+          npm install --no-save @babel/standalone
+          NODE_PATH=node_modules node scripts/check_jsx_compiles.js
+
       - name: pytest
         run: python -m pytest tests/ -q
