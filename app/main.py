@@ -144,6 +144,7 @@ async def lifespan(app: FastAPI):
     _context_gatherer = ContextGatherer()
     _llm_client = LLMClient()
     notifier = EmailNotifier()
+    notifier.store = _store  # operator-managed recipient list (2026-06-12)
     dedup = DedupManager(window_seconds=settings.dedup_window_seconds)
 
     _pipeline = TriagePipeline(
@@ -341,6 +342,46 @@ async def drain3_stats(service: str | None = Query(None)):
 # updates the row in place rather than creating a duplicate. This is so
 # the operator can change their mind via the same call without polluting
 # the metrics.
+
+# --- Notification recipients API (2026-06-12, Lina) — operator-managed ------
+import re as _re_email
+_EMAIL_RE = _re_email.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+from pydantic import BaseModel as _RcptBaseModel
+
+
+class RecipientRequest(_RcptBaseModel):
+    email: str
+    label: str | None = None
+
+
+@app.get("/api/recipients")
+async def api_list_recipients() -> dict:
+    """Recipients the escalation emails go to: the env baseline (always on) +
+    the operator-managed list."""
+    db = await _store.list_recipients() if _store else []
+    from app.notifier import EmailNotifier
+    baseline = EmailNotifier._parse_emails(settings.notification_email)
+    return {"baseline": baseline, "managed": db}
+
+
+@app.post("/api/recipients", status_code=201)
+async def api_add_recipient(req: RecipientRequest) -> dict:
+    email = (req.email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=422, detail=f"not a valid email: {req.email!r}")
+    await _store.add_recipient(email, req.label)
+    return {"ok": True, "email": email}
+
+
+@app.delete("/api/recipients/{email}")
+async def api_remove_recipient(email: str) -> dict:
+    n = await _store.remove_recipient(email)
+    if n == 0:
+        raise HTTPException(status_code=404, detail=f"recipient not found: {email!r}")
+    return {"ok": True, "removed": email}
+
 
 @app.post("/feedback/override", status_code=201)
 async def feedback_override(req: FeedbackRequest) -> FeedbackResponse:
@@ -3546,6 +3587,7 @@ async def dashboard_v2_kpi():
       <div class="kpi-sidebar__group-label">Configuration</div>
       <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
       <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard/settings">Settings</a>
       <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
     </div>
   </aside>"""
@@ -3853,6 +3895,7 @@ async def dashboard_v2_services():
       <div class="kpi-sidebar__group-label">Configuration</div>
       <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
       <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard/settings">Settings</a>
       <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
     </div>
   </aside>"""
@@ -4225,6 +4268,7 @@ async def dashboard_v2_alerts():
       <div class="kpi-sidebar__group-label">Configuration</div>
       <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/alerts">Alerts</a>
       <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard/settings">Settings</a>
       <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
     </div>
   </aside>"""
@@ -5182,6 +5226,7 @@ async def dashboard_sprint5_incidents():
       <div class="kpi-sidebar__group-label">Configuration</div>
       <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
       <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard/settings">Settings</a>
       <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
     </div>
   </aside>"""
@@ -5368,6 +5413,7 @@ async def dashboard_sprint5_anomalies():
       <div class="kpi-sidebar__group-label">Configuration</div>
       <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
       <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard/settings">Settings</a>
       <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
     </div>
   </aside>"""
@@ -5484,6 +5530,113 @@ async def dashboard_sprint5_anomalies():
 # proxy from the feedback table (verdict_was_right='no'). Same chrome /
 # tokens.css idiom as the KPI + services pages. Read-only via RCAStore —
 # MCP-invariant clean.
+@app.get("/dashboard/settings", response_class=HTMLResponse)
+async def dashboard_settings():
+    """2026-06-12 (Lina): operator settings — manage who receives the
+    escalation emails, editable here (no redeploy)."""
+    sidebar_html = """
+  <aside class="kpi-sidebar">
+    <div class="kpi-sidebar__brand">
+      <div class="kpi-sidebar__brand-mark"></div>
+      <div>
+        <div class="kpi-sidebar__brand-title">Observability</div>
+        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
+      </div>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Incident response</div>
+      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
+      <a class="kpi-sidebar__item" href="/dashboard/incidents">Incidents</a>
+      <a class="kpi-sidebar__item" href="/dashboard/anomalies">Anomalies</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Insights</div>
+      <a class="kpi-sidebar__item" href="/dashboard/stats">Stats</a>
+      <a class="kpi-sidebar__item" href="/dashboard/services">Services</a>
+      <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Configuration</div>
+      <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
+      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
+      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/settings">Settings</a>
+    </div>
+  </aside>"""
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Observability &middot; Settings</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/design/tokens.css"/>
+{_CIRES_THEME_HEAD_SCRIPT}
+<style>
+  body {{ margin:0; background:var(--bg,#0f1117); color:var(--text,#e8eaf2); font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
+  .kpi-shell {{ display:flex; min-height:100vh; }}
+  .kpi-main {{ flex:1; padding:32px 40px; max-width:760px; }}
+  h1 {{ font-size:22px; margin:0 0 4px; }}
+  .sub {{ color:var(--text-soft,#9aa3b8); font-size:13.5px; margin-bottom:22px; }}
+  .card {{ background:var(--card,#1a1d27); border:1px solid var(--border,#2a2d3a); border-radius:12px; padding:18px 22px; margin:16px 0; }}
+  .card h2 {{ font-size:14px; margin:0 0 10px; color:var(--accent-cyan,#5bc8d8); }}
+  .rcpt {{ display:flex; align-items:center; justify-content:space-between; padding:9px 12px; border:1px solid var(--border,#2a2d3a); border-radius:8px; margin:6px 0; background:var(--bg,#11131b); font-size:14px; }}
+  .rcpt .meta {{ color:var(--text-soft,#9aa3b8); font-size:12px; }}
+  .baseline {{ opacity:.7; }}
+  .pill {{ font-size:10.5px; font-weight:600; padding:1px 8px; border-radius:10px; border:1px solid var(--border,#2a2d3a); color:var(--text-soft,#9aa3b8); }}
+  button {{ font-family:inherit; cursor:pointer; border-radius:7px; border:1px solid var(--border,#2a2d3a); }}
+  .rm {{ background:rgba(224,96,112,.10); border-color:rgba(224,96,112,.4); color:#e06070; padding:4px 10px; font-size:12px; }}
+  .add {{ background:rgba(91,200,216,.15); border-color:rgba(91,200,216,.45); color:#9ad4f2; padding:8px 16px; font-size:13px; font-weight:500; }}
+  input {{ font-family:inherit; font-size:14px; padding:8px 11px; border-radius:7px; border:1px solid var(--border,#2a2d3a); background:var(--bg,#11131b); color:var(--text,#e8eaf2); }}
+  .row {{ display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }}
+  .msg {{ font-size:12.5px; margin-top:8px; min-height:16px; }}
+  a.back {{ color:var(--accent-cyan,#5bc8d8); font-size:13px; text-decoration:none; }}
+</style></head>
+<body>
+<div class="kpi-shell">
+  {sidebar_html}
+  <main class="kpi-main">
+    <a class="back" href="/dashboard">&larr; back to triage feed</a>
+    <h1 style="margin-top:14px">Escalation email recipients</h1>
+    <div class="sub">Everyone listed here receives the email when an alert escalates. Changes apply immediately — no redeploy.</div>
+    <div class="card">
+      <h2>Always-on (set at deploy time)</h2>
+      <div id="baseline"></div>
+    </div>
+    <div class="card">
+      <h2>Managed here</h2>
+      <div id="managed"></div>
+      <div class="row">
+        <input id="email" type="email" placeholder="name@cires.ma" style="flex:1; min-width:220px">
+        <input id="label" type="text" placeholder="label (optional, e.g. NOC)" style="flex:1; min-width:150px">
+        <button class="add" onclick="addRcpt()">Add recipient</button>
+      </div>
+      <div class="msg" id="msg"></div>
+    </div>
+  </main>
+</div>
+<script>
+async function load() {{
+  const r = await fetch('/api/recipients'); const d = await r.json();
+  document.getElementById('baseline').innerHTML = (d.baseline.length ? d.baseline : ['(none configured)']).map(function(e){{
+    return '<div class="rcpt baseline"><span>'+e+'</span><span class="pill">always-on</span></div>'; }}).join('');
+  const mg = document.getElementById('managed');
+  mg.innerHTML = d.managed.length ? d.managed.map(function(x){{
+    return '<div class="rcpt"><span>'+x.email+(x.label ? ' <span class="meta">· '+x.label+'</span>' : '')+'</span>'
+      + '<button class="rm" onclick="rm(\\''+x.email+'\\')">remove</button></div>'; }}).join('')
+    : '<div class="sub" style="margin:4px 0 0">No extra recipients yet — add one below.</div>';
+}}
+async function addRcpt() {{
+  const email = document.getElementById('email').value.trim();
+  const label = document.getElementById('label').value.trim();
+  const msg = document.getElementById('msg');
+  const r = await fetch('/api/recipients', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify({{email:email, label:label}})}});
+  if (r.ok) {{ document.getElementById('email').value=''; document.getElementById('label').value=''; msg.style.color='var(--accent-green,#6fd388)'; msg.textContent='Added \\u2713'; load(); }}
+  else {{ const e = await r.json().catch(function(){{return {{}};}}); msg.style.color='#e06070'; msg.textContent = (e && e.detail) || 'Could not add — check the address.'; }}
+}}
+async function rm(email) {{ const r = await fetch('/api/recipients/' + encodeURIComponent(email), {{method:'DELETE'}}); if (r.ok) load(); }}
+load();
+</script>
+</body></html>""")
+
+
 @app.get("/dashboard/stats", response_class=HTMLResponse)
 async def dashboard_sprint5_stats():
     """Aggregate insight surface over the last 7 days."""
@@ -5615,6 +5768,7 @@ async def dashboard_sprint5_stats():
       <div class="kpi-sidebar__group-label">Configuration</div>
       <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
       <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
+      <a class="kpi-sidebar__item" href="/dashboard/settings">Settings</a>
       <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
     </div>
   </aside>"""

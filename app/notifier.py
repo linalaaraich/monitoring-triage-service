@@ -366,6 +366,37 @@ _EMAIL_CSS = """
 
 
 class EmailNotifier:
+    # Set at startup (main.py) so _send can read the operator-managed
+    # recipient list. None → env baseline only.
+    store = None
+
+    @staticmethod
+    def _parse_emails(raw: str) -> list[str]:
+        """Split a comma/semicolon/whitespace-separated address string into a
+        clean, de-duplicated, lowercased list."""
+        import re as _re
+        out, seen = [], set()
+        for part in _re.split(r"[,;\s]+", (raw or "").strip()):
+            e = part.strip().lower()
+            if e and "@" in e and e not in seen:
+                seen.add(e)
+                out.append(e)
+        return out
+
+    async def _resolve_recipients(self) -> list[str]:
+        recipients = self._parse_emails(settings.notification_email)
+        seen = set(recipients)
+        if self.store is not None:
+            try:
+                for r in await self.store.list_recipients():
+                    e = (r.get("email") or "").strip().lower()
+                    if e and "@" in e and e not in seen:
+                        seen.add(e)
+                        recipients.append(e)
+            except Exception as exc:
+                logger.warning("Could not load DB recipients (using env only): %s", exc)
+        return recipients
+
     async def send_escalation(
         self,
         alert: GrafanaAlert,
@@ -881,10 +912,20 @@ class EmailNotifier:
             triage_email_sent_total.labels(status="skipped").inc()
             return
 
+        # 2026-06-12 (Lina): recipients = the env baseline (notification_email,
+        # which may itself be a comma-separated list) UNION the operator-managed
+        # list in the DB (editable from the dashboard, no redeploy). Falls back
+        # to the env value alone if the store is unavailable.
+        recipients = await self._resolve_recipients()
+        if not recipients:
+            logger.warning("No notification recipients configured — skipping email send")
+            triage_email_sent_total.labels(status="skipped").inc()
+            return
+
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = settings.smtp_from
-        msg["To"] = settings.notification_email
+        msg["To"] = ", ".join(recipients)
         msg.attach(MIMEText(html_body, "html"))
 
         try:
@@ -895,6 +936,7 @@ class EmailNotifier:
                 username=settings.smtp_user,
                 password=settings.smtp_password,
                 start_tls=True,
+                recipients=recipients,
             )
             logger.info("Email sent: %s", subject)
             triage_email_sent_total.labels(status="sent").inc()

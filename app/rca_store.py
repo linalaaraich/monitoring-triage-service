@@ -104,6 +104,17 @@ CREATE_INCIDENTS_INDEX_LAST_SEEN = """
 CREATE INDEX IF NOT EXISTS idx_incidents_last_seen ON incidents(last_seen)
 """
 
+# 2026-06-12 (Lina): operator-managed escalation email recipients, editable
+# from the dashboard (no redeploy). The env `notification_email` stays as a
+# baseline default; rows here are ADDITIONAL recipients (the union is mailed).
+CREATE_RECIPIENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS notification_recipients (
+    email TEXT PRIMARY KEY,
+    label TEXT,
+    added_at TEXT NOT NULL
+)
+"""
+
 
 def _duration_seconds(first_seen: str | None, last_seen: str | None) -> int:
     """Whole-seconds span between two bare-ISO timestamps. 0 if either is
@@ -301,6 +312,7 @@ class RCAStore:
         await self._db.execute(CREATE_INCIDENTS_TABLE)
         await self._db.execute(CREATE_INCIDENTS_INDEX_FINGERPRINT)
         await self._db.execute(CREATE_INCIDENTS_INDEX_LAST_SEEN)
+        await self._db.execute(CREATE_RECIPIENTS_TABLE)
 
         await self._db.commit()
         logger.info("RCA history database initialized at %s", self.db_path)
@@ -1276,6 +1288,31 @@ class RCAStore:
             decision_id, feedback_type, active_until,
         )
         return dict(row)
+
+    # --- Notification recipients (operator-managed, 2026-06-12) -------------
+    async def list_recipients(self) -> list[dict]:
+        cursor = await self._db.execute(
+            "SELECT email, label, added_at FROM notification_recipients ORDER BY added_at"
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def add_recipient(self, email: str, label: str | None = None) -> None:
+        from datetime import datetime, timezone
+        await self._db.execute(
+            "INSERT OR REPLACE INTO notification_recipients (email, label, added_at) "
+            "VALUES (?, ?, ?)",
+            (email.strip().lower(), (label or "").strip() or None,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        await self._db.commit()
+
+    async def remove_recipient(self, email: str) -> int:
+        cursor = await self._db.execute(
+            "DELETE FROM notification_recipients WHERE email = ?",
+            (email.strip().lower(),),
+        )
+        await self._db.commit()
+        return cursor.rowcount
 
     async def feedback_ids_for(self, decision_ids: list[str]) -> set:
         """2026-06-12 (Lina): which of these decisions have an operator review

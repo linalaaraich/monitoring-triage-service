@@ -36,6 +36,7 @@ const NAV_GROUPS = [
     items: [
       { id: "alerts-cfg",   label: "Alerts",        icon: "alerts",       href: "/dashboard/alerts" },
       { id: "drain3",       label: "Drain3 engine", icon: "drain3",       href: "/dashboard/drain3" },
+      { id: "settings",     label: "Settings",      icon: "integrations", href: "/dashboard/settings" },
       { id: "integrations", label: "Integrations",  icon: "integrations", href: "/dashboard/integrations" },
     ],
   },
