@@ -5572,6 +5572,17 @@ async def dashboard_settings():
 <style>
   body {{ margin:0; background:var(--bg,#0f1117); color:var(--text,#e8eaf2); font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
   .kpi-shell {{ display:flex; min-height:100vh; }}
+  /* sidebar CSS (shared with the other secondary pages) */
+  .kpi-sidebar {{ width: 224px; flex-shrink: 0; background: var(--bg-soft, #13151e); border-right: 1px solid var(--border, #2a2d3a); padding: 0 0 14px; display: flex; flex-direction: column; }}
+  .kpi-sidebar__brand {{ display: flex; align-items: center; gap: 10px; padding: 14px 14px 14px 16px; border-bottom: 1px solid var(--border); height: 60px; }}
+  .kpi-sidebar__brand-mark {{ width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, #4ea8de, #b07ee8); flex-shrink: 0; }}
+  .kpi-sidebar__brand-title {{ font-size: 13.5px; font-weight: 600; color: var(--text); }}
+  .kpi-sidebar__brand-sub {{ font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }}
+  .kpi-sidebar__group {{ padding: 12px; margin-bottom: 6px; }}
+  .kpi-sidebar__group-label {{ font-size: 10px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.12em; padding: 0 12px 6px; font-weight: 600; }}
+  .kpi-sidebar__item {{ display: block; padding: 8px 12px; border-radius: 8px; text-decoration: none; color: var(--text-soft); font-size: 13px; transition: background .12s; }}
+  .kpi-sidebar__item:hover {{ background: var(--card-hi); color: var(--text); }}
+  .kpi-sidebar__item--active {{ background: var(--card-hi); color: var(--text); border: 1px solid var(--border-hi); font-weight: 500; box-shadow: inset 2.5px 0 0 var(--accent-blue); }}
   .kpi-main {{ flex:1; padding:32px 40px; max-width:760px; }}
   h1 {{ font-size:22px; margin:0 0 4px; }}
   .sub {{ color:var(--text-soft,#9aa3b8); font-size:13.5px; margin-bottom:22px; }}
