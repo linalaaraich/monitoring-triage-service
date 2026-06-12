@@ -17,6 +17,17 @@ class Settings(BaseSettings):
     # on the A10G (12.1/23GB used at 16K).
     ollama_num_ctx: int = 32768
 
+    # 2026-06-12 (Lina design decision): the archetype score-gate. An exemplar
+    # is only injected as a "match this structure" template when it actually
+    # FITS — score >= this floor. A score of 0.10 means only the alert NAME
+    # matched (the archetype's service/signal/deployment all differ) — a weak
+    # fit that could drag the RCA toward a wrong shape. Below the floor we fall
+    # back to the neutral generic-sre-shape default (a quality bar, not a
+    # category), so a poor match can never make the output worse than the
+    # honest baseline. 0.25 keeps every genuine fit (>=0.30: signal/service
+    # matched; strong fits score 0.7-1.1) and rejects bare-alertname-only ones.
+    exemplar_min_fit_score: float = 0.25
+
     # Circuit breaker
     circuit_breaker_failure_threshold: int = 5
     circuit_breaker_cooldown_seconds: int = 60

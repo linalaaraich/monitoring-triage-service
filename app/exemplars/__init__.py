@@ -156,7 +156,30 @@ def find_for_alert_scored(
 
     if best_ex is None:
         return default, 0.0
-    return best_ex, float(best_key[0]) if best_key else 0.0
+
+    best_score = float(best_key[0]) if best_key else 0.0
+    # 2026-06-12 (Lina design decision): the score-gate. A weak fit (only the
+    # alert name matched — the archetype was written for a different
+    # service/signal/deployment) must NOT be presented as "match this
+    # structure", or it can drag the RCA toward the wrong shape. Below the
+    # fit floor, step back to the neutral default (a quality bar, not a
+    # category) so a poor match can never make the output worse than the honest
+    # baseline. The cause always comes from evidence regardless; this only
+    # decides whether a SHAPE template is trustworthy enough to show.
+    try:
+        from app.config import settings as _settings
+        floor = float(getattr(_settings, "exemplar_min_fit_score", 0.25))
+    except Exception:
+        floor = 0.25
+    if best_score < floor:
+        logger.info(
+            "Exemplar score-gate: best match %r scored %.2f < %.2f for "
+            "alertname=%s service=%s signal=%s — using neutral default "
+            "(weak fit, not a trustworthy shape template).",
+            best_ex.get("id"), best_score, floor, alertname, service, signal,
+        )
+        return default, 0.0
+    return best_ex, best_score
 
 
 def _neg_id(s: str) -> str:

@@ -422,3 +422,35 @@ def test_history_entries_are_clickable_and_flag_reviews():
     assert by_id["pppppppp"]["hasFeedback"] is True
     assert by_id["gggggggg"]["investigated"] is False
     assert by_id["gggggggg"]["hasFeedback"] is False
+
+
+# --- 2026-06-12: archetype score-gate (Lina design decision) ------------------
+
+def test_score_gate_keeps_strong_fits():
+    """A genuine fit (score >= floor) keeps its archetype — the gate must not
+    discard useful calibration."""
+    from app.exemplars import find_for_alert_scored
+    for an, sv, sig, sev in [
+        ("KubeWorkloadDown", "ad", "metric", "critical"),
+        ("PodCrashLooping", "image-provider", "metric", "warning"),
+        ("MediumCpuUsage", "k3s-node", "metric", "warning"),
+    ]:
+        ex, sc = find_for_alert_scored(an, sv, "k8s", sig, sev)
+        assert ex.get("id") != "generic-sre-shape", f"{an} wrongly gated (score {sc})"
+        assert sc >= 0.25
+
+
+def test_score_gate_rejects_weak_alertname_only_fit():
+    """A bare-alertname match (archetype written for a different
+    service/signal/deployment) is a weak fit and must fall back to the neutral
+    default — never presented as 'match this structure'."""
+    from app.exemplars import find_for_alert_scored
+    ex, sc = find_for_alert_scored("HighP95Latency", "nonexistent-svc", "unknown", "", "warning")
+    assert ex.get("id") == "generic-sre-shape"
+    assert sc == 0.0
+
+
+def test_score_gate_threshold_is_configurable():
+    from app.config import settings
+    assert hasattr(settings, "exemplar_min_fit_score")
+    assert 0.0 < settings.exemplar_min_fit_score < 0.7
