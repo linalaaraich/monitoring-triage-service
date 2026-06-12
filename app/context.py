@@ -653,6 +653,11 @@ class ContextGatherer:
         # it is VISIBLE whether pass #1 had the full correlated picture, rather
         # than a silent missing pillar.
         _has_metrics = (not _prom_result_empty(ctx.metrics)) if ctx.metrics else False
+        # Count RAW logs too, not just the drain3-annotated subset — the model
+        # reasons over both, so an "annotated-only" check undercounts (2026-06-12
+        # live: a latency RCA cross-referenced frontend error logs that this line
+        # had reported as logs=False because they weren't drain3-annotated).
+        _has_logs = bool(ctx.annotated_logs) or bool(ctx.logs)
         _trace_list = (
             ctx.traces.get("traces", []) if isinstance(ctx.traces, dict)
             else (ctx.traces or [])
@@ -662,7 +667,7 @@ class ContextGatherer:
             "Investigation completeness for %s/%s: metrics=%s logs=%s traces=%s "
             "deep_trace=%s spans=%d",
             alert.alertname, alert.service,
-            _has_metrics, bool(ctx.annotated_logs), bool(_trace_list),
+            _has_metrics, _has_logs, bool(_trace_list),
             bool(ctx.deep_trace), _deep_n,
         )
         return ctx
