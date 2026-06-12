@@ -81,6 +81,22 @@ class Settings(BaseSettings):
     # within a 15-minute window. 10 minutes caps the cascade at ~3 fires.
     triage_history_lookback_minutes: int = 10
 
+    # 2026-06-12 critical-flap suppression. Criticals NEVER Layer-2 suppress
+    # on a fresh outage (e10e341d: a new outage must page even if the prior
+    # recovery was dismissed within lookback). But severity alone is the
+    # wrong key for an ESTABLISHED FLAPPER: TargetDown blips burned 67 full
+    # GPU investigations in ~36h, every one honestly dismissed. A critical
+    # fingerprint is treated as a flapper only after `dismiss_threshold`
+    # honest LLM dismissals within `window_minutes` AND the most recent
+    # investigated verdict was a dismiss (an escalate = regime change →
+    # always investigate). While flapping, every `sample_every`-th fire is
+    # still fully investigated so a flapper that turns into a real outage is
+    # caught within sample_every-1 fires.
+    critical_flap_suppression_enabled: bool = True
+    critical_flap_dismiss_threshold: int = 3
+    critical_flap_window_minutes: int = 360
+    critical_flap_sample_every: int = 4
+
     # DA-3 — cross-row verdict coherence. When a NON-duplicate fire happens
     # for a fingerprint that had a prior decision within this window, the
     # pipeline fetches that prior decision's cause + RCA and injects it into

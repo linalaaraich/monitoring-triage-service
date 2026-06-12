@@ -909,6 +909,10 @@ async def test_layer2_suppression_never_silences_criticals(crashloop_store):
     pipeline.store.get_recent_decision_for_alert = AsyncMock(
         return_value={"llm_verdict": "dismiss", "triage_decision": "investigate"}
     )
+    # 2026-06-12: criticals now route through _check_critical_flap. One
+    # recovery-dismiss is below the flap streak threshold, so the original
+    # guarantee — a fresh critical outage is never silenced — must hold.
+    pipeline.store.count_recent_decisions_by_fingerprint = AsyncMock(return_value=1)
     crit = _crashloop_alert(severity="critical")
     assert crit.severity == "critical"
     assert await pipeline._check_suppression(crit) is None

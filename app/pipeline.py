@@ -460,7 +460,11 @@ class TriagePipeline:
         suppression_reason = await self._check_suppression(alert)
         if suppression_reason is not None:
             elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
-            alerts_suppressed.labels(reason=suppression_reason).inc()
+            # Label with the short key only — critical_flap reasons carry
+            # varying counts in the prose, which must not become label values.
+            alerts_suppressed.labels(
+                reason=suppression_reason.split(":", 1)[0]
+            ).inc()
             logger.info(
                 "Alert %s SUPPRESSED pre-LLM: %s (%dms)",
                 alert.alertname, suppression_reason, elapsed_ms,
@@ -562,15 +566,19 @@ class TriagePipeline:
         """
         if not settings.triage_suppression_enabled:
             return None
-        # 2026-06-11: criticals NEVER Layer-2 suppress. Live finding
-        # (decision e10e341d): a critical KubeWorkloadDown re-fire was
-        # silenced because the PREVIOUS outage's recovery investigation had
-        # dismissed ("condition resolved") within the lookback — so a brand-
-        # new critical outage produced no page. Mirrors the 111ea41 stress
-        # fix that exempted criticals from the shelved-in-disguise gate:
-        # noise control is for noise, not for criticals.
+        # 2026-06-11: criticals NEVER Layer-2 suppress on a FRESH outage.
+        # Live finding (decision e10e341d): a critical KubeWorkloadDown
+        # re-fire was silenced because the PREVIOUS outage's recovery
+        # investigation had dismissed ("condition resolved") within the
+        # lookback — so a brand-new critical outage produced no page.
+        # 2026-06-12: scoped to fresh-outage shapes. An ESTABLISHED FLAPPER
+        # (TargetDown deploy/scrape blips: 67 honest dismissals in ~36h,
+        # each a full GPU investigation) is suppressed after a dismissal
+        # streak, with every Nth fire sampled through — see
+        # _check_critical_flap. Noise control is for noise; a fingerprint
+        # with no recent dismissal streak still always investigates.
         if (alert.severity or "").lower() == "critical":
-            return None
+            return await self._check_critical_flap(alert)
         recent = await self.store.get_recent_decision_for_alert(
             alert_name=alert.alertname,
             affected_service=alert.service,
@@ -585,6 +593,67 @@ class TriagePipeline:
         if triage_decision == "triage_suppressed":
             return "recent_suppressed_history"
         return None
+
+    async def _check_critical_flap(self, alert: GrafanaAlert) -> str | None:
+        """Critical-flap suppression (2026-06-12).
+
+        A critical alert is suppressed ONLY when all of these hold:
+          1. Its fingerprint accumulated >= critical_flap_dismiss_threshold
+             honest LLM dismissals within critical_flap_window_minutes —
+             the flapper is established by repeated real investigations,
+             never assumed.
+          2. The most recent investigated verdict was a dismiss. An escalate
+             (or anything else) means the regime changed — investigate.
+          3. Fewer than critical_flap_sample_every - 1 fires were suppressed
+             since that last investigation. The next fire after that goes
+             through, so a flapper that turns into a real outage is fully
+             investigated within sample_every - 1 fires.
+
+        A fresh critical outage (no recent dismissal streak) hits none of
+        these and always investigates — the e10e341d guarantee holds.
+        """
+        if not settings.critical_flap_suppression_enabled:
+            return None
+        if not alert.fingerprint:
+            return None
+        window_minutes = settings.critical_flap_window_minutes
+        dismisses = await self.store.count_recent_decisions_by_fingerprint(
+            fingerprint=alert.fingerprint,
+            llm_verdict="dismiss",
+            window_seconds=window_minutes * 60,
+        )
+        if dismisses < settings.critical_flap_dismiss_threshold:
+            return None
+        last = await self.store.get_last_investigated_for_fingerprint(
+            alert.fingerprint, window_minutes
+        )
+        if not last or (last.get("llm_verdict") or "").lower() != "dismiss":
+            return None
+        suppressed_since = await self.store.count_suppressed_rows_since(
+            alert.fingerprint, last["timestamp"]
+        )
+        budget = max(1, settings.critical_flap_sample_every - 1)
+        if suppressed_since >= budget:
+            logger.info(
+                "Critical flap %s (fingerprint=%s): %d suppressions since the "
+                "last investigation — sampling this fire through to the LLM",
+                alert.alertname, alert.fingerprint[:12], suppressed_since,
+            )
+            return None
+        logger.info(
+            "Critical flap %s (fingerprint=%s): %d honest dismissals in the "
+            "last %d min — suppressing fire %d/%d before the next sampled "
+            "re-investigation",
+            alert.alertname, alert.fingerprint[:12], dismisses,
+            window_minutes, suppressed_since + 1, budget,
+        )
+        return (
+            f"critical_flap: established flapper — {dismisses} honest LLM "
+            f"dismissals of this fingerprint in the last {window_minutes} min "
+            f"and the latest verdict was a dismiss. Suppressing this fire "
+            f"({suppressed_since + 1}/{budget} before the next sampled "
+            f"re-investigation)."
+        )
 
     async def _investigate_and_act(
         self, alert: GrafanaAlert, source: str, pipeline_start: float,

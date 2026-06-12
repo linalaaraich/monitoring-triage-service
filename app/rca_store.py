@@ -1002,6 +1002,51 @@ class RCAStore:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def get_last_investigated_for_fingerprint(
+        self, fingerprint: str, window_minutes: int
+    ) -> dict | None:
+        """Most-recent row that carries a real LLM verdict for a fingerprint.
+
+        Unlike get_recent_decision_for_fingerprint (DA-3 coherence), this is
+        deliberately UNfiltered by rca_quality/verdict kind — critical-flap
+        suppression needs the true last investigation outcome, whatever its
+        quality, to decide whether the flapper's regime changed.
+        """
+        if not fingerprint:
+            return None
+        since = (_utc_now() - timedelta(minutes=window_minutes)).isoformat()
+        cursor = await self._db.execute(
+            """SELECT id, timestamp, llm_verdict
+               FROM rca_history
+               WHERE alert_fingerprint = ? AND timestamp > ?
+                 AND llm_verdict IS NOT NULL
+               ORDER BY timestamp DESC LIMIT 1""",
+            (fingerprint, since),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def count_suppressed_rows_since(
+        self, fingerprint: str, since_timestamp: str
+    ) -> int:
+        """Count Layer-2-suppressed rows for a fingerprint after a timestamp.
+
+        Used by critical-flap suppression to sample: after sample_every-1
+        suppressions since the last real investigation, the next fire goes
+        through. Criticals can only reach triage_suppressed via the flap
+        path, so the triage_decision filter is sufficient.
+        """
+        if not fingerprint:
+            return 0
+        cursor = await self._db.execute(
+            """SELECT COUNT(*) AS n FROM rca_history
+               WHERE alert_fingerprint = ? AND timestamp > ?
+                 AND triage_decision = 'triage_suppressed'""",
+            (fingerprint, since_timestamp),
+        )
+        row = await cursor.fetchone()
+        return int(row["n"]) if row else 0
+
     async def get_recent_decision_for_family_scope(
         self,
         alertnames: list[str] | tuple[str, ...],
