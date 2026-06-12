@@ -32,6 +32,15 @@ from app import exemplars as ex
 # ---------------------------------------------------------------------------
 _ALERTRULES = Path("/root/monitoring-project/roles/grafana/templates/alertrules.yml.j2")
 
+
+def _alertrules_available() -> bool:
+    """Safe existence check — .exists() itself raises PermissionError when a
+    parent dir is untraversable (CI), which would crash collection."""
+    try:
+        return _ALERTRULES.exists()
+    except (OSError, PermissionError):
+        return False
+
 # Frozen snapshot of the live rule titles (2026-06-12). Used when the
 # monitoring-project repo is not available in the test environment.
 _SNAPSHOT_RULE_TITLES = [
@@ -76,9 +85,9 @@ def _live_rule_titles() -> list[str] | None:
     # be present-but-unreadable. Any access problem → fall back to the snapshot
     # below, so the coverage test runs everywhere; it reads the live file only
     # when it's actually available (local dev).
+    if not _alertrules_available():
+        return None
     try:
-        if not _ALERTRULES.exists():
-            return None
         text = _ALERTRULES.read_text()
     except (OSError, PermissionError):
         return None
@@ -146,7 +155,7 @@ def test_new_flagship_archetypes_cover_their_rules():
     assert "demo-frontend-downstream-latency" in _non_default_exemplar_matches("HighDemoFrontendP95Latency")
 
 
-@pytest.mark.skipif(not _ALERTRULES.exists(), reason="monitoring-project not checked out")
+@pytest.mark.skipif(not _alertrules_available(), reason="monitoring-project not checked out / unreadable")
 def test_snapshot_matches_live_rules():
     """When the live file IS present, the frozen snapshot must match it — so a
     new rule in monitoring-project can't pass the coverage guard merely because
