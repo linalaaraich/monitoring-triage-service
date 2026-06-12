@@ -289,3 +289,43 @@ def test_service_should_have_traces_predicate():
     assert _is_latency_or_error_alert(a)
     b = GrafanaAlert(status="firing", labels={"alertname": "KubeWorkloadDown"}, fingerprint="t")
     assert not _is_latency_or_error_alert(b)
+
+
+# --- 2026-06-12: baseline-completeness + investigate-before-inconclusive -------
+
+def test_retry_fires_on_inconclusive_and_low_confidence():
+    """A thin conclusion (inconclusive, or low-conf escalate) must trigger the
+    bounded-agency dig BEFORE settling — not 'throw its arms up' (Lina)."""
+    import inspect
+    from app.pipeline import TriagePipeline
+    src = inspect.getsource(TriagePipeline._investigate_and_act)
+    # the trigger must reference the thin-conclusion + latency-without-traces predicates
+    assert "_thin_conclusion" in src
+    assert "_latency_without_traces" in src
+    assert "Decision.INCONCLUSIVE" in src
+
+
+def test_first_pass_prompt_has_correlated_picture_framing(monkeypatch):
+    from app.llm_client import LLMClient
+    from app.models import GatheredContext, GrafanaAlert
+    from unittest.mock import MagicMock
+    import asyncio
+    client = LLMClient.__new__(LLMClient)
+    cap = {}
+    async def fake(messages):
+        cap["m"] = messages
+        return None
+    client._call_ollama_with_resilience = fake
+    client._circuit = MagicMock()
+    a = GrafanaAlert(status="firing", labels={"alertname": "HighDemoFrontendP95Latency",
+        "service": "frontend", "severity": "warning"}, fingerprint="t")
+    asyncio.get_event_loop().run_until_complete(client.investigate(a, GatheredContext(sources_available=3), ""))
+    user = cap["m"][-1]["content"]
+    assert "ALL THREE correlated signals" in user
+    assert "RECONCILE them before you conclude" in user
+
+
+def test_deep_trace_floor_is_bed_realistic():
+    from app.context import ContextGatherer
+    g = ContextGatherer.__new__(ContextGatherer)
+    assert g._DEEP_TRACE_MIN_MS <= 250, "floor must include the bed's ~150-400ms traces"

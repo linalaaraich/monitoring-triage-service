@@ -648,6 +648,23 @@ class ContextGatherer:
             ctx.sources_available,
             window_desc,
         )
+        # 2026-06-12 (Lina: "baseline must include ALL correlated data — accurate
+        # from the start"). One explicit completeness line per investigation so
+        # it is VISIBLE whether pass #1 had the full correlated picture, rather
+        # than a silent missing pillar.
+        _has_metrics = (not _prom_result_empty(ctx.metrics)) if ctx.metrics else False
+        _trace_list = (
+            ctx.traces.get("traces", []) if isinstance(ctx.traces, dict)
+            else (ctx.traces or [])
+        )
+        _deep_n = len((ctx.deep_trace or {}).get("spans", [])) if ctx.deep_trace else 0
+        logger.info(
+            "Investigation completeness for %s/%s: metrics=%s logs=%s traces=%s "
+            "deep_trace=%s spans=%d",
+            alert.alertname, alert.service,
+            _has_metrics, bool(ctx.annotated_logs), bool(_trace_list),
+            bool(ctx.deep_trace), _deep_n,
+        )
         return ctx
 
     async def _fetch_prometheus(

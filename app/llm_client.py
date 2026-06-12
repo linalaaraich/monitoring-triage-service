@@ -1124,6 +1124,8 @@ The observed value above is ground-truth signal from Prometheus at the moment th
 {exemplar_block}
 ## Pre-Gathered Context
 
+ALL THREE correlated signals for this alert's window are below — metrics, logs, AND traces — already gathered for you. You are expected to be ACCURATE FROM THIS BASELINE: read all three and RECONCILE them before you conclude (a metric says something is wrong; the logs say what the code reported; the trace spans say where in the call chain). Cross-reference them — a cause supported by two or three signals beats one read in isolation. Only say a signal is empty if its section literally says so. Do NOT conclude "inconclusive / cannot determine" while any of these sections carries evidence: name the cause the correlated picture points to.
+
 {kube_workload_block}{recent_deploys_block}### Metrics (Prometheus, last {settings.prometheus_range_minutes}min)
 {_cap_json(context.metrics) if context.metrics else "[Prometheus] returned no series for service=" + alert.service + " — rare-but-possible, treat as MCP miss not app silence. The alert value above is still authoritative."}
 {anomaly_block}

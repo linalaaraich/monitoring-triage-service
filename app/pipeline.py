@@ -1083,8 +1083,29 @@ class TriagePipeline:
         # All three signal "this output is not trustworthy"; retry gives the
         # LLM one shot at fixing itself before we persist the row.
         validator_caught_quality_issue = bool(validation.banned_phrase_hits)
+        # 2026-06-12 (Lina: "don't throw its arms up without investigating").
+        # The baseline first pass now carries the full correlated picture, so
+        # a thin verdict should be rare — but when it still happens, the system
+        # must DIG before settling, never conclude inconclusive/low-confidence
+        # lazily. Fire the bounded-agency retry on: an INCONCLUSIVE verdict; a
+        # low-confidence (<0.5) investigate verdict; or a latency/error alert on
+        # a traced service that came back with NO traces. The retry pulls the
+        # missing keystone (deep trace for latency) and re-reasons. The
+        # no-trace demotion below only applies if THIS dig also finds nothing.
+        _thin_conclusion = (
+            decision.decision == Decision.INCONCLUSIVE
+            or (decision.decision == Decision.ESCALATE and decision.confidence < 0.5)
+        )
+        _latency_without_traces = (
+            _is_latency_or_error_alert(alert)
+            and not (ctx.traces or ctx.deep_trace)
+            and _service_should_have_traces(alert.service)
+        )
         should_retry_for_quality = (
-            quality == "data_starved" or validator_caught_quality_issue
+            quality == "data_starved"
+            or validator_caught_quality_issue
+            or _thin_conclusion
+            or _latency_without_traces
         )
         if (
             should_retry_for_quality
@@ -1105,8 +1126,9 @@ class TriagePipeline:
                 )
                 from app.llm_client import is_crashloop_alert
                 logger.info(
-                    "First-pass data_starved for %s — invoking bounded-agency retry (P1.5)",
-                    alert.alertname,
+                    "First-pass thin for %s (quality=%s verdict=%s conf=%.2f) — "
+                    "invoking bounded-agency retry to dig before concluding (P1.5)",
+                    alert.alertname, quality, decision.decision.value, decision.confidence,
                 )
 
                 if is_crashloop_alert(alert.alertname):
