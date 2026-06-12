@@ -743,13 +743,33 @@ class ContextGatherer:
         to avoid a 500 ms wasted round-trip that always returns empty.
         """
         service = alert.service
-        # Services that don't emit traces. Update if new traced services are added.
-        TRACED = {"spring-boot", "kong", "otel-collector"}
-        if service not in TRACED:
+        # 2026-06-12 (Lina: "investigate metrics, logs AND traces no matter
+        # what — never guess"). This used to be a 3-service ALLOWLIST
+        # (spring-boot/kong/otel-collector) that silently skipped Jaeger for
+        # EVERY other service — including all 22 otel-demo services and the
+        # employees-* app — so "traces are absent" was the CODE not querying,
+        # and the model guessed a cause without trace evidence (live:
+        # a69ac64a named a feature flag at 0.85 with "Jaeger traces absent").
+        # Inverted to a DENYLIST of infra/node services that genuinely emit
+        # no app traces; everything else IS queried. The Jaeger MCP returns
+        # fast-empty when a service truly has none, so the only cost of a
+        # false include is one ~100ms round-trip — far cheaper than a guess.
+        from app.v2_mappings import is_infra_service
+        _NON_TRACED = {
+            "k3s-node", "monitoring", "monitoring-vm", "loki", "prometheus",
+            "jaeger", "grafana", "node-exporter", "node_exporter", "cadvisor",
+            "kube-state-metrics", "dcgm-exporter", "drain3", "ollama",
+            "coredns", "host-syslog", "gpu-stack", "unknown",
+        }
+        if not service or service in _NON_TRACED or is_infra_service(service):
             return [], 0
+        # The OTel service.name for the employees app is "spring-boot" even
+        # though the operator-facing label is employees-backend — map back so
+        # the Jaeger query hits the real trace stream.
+        trace_service = "spring-boot" if service in ("employees-backend", "employees-gateway") else service
 
         params = {
-            "service": service,
+            "service": trace_service,
             "limit": settings.jaeger_trace_limit,
         }
         if abs_window:

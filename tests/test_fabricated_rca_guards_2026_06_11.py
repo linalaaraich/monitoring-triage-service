@@ -246,3 +246,46 @@ def test_deep_trace_block_requires_numbered_trace_step(monkeypatch):
     asyncio.get_event_loop().run_until_complete(client.investigate(alert, ctx, ""))
     user = captured["m"][-1]["content"]
     assert "checked traces in the alert window" in user
+
+
+# --- 2026-06-12: investigate-traces-always (the a69ac64a guess) ---------------
+
+def test_jaeger_fetched_for_demo_and_app_services_not_just_allowlist():
+    """RC-1: the old 3-service allowlist skipped Jaeger for all 22 demo
+    services + employees-* — so 'traces absent' was the code, not reality."""
+    import asyncio
+    from app.context import ContextGatherer
+    from app.models import GrafanaAlert
+    g = ContextGatherer.__new__(ContextGatherer)
+    calls = {}
+
+    async def fake_mcp(server, url, params):
+        calls[params.get("service")] = url
+        return [], 5
+
+    g._mcp_call = fake_mcp
+    for svc in ("frontend", "cart", "product-catalog", "spring-boot"):
+        calls.clear()
+        a = GrafanaAlert(status="firing", labels={"alertname": "HighDemoFrontendP95Latency",
+            "service": svc, "severity": "warning"}, fingerprint="t")
+        asyncio.get_event_loop().run_until_complete(g._fetch_jaeger(a, None))
+        assert svc in calls or "spring-boot" in calls, f"jaeger NOT queried for {svc}"
+    # infra services still skipped
+    calls.clear()
+    a = GrafanaAlert(status="firing", labels={"alertname": "MediumCpuUsage",
+        "service": "k3s-node", "severity": "warning"}, fingerprint="t")
+    asyncio.get_event_loop().run_until_complete(g._fetch_jaeger(a, None))
+    assert not calls, "jaeger should be skipped for k3s-node"
+
+
+def test_service_should_have_traces_predicate():
+    from app.pipeline import _service_should_have_traces, _is_latency_or_error_alert
+    from app.models import GrafanaAlert
+    assert _service_should_have_traces("frontend")
+    assert _service_should_have_traces("employees-backend")
+    assert not _service_should_have_traces("k3s-node")
+    assert not _service_should_have_traces("ai-mcp-loki")
+    a = GrafanaAlert(status="firing", labels={"alertname": "HighDemoFrontendP95Latency"}, fingerprint="t")
+    assert _is_latency_or_error_alert(a)
+    b = GrafanaAlert(status="firing", labels={"alertname": "KubeWorkloadDown"}, fingerprint="t")
+    assert not _is_latency_or_error_alert(b)

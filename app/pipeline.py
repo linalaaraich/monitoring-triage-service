@@ -33,6 +33,28 @@ from app.v2_mappings import env_resolver
 logger = logging.getLogger(__name__)
 
 
+_LATENCY_ERROR_ALERT_RE = __import__("re").compile(r"P95Latency$|ErrorRate$|Latency$", __import__("re").IGNORECASE)
+_NON_TRACED_SERVICES = {
+    "k3s-node", "monitoring", "monitoring-vm", "loki", "prometheus", "jaeger",
+    "grafana", "node-exporter", "node_exporter", "cadvisor",
+    "kube-state-metrics", "dcgm-exporter", "drain3", "ollama", "coredns",
+    "host-syslog", "gpu-stack", "unknown", "",
+}
+
+
+def _is_latency_or_error_alert(alert) -> bool:
+    return bool(_LATENCY_ERROR_ALERT_RE.search(alert.alertname or ""))
+
+
+def _service_should_have_traces(service: str) -> bool:
+    """True for app/demo services (which emit traces); False for infra/node
+    services that legitimately produce none."""
+    svc = (service or "").lower()
+    if svc in _NON_TRACED_SERVICES:
+        return False
+    return not (svc.startswith("ai-") or svc.startswith("mcp-"))
+
+
 def _has_corroborating_evidence(ctx) -> bool:
     """Fix E (2026-06-11): does ANY gathered source corroborate a verdict?
 
@@ -1510,6 +1532,29 @@ class TriagePipeline:
                 alert.alertname, alert.service, decision.confidence,
             )
             decision.confidence = 0.5
+            quality = "needs_review"
+
+        # 2026-06-12 (Lina: "investigate metrics, logs AND traces no matter
+        # what — never guess"). Signal-aware guard: a latency / error-rate
+        # alert's KEYSTONE evidence is the trace span breakdown. If the model
+        # names a confident specific cause for one of these on a TRACED
+        # service but NO traces were gathered (the a69ac64a guess shape —
+        # "Jaeger traces absent" yet a named feature-flag cause at 0.85), it
+        # is guessing past the missing keystone. With the trace allowlist bug
+        # fixed this should be rare, but enforce it: clamp + needs_review so
+        # the operator (and the feedback loop) sees the gap instead of a
+        # confident guess.
+        if quality == "actionable" and decision.confidence > 0.6 \
+                and _is_latency_or_error_alert(alert) \
+                and not (ctx.traces or ctx.deep_trace) \
+                and _service_should_have_traces(alert.service):
+            logger.warning(
+                "No-trace demotion: %s/%s is a latency/error alert on a traced "
+                "service but no traces were gathered — capping conf %.2f to 0.6 "
+                "+ needs_review (don't name a cause without the keystone signal).",
+                alert.alertname, alert.service, decision.confidence,
+            )
+            decision.confidence = min(decision.confidence, 0.6)
             quality = "needs_review"
 
         # 2026-06-04 quarantine-on-save (Stage E follow-up). The validator
