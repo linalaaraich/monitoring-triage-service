@@ -191,6 +191,12 @@ class GatheredContext(BaseModel):
     # or when the MCP call failed (non-fatal — first-pass RCA still ships).
     deep_trace: Optional[dict] = None
     deep_trace_ms: int = 0
+    # 2026-06-12: one deterministic ranked line naming the slowest span +
+    # slowest downstream span (service / op / ms / % of trace). Rendered
+    # ABOVE the deep-trace JSON so the LLM can't miss the culprit even if it
+    # skims. The JSON is now duration-sorted + slimmed (see _compact_deep_trace)
+    # so the slow downstream span survives the prompt char cap.
+    deep_trace_summary: str = ""
     # 2026-06-10 (iteration 5): deterministic plain-English interpretation of
     # the kube-state context query (replica counts, non-running pods, recent
     # termination reasons). Rendered ABOVE the raw metrics JSON for Kube*/

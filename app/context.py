@@ -394,6 +394,117 @@ def _sanitize_deep_trace(trace: dict) -> dict:
     return out
 
 
+# 2026-06-12 (Lina: "traces must be DECISIVE evidence for latency — name the
+# downstream culprit"). A real otel-demo frontend trace serializes to ~13-15K
+# chars across 16-21 spans in trace-TREE order (root frontend-proxy/frontend
+# spans first, deep downstream spans like product-catalog/recommendation
+# last). _cap_json caps the prompt render at 6000 chars, so the FIRST ~8
+# spans survive — all frontend/proxy — and the slow DOWNSTREAM span gets
+# truncated out entirely. The model then only ever sees "frontend is slow",
+# restates the alert, and the validator demotes it to data_starved. That is
+# the bug behind every missing trace-decisive RCA.
+#
+# Fix: before rendering, (a) sort spans by duration DESC so the slowest span
+# is first and always survives the cap, (b) slim each span to the
+# load-bearing fields so the whole ranked breakdown fits well under the cap.
+# We keep the raw-tree intact in sanitize; this is purely the prompt view.
+_DEEP_TRACE_TOP_SPANS = 15
+_SPAN_KEEP_FIELDS = (
+    "service", "operation", "duration_ms", "status_code", "error",
+    "parent_span_id", "span_id",
+)
+# Tag keys worth surfacing to the LLM (already PII-sanitized in sanitize):
+# they name WHAT the slow span was doing (a SQL statement, an HTTP target,
+# a gRPC method, an error message).
+_SPAN_KEEP_TAGS = (
+    "db.statement", "db.system", "http.target", "http.method",
+    "rpc.method", "rpc.service", "error.message", "exception.message",
+)
+
+
+def _compact_deep_trace(trace: dict) -> dict:
+    """Rank-and-slim a sanitized deep trace for the LLM prompt.
+
+    Returns a dict with spans sorted by duration_ms DESC, trimmed to the
+    top-N, each span reduced to load-bearing fields + a small set of
+    descriptive tags. Guarantees the slowest (usually downstream) span is
+    first so it survives the prompt's char cap — the whole point: the model
+    must be able to NAME the downstream culprit span, not just the root.
+    """
+    if not isinstance(trace, dict):
+        return trace
+    spans = [s for s in (trace.get("spans") or []) if isinstance(s, dict)]
+    spans_sorted = sorted(
+        spans, key=lambda s: s.get("duration_ms", 0) or 0, reverse=True
+    )
+    slim = []
+    for s in spans_sorted[:_DEEP_TRACE_TOP_SPANS]:
+        row = {k: s[k] for k in _SPAN_KEEP_FIELDS if k in s}
+        tags = s.get("tags", {}) or {}
+        kept_tags = {k: tags[k] for k in _SPAN_KEEP_TAGS if k in tags}
+        if kept_tags:
+            row["tags"] = kept_tags
+        slim.append(row)
+    out = {
+        "trace_id": trace.get("trace_id"),
+        "span_count": trace.get("span_count", len(spans)),
+        "spans_shown": len(slim),
+        "spans": slim,
+    }
+    return out
+
+
+# Services that are the alert's OWN request-entry tier, not a downstream
+# dependency. The frontend latency alert names "frontend"; frontend-proxy and
+# the Next.js frontend itself are that same edge — the operator already knows
+# the edge is slow (that's the alert). The decisive evidence is the slowest
+# span in a DIFFERENT service. For the otel-demo edge that's frontend /
+# frontend-proxy / load-generator; callers can extend via `own_services`.
+_EDGE_TIER_SERVICES = {"frontend", "frontend-proxy", "load-generator"}
+
+
+def _deep_trace_summary(trace: dict, own_services: set | None = None) -> str:
+    """One deterministic ranked line: the slowest span, its service, and its
+    share of the trace's wall-clock — handed to the LLM so it can't miss the
+    downstream culprit even if it skims the JSON.
+
+    Names BOTH the slowest span overall AND the slowest span belonging to a
+    service OUTSIDE the alert's own edge tier — i.e. the downstream dependency
+    the alert name doesn't mention. That second clause is the whole point of
+    trace-decisive RCA.
+
+    Example: "Slowest span: frontend-proxy ingress 1320ms (100% of 1320ms
+    trace wall-clock). Slowest downstream dependency: product-catalog
+    GetProduct 1030ms (78%)."
+    """
+    if not isinstance(trace, dict):
+        return ""
+    spans = [s for s in (trace.get("spans") or []) if isinstance(s, dict)]
+    if not spans:
+        return ""
+    edge = _EDGE_TIER_SERVICES | (own_services or set())
+    by_dur = sorted(spans, key=lambda s: s.get("duration_ms", 0) or 0, reverse=True)
+    total = max((s.get("duration_ms", 0) or 0) for s in spans) or 0
+    top = by_dur[0]
+    top_dur = top.get("duration_ms", 0) or 0
+    pct = f"{(top_dur / total * 100):.0f}%" if total else "?"
+    parts = [
+        f"Slowest span: {top.get('service','?')} {(top.get('operation') or '')[:60]} "
+        f"{top_dur:.0f}ms ({pct} of {total:.0f}ms trace wall-clock)."
+    ]
+    # Slowest span in a service OUTSIDE the edge tier — the downstream culprit.
+    for s in by_dur:
+        if s.get("service") not in edge:
+            d = s.get("duration_ms", 0) or 0
+            dpct = f"{(d / total * 100):.0f}%" if total else "?"
+            parts.append(
+                f" Slowest downstream dependency: {s.get('service','?')} "
+                f"{(s.get('operation') or '')[:50]} {d:.0f}ms ({dpct})."
+            )
+            break
+    return "".join(parts)
+
+
 def _absolute_window(alert_epoch: float, window_minutes: int) -> tuple[float, float]:
     """Build an absolute context window anchored on the alert's startsAt.
 
@@ -500,6 +611,10 @@ class ContextGatherer:
                     deep, deep_ms = await self._fetch_deep_trace(trace_id)
                     ctx.deep_trace = deep
                     ctx.deep_trace_ms = deep_ms
+                    if deep:
+                        ctx.deep_trace_summary = _deep_trace_summary(
+                            deep, own_services={alert.service} if alert.service else None
+                        )
 
         # Fix F (2026-06-11): ONE extra MCP call to the deploy bridge for
         # kube-workload + Drain3 alerts — "did someone just deploy this
@@ -733,7 +848,9 @@ class ContextGatherer:
             return None, 0
         if not isinstance(data, dict) or data.get("error"):
             return None, ms
-        return _sanitize_deep_trace(data), ms
+        # Sanitize (PII) THEN compact (rank+slim) so the slowest downstream
+        # span survives the prompt char cap and the model can name it.
+        return _compact_deep_trace(_sanitize_deep_trace(data)), ms
 
     async def _fetch_jaeger(
         self, alert: GrafanaAlert, abs_window: tuple[float, float] | None

@@ -1134,7 +1134,8 @@ The observed value above is ground-truth signal from Prometheus at the moment th
 {_cap_json(context.traces) if context.traces else "[Jaeger] returned 0 traces for service=" + alert.service + ". Likely normal for infrastructure alerts; a traced request-path would have surfaced a spring-boot/kong service here."}
 {(
     chr(10) + "### Trace span breakdown (the slowest trace, drilled to per-span detail)" + chr(10) +
-    "This is the keystone evidence for latency-flavoured alerts: per-span durations, db.statement (PII-sanitized), http.target, error tags. Use it to NAME what's slow, not just say upstream is slow. REQUIRED: one numbered step of your reason must cite this breakdown with numbers — e.g. 'checked traces in the alert window: the <service> span took <N> ms of the <M> ms total (~<P>% of request time, <K>x the normal p95)'." + chr(10) +
+    "This is the keystone evidence for latency-flavoured alerts: per-span durations, db.statement (PII-sanitized), http.target, error tags. Spans below are RANKED slowest-first; the top span (and especially the slowest DOWNSTREAM service span) is the culprit — name it. Do NOT just say 'frontend is slow' / 'upstream is slow': the alert already says that. REQUIRED: one numbered step of your reason must cite this breakdown with numbers — e.g. 'checked traces in the alert window: the <downstream-service> <op> span took <N> ms of the <M> ms total (~<P>% of request time, <K>x the normal p95)'." + chr(10) +
+    ("Ranked summary: " + context.deep_trace_summary + chr(10) if context.deep_trace_summary else "") +
     "```json" + chr(10) +
     _cap_json(context.deep_trace) + chr(10) +
     "```" + chr(10)

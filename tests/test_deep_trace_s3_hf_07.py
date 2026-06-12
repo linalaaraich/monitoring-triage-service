@@ -231,3 +231,83 @@ async def test_gather_skips_deep_trace_for_non_latency_alert(monkeypatch):
 
     assert deep_trace_calls == []
     assert ctx.deep_trace is None
+
+
+# ----------------------------------------------------------------------
+# 4. Rank-and-slim (2026-06-12) — the slowest DOWNSTREAM span must survive
+#    the prompt char cap. Regression for: real frontend traces serialize to
+#    ~14K chars in trace-tree order, the 6000-char cap kept only the first
+#    ~8 (all frontend/proxy) spans, and the downstream culprit (e.g.
+#    product-catalog) was truncated out — model could never name it.
+# ----------------------------------------------------------------------
+from app.context import _compact_deep_trace, _deep_trace_summary
+
+
+def _tree_order_trace() -> dict:
+    """Mimic a real Jaeger get_trace: root/proxy spans first, the slow
+    downstream span buried deep in trace-tree order."""
+    spans = [
+        {"span_id": "a", "service": "frontend-proxy", "operation": "ingress", "duration_ms": 1320.0, "parent_span_id": None},
+        {"span_id": "b", "service": "frontend", "operation": "GET /api/recommendations", "duration_ms": 1300.0, "parent_span_id": "a"},
+    ]
+    # 10 small frontend spans padding the tree (push downstream span past the cap)
+    for i in range(10):
+        spans.append({"span_id": f"f{i}", "service": "frontend", "operation": f"step-{i}", "duration_ms": 5.0, "parent_span_id": "b"})
+    # the real culprit, deep in tree order
+    spans.append({"span_id": "z", "service": "product-catalog", "operation": "GetProduct", "duration_ms": 1030.0, "parent_span_id": "b",
+                  "tags": {"rpc.method": "GetProduct", "db.statement": "SELECT * FROM products WHERE id = 7"}})
+    return {"trace_id": "t1", "span_count": len(spans), "spans": spans}
+
+
+def test_compact_sorts_spans_by_duration_desc():
+    out = _compact_deep_trace(_tree_order_trace())
+    durs = [s["duration_ms"] for s in out["spans"]]
+    assert durs == sorted(durs, reverse=True)
+
+
+def test_compact_keeps_downstream_span_within_cap():
+    import json
+    out = _compact_deep_trace(_tree_order_trace())
+    rendered = json.dumps(out, indent=2)[:6000]
+    # The downstream culprit must appear in the first 6000 chars now.
+    assert "product-catalog" in rendered
+    # And it should be at/near the top (slowest non-root after the root span).
+    svcs = [s["service"] for s in out["spans"]]
+    assert "product-catalog" in svcs[:3]
+
+
+def test_compact_trims_to_top_n_and_slims_fields():
+    from app.context import _DEEP_TRACE_TOP_SPANS
+    out = _compact_deep_trace(_tree_order_trace())
+    assert out["spans_shown"] <= _DEEP_TRACE_TOP_SPANS
+    # slimmed: only keep-listed fields plus optional tags
+    for s in out["spans"]:
+        assert set(s.keys()) <= {"service", "operation", "duration_ms", "status_code",
+                                 "error", "parent_span_id", "span_id", "tags"}
+
+
+def test_compact_preserves_descriptive_tags_only():
+    out = _compact_deep_trace(_tree_order_trace())
+    pc = [s for s in out["spans"] if s["service"] == "product-catalog"][0]
+    assert pc["tags"].get("rpc.method") == "GetProduct"
+    assert "db.statement" in pc["tags"]
+
+
+def test_summary_names_slowest_and_downstream():
+    # frontend is the alert's own edge tier — the downstream culprit is
+    # product-catalog, and the summary must name it explicitly.
+    s = _deep_trace_summary(_tree_order_trace(), own_services={"frontend"})
+    assert "Slowest span:" in s
+    assert "Slowest downstream dependency:" in s
+    assert "product-catalog" in s
+    assert "%" in s
+
+
+def test_summary_empty_for_no_spans():
+    assert _deep_trace_summary({"spans": []}) == ""
+    assert _deep_trace_summary({}) == ""
+
+
+def test_compact_handles_non_dict():
+    assert _compact_deep_trace(None) is None
+    assert _compact_deep_trace([]) == []
