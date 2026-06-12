@@ -143,24 +143,38 @@ function HistorySection({ a }) {
               position: "absolute", left: 8, top: 6, bottom: 6,
               width: 2, background: "var(--border-hi)", borderRadius: 2,
             }}></div>
-            {history.map((h, i) => (
-              <div key={i} style={{ display: "flex", gap: 14, padding: "6px 0 14px 0", position: "relative" }}>
+            {history.map((h, i) => {
+              // 2026-06-12 (Lina): a past fire that was a full investigation is
+              // a clickable link to its own RCA; a reviewed one shows a badge.
+              const isCurrent = h.current || (i === history.length - 1);
+              const clickable = h.id && h.investigated && !isCurrent;
+              const Row = (
+              <div style={{ display: "flex", gap: 14, padding: "6px 0 14px 0", position: "relative" }}>
                 <div style={{
                   width: 18, height: 18, borderRadius: "50%",
                   background: window.VERDICT_DOT[h.verdict] || "#8890a0",
-                  boxShadow: i === 0 ? `0 0 0 4px rgba(${h.verdict==='ESCALATE' ? '224,96,112' : '136,144,160'},.18)` : "none",
+                  boxShadow: isCurrent ? `0 0 0 4px rgba(${h.verdict==='ESCALATE' ? '224,96,112' : '136,144,160'},.18)` : "none",
                   flexShrink: 0, marginLeft: -1, zIndex: 1,
                   border: "3px solid var(--card)",
                 }}></div>
                 <div style={{ flex: 1, paddingTop: 1 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 2 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 2, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 14, fontWeight: 500, color: "var(--text)" }}>{h.time}</span>
                     <VerdictPill v={h.verdict}/>
+                    {h.hasFeedback && <span title="An operator reviewed this investigation" style={{ fontSize: 10.5, fontWeight: 600, color: "var(--accent-green)", padding: "1px 7px", borderRadius: 10, background: "rgba(111,211,136,.10)", border: "1px solid rgba(111,211,136,.35)" }}>★ reviewed</span>}
                   </div>
-                  <div style={{ fontSize: 12.5, color: "var(--muted)" }}>{h.delta}</div>
+                  <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+                    {h.delta}{clickable && <span style={{ color: "var(--accent-cyan)", marginLeft: 8 }}>→ view this investigation</span>}
+                    {!isCurrent && h.investigated === false && <span style={{ marginLeft: 8, color: "var(--text-soft)" }}>· gated (no investigation)</span>}
+                  </div>
                 </div>
-                {i === 0 && <span style={{ fontSize: 11, color: "var(--muted)", padding: "2px 8px", borderRadius: 4, background: "var(--bg-soft)", border: "1px solid var(--border)", height: "fit-content" }}>current</span>}
+                {isCurrent && <span style={{ fontSize: 11, color: "var(--muted)", padding: "2px 8px", borderRadius: 4, background: "var(--bg-soft)", border: "1px solid var(--border)", height: "fit-content" }}>current</span>}
               </div>
+              );
+              return clickable
+                ? <a key={i} href={`/dashboard/alert/${h.id}`} style={{ textDecoration: "none", color: "inherit", display: "block" }} className="hist-link">{Row}</a>
+                : <div key={i}>{Row}</div>;
+            })
             ))}
           </div>
         )}

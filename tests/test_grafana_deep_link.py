@@ -59,7 +59,7 @@ def test_p95_latency_routes_to_tracing_overview():
         "component": "spring-boot",
     })["grafana"]
     assert "/d/tracing-overview/" in g
-    assert "var-service=spring-boot" in g
+    assert "var-service=employees-backend" in g  # 2026-06-12: tracing dashboard uses canonical trace name
 
 
 def test_kong_latency_routes_to_tracing_overview():
@@ -140,7 +140,7 @@ def test_jaeger_search_url_carries_service_and_lookback():
     parsed = _u.urlparse(url)
     qs = _u.parse_qs(parsed.query)
     assert parsed.path == "/search"
-    assert qs.get("service") == ["spring-boot"]
+    assert qs.get("service") == ["employees-backend"]  # 2026-06-12: Jaeger indexes spring-boot app as employees-backend
     assert qs.get("lookback") == ["1h"]
 
 

@@ -1267,6 +1267,22 @@ class RCAStore:
         )
         return dict(row)
 
+    async def feedback_ids_for(self, decision_ids: list[str]) -> set:
+        """2026-06-12 (Lina): which of these decisions have an operator review
+        (any feedback row)? Used to flag past fires in the incident history so
+        the operator can see at a glance which ones were reviewed."""
+        if not decision_ids:
+            return set()
+        ids = [d for d in decision_ids if d]
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        cursor = await self._db.execute(
+            f"SELECT DISTINCT decision_id FROM feedback WHERE decision_id IN ({placeholders})",
+            ids,
+        )
+        return {r["decision_id"] for r in await cursor.fetchall()}
+
     async def record_v2_feedback(
         self,
         feedback_id: str,

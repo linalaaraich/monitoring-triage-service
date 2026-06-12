@@ -917,10 +917,14 @@ class ContextGatherer:
         }
         if not service or service in _NON_TRACED or is_infra_service(service):
             return [], 0
-        # The OTel service.name for the employees app is "spring-boot" even
-        # though the operator-facing label is employees-backend — map back so
-        # the Jaeger query hits the real trace stream.
-        trace_service = "spring-boot" if service in ("employees-backend", "employees-gateway") else service
+        # 2026-06-12 (Lina link audit) — CORRECTED: Jaeger actually indexes the
+        # employees app as `employees-backend` and the gateway as `kong-gateway`
+        # (verified live: NO `spring-boot` service in Jaeger). The earlier remap
+        # was backwards and queried a non-existent `spring-boot` for the OOM /
+        # crash-loop alerts that fire under the `spring-boot` label → empty
+        # traces. Map every alias to the canonical Jaeger name.
+        from app.v2_mappings import trace_service_name
+        trace_service = trace_service_name(service)
 
         params = {
             "service": trace_service,

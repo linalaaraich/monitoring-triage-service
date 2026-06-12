@@ -264,12 +264,14 @@ def test_jaeger_fetched_for_demo_and_app_services_not_just_allowlist():
         return [], 5
 
     g._mcp_call = fake_mcp
+    from app.v2_mappings import trace_service_name
     for svc in ("frontend", "cart", "product-catalog", "spring-boot"):
         calls.clear()
         a = GrafanaAlert(status="firing", labels={"alertname": "HighDemoFrontendP95Latency",
             "service": svc, "severity": "warning"}, fingerprint="t")
         asyncio.get_event_loop().run_until_complete(g._fetch_jaeger(a, None))
-        assert svc in calls or "spring-boot" in calls, f"jaeger NOT queried for {svc}"
+        # jaeger queried with the CANONICAL trace name (spring-boot -> employees-backend)
+        assert trace_service_name(svc) in calls, f"jaeger NOT queried for {svc}"
     # infra services still skipped
     calls.clear()
     a = GrafanaAlert(status="firing", labels={"alertname": "MediumCpuUsage",
@@ -356,7 +358,7 @@ def test_infer_evidence_source():
 
 
 def test_employees_backend_remaps_to_spring_boot_trace_stream():
-    """Soft-spot #1: employees-backend → spring-boot service.name remap for Jaeger."""
+    """2026-06-12 (Lina link audit): spring-boot -> employees-backend remap (Jaeger has NO spring-boot service)."""
     import asyncio
     from app.context import ContextGatherer
     from app.models import GrafanaAlert
@@ -367,9 +369,9 @@ def test_employees_backend_remaps_to_spring_boot_trace_stream():
         return [], 5
     g._mcp_call = fake_mcp
     a = GrafanaAlert(status="firing", labels={"alertname": "HighP95Latency",
-        "service": "employees-backend", "severity": "warning"}, fingerprint="t")
+        "service": "spring-boot", "severity": "warning"}, fingerprint="t")
     asyncio.get_event_loop().run_until_complete(g._fetch_jaeger(a, None))
-    assert seen["service"] == "spring-boot"
+    assert seen["service"] == "employees-backend"
 
 
 def test_severity_floor_clamps_up_not_down():
@@ -387,3 +389,36 @@ def test_severity_floor_clamps_up_not_down():
     # The floor lives inline in investigate(); assert the ranking constant exists
     from app import llm_client as L
     assert "severity must never fall below" in inspect.getsource(L)
+
+
+# --- 2026-06-12 link audit + clickable history (Lina) -------------------------
+
+def test_trace_service_name_canonical():
+    from app.v2_mappings import trace_service_name
+    assert trace_service_name("spring-boot") == "employees-backend"
+    assert trace_service_name("kong") == "kong-gateway"
+    assert trace_service_name("frontend") == "frontend"  # demo services already correct
+
+
+def test_history_entries_are_clickable_and_flag_reviews():
+    from app.main import _v2_transform_row
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    fp = "fp123"
+    cur = {"id": "c"*32, "alert_name": "MediumCpuUsage", "affected_service": "k3s-node",
+           "timestamp": now.isoformat(), "severity": "warning", "alert_fingerprint": fp,
+           "llm_verdict": "dismiss", "rca_report": "{}", "triage_decision": "investigate"}
+    prior = [
+        {"id": "p"*32, "alert_fingerprint": fp, "timestamp": "2026-06-10T10:00:00",
+         "llm_verdict": "escalate", "action_taken": "emailed"},  # investigated + reviewed
+        {"id": "g"*32, "alert_fingerprint": fp, "timestamp": "2026-06-10T09:00:00",
+         "llm_verdict": None, "triage_decision": "recurrence_gated_pre_llm"},  # gated, not investigated
+    ]
+    shape = _v2_transform_row(cur, fingerprint_history={fp: prior}, now_utc=now,
+                              feedback_ids={"p"*32})
+    h = shape["history"]
+    by_id = {e.get("id"): e for e in h}
+    assert by_id["pppppppp"]["investigated"] is True
+    assert by_id["pppppppp"]["hasFeedback"] is True
+    assert by_id["gggggggg"]["investigated"] is False
+    assert by_id["gggggggg"]["hasFeedback"] is False

@@ -2402,8 +2402,14 @@ def _grafana_deep_link_for_alert(alert_name: str, service: str) -> str:
     if "Drain3" in name or "Otel" in name or "OTel" in name:
         return _with_svc(f"/d/{_DASH_UID_OTEL}/otel-collector-health")
     # Latency / request-rate / error-rate → distributed tracing overview.
+    # 2026-06-12: the tracing dashboard reads Jaeger, so its var-service must
+    # be the canonical trace name (employees-backend, not spring-boot).
     if any(k in name for k in ("P95Latency", "Latency", "RequestRate", "ErrorRate", "HighKong", "HighP95")):
-        return _with_svc(f"/d/{_DASH_UID_TRACING}/distributed-tracing-overview")
+        from app.v2_mappings import trace_service_name
+        tname = trace_service_name(service)
+        tq = _u.quote_plus(tname) if tname and tname != "—" else ""
+        path = f"/d/{_DASH_UID_TRACING}/distributed-tracing-overview"
+        return f"{base}{path}?var-service={tq}" if tq else f"{base}{path}"
     # Infra (CPU / Memory / Disk / Pod) → unified overview.
     if any(k in name for k in ("Cpu", "CPU", "Memory", "Disk", "Pod", "Node", "TargetDown")):
         return _with_svc(f"/d/{_DASH_UID_UNIFIED}/unified-observability-overview")
@@ -2449,7 +2455,12 @@ def _jaeger_deep_link_for_alert(service: str) -> str:
         return "#"
     if not service or service == "—":
         return base
-    qs = _u.urlencode({"service": service, "lookback": "1h"})
+    # 2026-06-12 (Lina link audit): use the service name Jaeger actually
+    # indexes — a `spring-boot` alert must link to `employees-backend`, the
+    # real trace stream (Jaeger has no `spring-boot`), or the link opens an
+    # empty Jaeger search.
+    from app.v2_mappings import trace_service_name
+    qs = _u.urlencode({"service": trace_service_name(service), "lookback": "1h"})
     return f"{base}/search?{qs}"
 
 
@@ -2474,7 +2485,8 @@ def _build_cires_links(alert: dict) -> dict:
 def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
                        drain3_stats: dict | None = None,
                        now_utc=None,
-                       incident_fire_counts: dict | None = None) -> dict:
+                       incident_fire_counts: dict | None = None,
+                       feedback_ids: set | None = None) -> dict:
     """Map a /decisions RCARecord row → the CIRES_ALERT shape the design expects.
 
     `fingerprint_history`: dict mapping alert_fingerprint → list[prior_row]
@@ -2586,10 +2598,26 @@ def _v2_transform_row(r: dict, *, fingerprint_history: dict | None = None,
         pverdict = _V2_VERDICT_MAP.get((prev.get("llm_verdict") or "").lower(), "PENDING")
         if (prev.get("action_taken") or "").lower() == "shelved":
             pverdict = "SHELVED"
-        history.append({"time": ptime, "verdict": pverdict, "delta": "prior fire"})
-    history.append({"time": time_local, "verdict": verdict, "delta": (
-        "first seen" if not prior else "still active — sustained" if indicator == "sustained" else "re-fired"
-    )})
+        # 2026-06-12 (Lina): make each past fire CLICKABLE to its own
+        # investigation, mark whether it was a full investigation (has an
+        # LLM verdict to read) vs a cheap gated/suppressed row, and flag if
+        # an operator review exists for it.
+        _pid = (prev.get("id") or "")
+        history.append({
+            "time": ptime, "verdict": pverdict, "delta": "prior fire",
+            "id": _pid[:8],
+            "investigated": bool((prev.get("llm_verdict") or "").strip()),
+            "hasFeedback": bool(feedback_ids) and _pid in feedback_ids,
+        })
+    history.append({
+        "time": time_local, "verdict": verdict,
+        "delta": ("first seen" if not prior else "still active — sustained"
+                  if indicator == "sustained" else "re-fired"),
+        "id": short_id,
+        "investigated": bool(verdict_lower),
+        "hasFeedback": bool(feedback_ids) and raw_id in feedback_ids,
+        "current": True,
+    })
 
     # Parse suggested_actions (stored as JSON string)
     actions = []
@@ -4526,12 +4554,21 @@ async def dashboard_v2_alert(short_id: str):
             pass
 
     # Transform target
+    # 2026-06-12 (Lina): which fires in this incident's history have an
+    # operator review? One query over all the fingerprint's decisions.
+    try:
+        _fb_ids = await _store.feedback_ids_for(
+            [target.get("id")] + [hr.get("id") for hr in history_rows]
+        )
+    except Exception:
+        _fb_ids = set()
     alert = _v2_transform_row(
         target,
         fingerprint_history={fp: history_rows} if fp else None,
         drain3_stats=drain3_stats,
         now_utc=now_utc,
         incident_fire_counts=incident_fire_counts,
+        feedback_ids=_fb_ids,
     )
     # Transform related — the design's RelatedSidebar reads `a.related` and
     # accesses {id, title, time, verdict} on each entry. Shape them

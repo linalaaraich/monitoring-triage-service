@@ -236,6 +236,29 @@ DISPLAY_NAMESPACE = {
 }
 
 
+# 2026-06-12 (Lina link audit): the CANONICAL trace service.name as Jaeger
+# indexes it, which differs from some alert `service` labels. Verified live:
+# Jaeger has `employees-backend` and `kong-gateway` — NOT `spring-boot`/`kong`.
+# A `spring-boot` PodCrashLooping alert's Jaeger link + trace-query were hitting
+# a service that doesn't exist (empty traces, dead link). Map every alias of a
+# traced app to the name Jaeger actually indexes.
+_TRACE_SERVICE_NAME = {
+    "spring-boot":       "employees-backend",
+    "spring-boot-app":   "employees-backend",
+    "springboot-app":    "employees-backend",
+    "backend":           "employees-backend",
+    "employees-gateway": "kong-gateway",
+    "kong":              "kong-gateway",
+    "kong-kong-proxy":   "kong-gateway",
+}
+
+
+def trace_service_name(svc: str | None) -> str:
+    """Service name as indexed in Jaeger — for trace queries + Jaeger UI deep
+    links. Identity for services whose label already matches Jaeger."""
+    return _TRACE_SERVICE_NAME.get((svc or ""), svc or "")
+
+
 def display_service(svc: str | None) -> str:
     return DISPLAY_SERVICE.get((svc or ""), svc or "")
 
