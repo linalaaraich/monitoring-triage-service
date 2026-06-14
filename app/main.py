@@ -3543,6 +3543,179 @@ async def dashboard_v2(
 # Refresh policy: meta http-equiv refresh at 60 s — protects SQLite from
 # query churn while still feeling "live enough" to an operator monitoring
 # the surface during incident response.
+def _render_insight_sidebar(active: str = "") -> str:
+    """Single source of truth for the server-rendered insight/incident sidebar.
+
+    2026-06-13 — replaces seven inline copies that had drifted apart, and
+    mirrors the React sidebar.jsx NAV_GROUPS exactly so the two chromes can
+    never disagree (coherence). The 2026-06-13 nav: the Sprint-5 placeholder
+    items (Drain3 engine, Integrations) are dropped from the surface; Stats is
+    merged into Evaluation (/dashboard/kpi); Services is merged into the
+    Incidents page. `active` is the nav item id to highlight.
+    """
+    def item(item_id: str, href: str, label: str) -> str:
+        cls = ("kpi-sidebar__item kpi-sidebar__item--active"
+               if item_id == active else "kpi-sidebar__item")
+        return f'<a class="{cls}" href="{href}">{label}</a>'
+    return f"""
+  <aside class="kpi-sidebar">
+    <div class="kpi-sidebar__brand">
+      <div class="kpi-sidebar__brand-mark"></div>
+      <div>
+        <div class="kpi-sidebar__brand-title">Observability</div>
+        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
+      </div>
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Incident response</div>
+      {item("triage", "/dashboard", "Triage feed")}
+      {item("incidents", "/dashboard/incidents", "Incidents")}
+      {item("anomalies", "/dashboard/anomalies", "Anomalies")}
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Insights</div>
+      {item("kpi", "/dashboard/kpi", "Evaluation")}
+    </div>
+    <div class="kpi-sidebar__group">
+      <div class="kpi-sidebar__group-label">Configuration</div>
+      {item("alerts", "/dashboard/alerts", "Alerts")}
+      {item("settings", "/dashboard/settings", "Settings")}
+    </div>
+  </aside>"""
+
+
+# 2026-06-13 — Stats merged into the Evaluation (/dashboard/kpi) page. The
+# stats-* CSS + the section renderer below are shared so the merged page and
+# any future caller stay byte-identical. /dashboard/stats now redirects here.
+_STATS_SECTION_CSS = """
+  .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 4px 22px 22px; }
+  @media (max-width: 980px) { .stats-grid { grid-template-columns: 1fr; } }
+  .stats-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px 18px; }
+  .stats-card--wide { grid-column: 1 / -1; }
+  .stats-card__title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+  .stats-card__q { font-size: 11.5px; color: var(--muted); margin-bottom: 12px; }
+  .stats-bar-row { display: grid; grid-template-columns: 190px 1fr 44px; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .stats-bar-label { font-size: 12.5px; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stats-bar-track { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 5px; height: 14px; overflow: hidden; }
+  .stats-bar-fill { height: 100%; border-radius: 5px; }
+  .stats-bar-fill--blue { background: var(--accent-blue); }
+  .stats-bar-fill--red  { background: var(--accent-red); }
+  .stats-bar-val { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); font-weight: 600; text-align: right; }
+  .stats-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .stats-table thead th { text-align: left; padding: 8px 10px; background: var(--bg-soft); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+  .stats-table tbody td { padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text-soft); }
+  .stats-table tbody tr:last-child td { border-bottom: none; }
+  .stats-fam-name { color: var(--text); font-weight: 500; }
+  .stats-fam-total { font-family: var(--font-mono); color: var(--text); font-weight: 600; }
+  .stats-pair { color: var(--muted); }
+  .stats-pair b { color: var(--text); }
+  .stats-muted { color: var(--muted); }
+  .stats-fp__big { font-family: var(--font-mono); font-size: 34px; font-weight: 600; color: var(--accent-red); line-height: 1.1; margin: 4px 0 8px; }
+  .stats-fp__sub { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .stats-fp__sub code { font-family: var(--font-mono); background: var(--bg-soft); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+  .stats-empty { font-size: 12.5px; color: var(--muted); padding: 8px 0; }
+  .eval-subhead { padding: 16px 22px 0; font-size: 14px; font-weight: 600; color: var(--text); }
+  .eval-subhead__q { font-size: 12px; font-weight: 400; color: var(--muted); margin-top: 2px; }
+"""
+
+
+def _render_stats_sections(agg: dict) -> str:
+    """Render the 7-day trend cards (noisiest alerts, escalated services,
+    verdict mix, RCA archetypes, FP proxy) as the inner `.stats-grid`.
+
+    Shared by the merged Evaluation page. `agg` is RCAStore.get_stats_aggregates.
+    """
+    def _esc(s) -> str:
+        return _html.escape(str(s)) if s is not None else ""
+
+    noisiest = agg.get("noisiest_alerts", [])
+    escalated = agg.get("escalated_services", [])
+    families = agg.get("verdict_by_family", [])
+    fp = agg.get("false_positive", {})
+    archetypes = agg.get("archetypes_used", [])
+
+    def _bars(items, label_key, value_key, accent):
+        if not items:
+            return "<div class='stats-empty'>No data in the last 7 days.</div>"
+        mx = max((int(i[value_key]) for i in items), default=0) or 1
+        parts = []
+        for i in items:
+            v = int(i[value_key])
+            pct = int(round(100 * v / mx))
+            parts.append(
+                f'<div class="stats-bar-row"><div class="stats-bar-label">{_esc(i[label_key])}</div>'
+                f'<div class="stats-bar-track"><div class="stats-bar-fill stats-bar-fill--{accent}" style="width:{pct}%"></div></div>'
+                f'<div class="stats-bar-val">{v}</div></div>'
+            )
+        return "".join(parts)
+
+    noisiest_html = _bars(noisiest, "alert_name", "count", "blue")
+    escalated_html = _bars(escalated, "service", "escalates", "red")
+
+    if families:
+        fam_rows = []
+        for f in families:
+            verds = f.get("verdicts", {})
+            mix = " &middot; ".join(
+                f"<span class='stats-pair'>{_esc(k)} <b>{v}</b></span>"
+                for k, v in sorted(verds.items(), key=lambda kv: kv[1], reverse=True)
+            ) or "<span class='stats-muted'>—</span>"
+            fam_rows.append(
+                f'<tr><td class="stats-fam-name">{_esc(f["alert_name"])}</td>'
+                f'<td class="stats-fam-total">{int(f.get("total", 0))}</td><td>{mix}</td></tr>'
+            )
+        families_html = (
+            '<table class="stats-table"><thead><tr><th>Alert family</th><th>Fires</th>'
+            f'<th>Verdict mix</th></tr></thead><tbody>{"".join(fam_rows)}</tbody></table>'
+        )
+    else:
+        families_html = "<div class='stats-empty'>No verdicts recorded in the last 7 days.</div>"
+
+    if archetypes:
+        arch_rows = []
+        for a in archetypes:
+            rate = a.get("actionable_rate")
+            rate_disp = f"{rate * 100:.0f}%" if rate is not None else "—"
+            arch_rows.append(
+                f'<tr><td class="stats-fam-name">{_esc(a.get("exemplar_id"))}</td>'
+                f'<td class="stats-fam-total">{int(a.get("count", 0))}</td>'
+                f'<td class="stats-fam-total">{rate_disp}</td></tr>'
+            )
+        archetypes_html = (
+            '<table class="stats-table"><thead><tr><th>Archetype (exemplar id)</th><th>Used</th>'
+            f'<th>Actionable rate</th></tr></thead><tbody>{"".join(arch_rows)}</tbody></table>'
+        )
+    else:
+        archetypes_html = (
+            "<div class='stats-empty'>No archetype usage recorded in the last 7 days yet "
+            "&mdash; this fills in as new decisions record which exemplar they used.</div>"
+        )
+
+    if fp.get("wired"):
+        rate = fp.get("rate")
+        rate_disp = f"{rate * 100:.0f}%" if rate is not None else "—"
+        fp_html = (
+            f'<div class="stats-fp__big">{_esc(rate_disp)}</div>'
+            f'<div class="stats-fp__sub">{int(fp.get("overrides", 0))} of {int(fp.get("rated", 0))} '
+            "reviewed alerts had their verdict corrected by an operator.</div>"
+        )
+    else:
+        fp_html = (
+            '<div class="stats-fp__big stats-muted">n/a</div>'
+            '<div class="stats-fp__sub">No operator reviews in the last 7 days yet &mdash; '
+            "this fills in automatically as alerts get rated.</div>"
+        )
+
+    return f"""
+    <div class="stats-grid">
+      <div class="stats-card"><div class="stats-card__title">Noisiest alerts</div><div class="stats-card__q">Top 10 alert rules by total fires.</div>{noisiest_html}</div>
+      <div class="stats-card"><div class="stats-card__title">Most-escalated services</div><div class="stats-card__q">Top 5 services by escalated alerts.</div>{escalated_html}</div>
+      <div class="stats-card stats-card--wide"><div class="stats-card__title">Verdict mix per alert family</div><div class="stats-card__q">How each alert family was triaged (top 10 by fires).</div>{families_html}</div>
+      <div class="stats-card stats-card--wide"><div class="stats-card__title">RCA archetypes used</div><div class="stats-card__q">Which exemplar archetype the prompt builder selected per decision, and how often that decision came out actionable.</div>{archetypes_html}</div>
+      <div class="stats-card"><div class="stats-card__title">False-positive proxy</div><div class="stats-card__q">How often a person corrected the platform's verdict.</div>{fp_html}</div>
+    </div>"""
+
+
 @app.get("/dashboard/kpi", response_class=HTMLResponse)
 async def dashboard_v2_kpi():
     """Platform-health KPI surface — 6 live + 2 static numbers in a 2x4 grid.
@@ -3556,6 +3729,15 @@ async def dashboard_v2_kpi():
     from datetime import datetime, timezone, timedelta
 
     kpis = await compute_kpis(_store, ollama_url=settings.ollama_url)
+    # Merged Evaluation page (2026-06-13): the 7-day trend stats live below the
+    # KPI cards on this same page. Failure degrades to an empty trends block.
+    stats_agg: dict = {}
+    if _store is not None:
+        try:
+            stats_agg = await _store.get_stats_aggregates(days=7)
+        except Exception as exc:
+            logger.warning("stats aggregates query failed (non-fatal): %s", exc)
+    stats_sections = _render_stats_sections(stats_agg)
     now_tng = datetime.now(timezone.utc).astimezone(
         timezone(timedelta(hours=1))
     ).strftime("%Y-%m-%d %H:%M:%S")
@@ -3569,8 +3751,10 @@ async def dashboard_v2_kpi():
         ("cheap_path_pct",        "Cheap-path absorbed", "green",  "How much load skipped the LLM?"),
         ("archetype_coverage",    "Archetype coverage",  "purple", "What alert shapes are we seeing?"),
         ("gpu_util",              "GPU status",          "yellow", "Is the inference box healthy?"),
-        ("mcp_invariant",         "MCP firewall",        "cyan",   "Is the hallucination guard intact?"),
-        ("tests_passing",         "Tests passing",       "green",  "Does the test suite still cover this?"),
+        # 2026-06-13: the two static cards (MCP firewall "0 leaks", Tests
+        # passing "581/581") were dropped — they were hand-stamped constants
+        # that drifted stale (suite is now 900+) and read as live numbers.
+        # The Evaluation page now shows only live-computed KPIs.
     ]
 
     def _esc(s: str) -> str:
@@ -3599,35 +3783,7 @@ async def dashboard_v2_kpi():
     # Sidebar mirrors the v2 React sidebar's NAV_GROUPS shape — same labels,
     # same icon names, but rendered as anchors so an operator can click
     # straight back to /dashboard from the KPI surface.
-    sidebar_html = """
-  <aside class="kpi-sidebar">
-    <div class="kpi-sidebar__brand">
-      <div class="kpi-sidebar__brand-mark"></div>
-      <div>
-        <div class="kpi-sidebar__brand-title">Observability</div>
-        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
-      </div>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Incident response</div>
-      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
-      <a class="kpi-sidebar__item" href="/dashboard/incidents">Incidents</a>
-      <a class="kpi-sidebar__item" href="/dashboard/anomalies">Anomalies</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Insights</div>
-      <a class="kpi-sidebar__item" href="/dashboard/stats">Stats</a>
-      <a class="kpi-sidebar__item" href="/dashboard/services">Services</a>
-      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/kpi">KPI &middot; Evaluation</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Configuration</div>
-      <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
-      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
-      <a class="kpi-sidebar__item" href="/dashboard/settings">Settings</a>
-      <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
-    </div>
-  </aside>"""
+    sidebar_html = _render_insight_sidebar("kpi")
 
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="en">
@@ -3762,9 +3918,10 @@ async def dashboard_v2_kpi():
   .kpi-foot {{
     padding: 12px 22px 22px;
     font-size: 11.5px;
-    color: var(--muted-2);
+    color: var(--muted);
     border-top: 1px solid var(--border);
   }}
+{_STATS_SECTION_CSS}
 </style>
 </head>
 <body>
@@ -3774,19 +3931,23 @@ async def dashboard_v2_kpi():
   <main class="kpi-main">
     <div class="kpi-header">
       <div>
-        <div class="kpi-header__title">Platform health</div>
-        <div class="kpi-header__sub">How well the platform is doing &mdash; live numbers, refreshed every minute.</div>
+        <div class="kpi-header__title">Evaluation</div>
+        <div class="kpi-header__sub">How well the platform is doing &mdash; live health numbers up top, 7-day trends below. Refreshed every minute.</div>
       </div>
       <div class="kpi-header__time">
         <span class="live-dot"></span>{_esc(now_tng)} GMT+1
       </div>
     </div>
 
+    <div class="eval-subhead">Platform health<div class="eval-subhead__q">Each card answers one operator question &mdash; the big number is the answer.</div></div>
     <div class="kpi-grid">{cards_html}
     </div>
 
+    <div class="eval-subhead">Trends &middot; last 7 days<div class="eval-subhead__q">The noisiest alerts, the most-affected services, and how the platform triaged them.</div></div>
+    {stats_sections}
+
     <div class="kpi-foot">
-      Each card answers one question &mdash; the big number is the answer. Auto-refresh: 60 s.
+      Auto-refresh: 60 s.
     </div>
   </main>
 </div>
@@ -3810,362 +3971,12 @@ async def dashboard_v2_kpi():
 # Read-only — no writes, no Grafana API, all data via RCAStore (which
 # is itself the canonical writer; the MCP-only invariant is preserved).
 @app.get("/dashboard/services", response_class=HTMLResponse)
-async def dashboard_v2_services():
-    """Per-service rollup surface — one row per affected_service in the last 7d."""
-    import urllib.parse as _urllib
-    from datetime import datetime, timezone, timedelta
-
-    services: list[dict] = []
-    if _store is not None:
-        try:
-            services = await _store.get_service_summary(days=7)
-        except Exception as exc:
-            logger.warning("services summary query failed (non-fatal): %s", exc)
-            services = []
-
-    now_tng = datetime.now(timezone.utc).astimezone(
-        timezone(timedelta(hours=1))
-    ).strftime("%Y-%m-%d %H:%M:%S")
-
-    def _esc(s) -> str:
-        return _html.escape(str(s)) if s is not None else ""
-
-    # ── Summary chips: aggregate the per-service rollup into a few headline
-    # numbers that match the KPI page's "one-line headline" aesthetic.
-    n_services = len(services)
-    total_decisions = sum(s["total"] for s in services)
-    total_emails = sum(s["actions"].get("emailed", 0) for s in services)
-    # "K emails / day avg" — divide by the 7-day window so the number
-    # answers the operator question "how many pages per day is this
-    # platform generating" rather than "in the last week, total".
-    emails_per_day = round(total_emails / 7.0, 1) if total_emails else 0
-
-    chips_html = f"""
-    <div class="svc-chips">
-      <div class="svc-chip"><span class="svc-chip__n">{n_services}</span><span class="svc-chip__l">services seen</span></div>
-      <div class="svc-chip"><span class="svc-chip__n">{total_decisions}</span><span class="svc-chip__l">decisions</span></div>
-      <div class="svc-chip"><span class="svc-chip__n">{emails_per_day}</span><span class="svc-chip__l">emails / day avg</span></div>
-    </div>"""
-
-    # ── Table body: one row per service. Service name is an anchor back
-    # to the filtered triage feed (the ?q= URL filter already exists).
-    if services:
-        row_html_parts = []
-        for s in services:
-            svc = s["service"] or ""
-            q_param = _urllib.quote_plus(svc)
-            actions = s["actions"]
-            verdicts = s["verdicts"]
-            severities = s["severities"]
-            # Compact breakdown rendering: "emailed 3 · suppressed 2"
-            def _fmt(d: dict) -> str:
-                if not d:
-                    return "<span class='svc-muted'>—</span>"
-                items = sorted(d.items(), key=lambda kv: kv[1], reverse=True)
-                return " &middot; ".join(
-                    f"<span class='svc-pair'>{_esc(_humanize_verdict_token(k))} <b>{v}</b></span>" for k, v in items
-                )
-            last_fire_display = s["last_fire"] or "—"
-            # Trim the timestamp to YYYY-MM-DD HH:MM (drop microseconds + tz)
-            if last_fire_display and last_fire_display != "—":
-                last_fire_display = last_fire_display[:16].replace("T", " ")
-            top_alert = s["top_alertname"] or "—"
-            row_html_parts.append(f"""
-        <tr>
-          <td class="svc-cell-name"><a href="/dashboard?q={q_param}">{_esc(_v2m_display_service(svc))}</a></td>
-          <td class="svc-cell-num">{s["total"]}</td>
-          <td>{_fmt(actions)}</td>
-          <td>{_fmt(verdicts)}</td>
-          <td>{_fmt(severities)}</td>
-          <td class="svc-cell-mono">{_esc(last_fire_display)}</td>
-          <td class="svc-cell-alert">{_esc(top_alert)}</td>
-        </tr>""")
-        table_body_html = "".join(row_html_parts)
-        table_html = f"""
-    <table class="svc-table">
-      <thead>
-        <tr>
-          <th>Service</th>
-          <th>Total</th>
-          <th>By action</th>
-          <th>By verdict</th>
-          <th>By severity</th>
-          <th>Last fire</th>
-          <th>Top alert</th>
-        </tr>
-      </thead>
-      <tbody>{table_body_html}
-      </tbody>
-    </table>"""
-    else:
-        # Empty-DB affordance — don't 500, don't render an empty table header.
-        table_html = """
-    <div class="svc-empty">
-      <div class="svc-empty__title">No services yet</div>
-      <div class="svc-empty__sub">No service activity in the last 7 days. As alerts arrive, this page will populate.</div>
-    </div>"""
-
-    # Sidebar mirrors /dashboard/kpi exactly so the chrome is consistent;
-    # the "Services" item is the active one here.
-    sidebar_html = """
-  <aside class="kpi-sidebar">
-    <div class="kpi-sidebar__brand">
-      <div class="kpi-sidebar__brand-mark"></div>
-      <div>
-        <div class="kpi-sidebar__brand-title">Observability</div>
-        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
-      </div>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Incident response</div>
-      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
-      <a class="kpi-sidebar__item" href="/dashboard/incidents">Incidents</a>
-      <a class="kpi-sidebar__item" href="/dashboard/anomalies">Anomalies</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Insights</div>
-      <a class="kpi-sidebar__item" href="/dashboard/stats">Stats</a>
-      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/services">Services</a>
-      <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Configuration</div>
-      <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
-      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
-      <a class="kpi-sidebar__item" href="/dashboard/settings">Settings</a>
-      <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
-    </div>
-  </aside>"""
-
-    return HTMLResponse(f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<meta http-equiv="refresh" content="60"/>
-<title>Observability &middot; Services</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/design/tokens.css"/>
-{_CIRES_THEME_HEAD_SCRIPT}
-<style>
-  body {{
-    margin: 0;
-    background: var(--bg, #0f1117);
-    font-family: 'Inter', system-ui, sans-serif;
-    color: var(--text, #e4e6ee);
-    min-height: 100vh;
-  }}
-  .kpi-shell {{ display: flex; min-height: 100vh; }}
-
-  /* Sidebar — twin of /dashboard/kpi's sidebar so chrome stays uniform */
-  .kpi-sidebar {{
-    width: 224px; flex-shrink: 0;
-    background: var(--bg-soft, #13151e);
-    border-right: 1px solid var(--border, #2a2d3a);
-    padding: 0 0 14px;
-    display: flex; flex-direction: column;
-  }}
-  .kpi-sidebar__brand {{
-    display: flex; align-items: center; gap: 10px;
-    padding: 14px 14px 14px 16px;
-    border-bottom: 1px solid var(--border);
-    height: 60px;
-  }}
-  .kpi-sidebar__brand-mark {{
-    width: 28px; height: 28px; border-radius: 8px;
-    background: linear-gradient(135deg, #4ea8de, #b07ee8);
-    flex-shrink: 0;
-  }}
-  .kpi-sidebar__brand-title {{ font-size: 13.5px; font-weight: 600; color: var(--text); }}
-  .kpi-sidebar__brand-sub {{ font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }}
-  .kpi-sidebar__group {{ padding: 12px; margin-bottom: 6px; }}
-  .kpi-sidebar__group-label {{
-    font-size: 10px; color: var(--muted-2);
-    text-transform: uppercase; letter-spacing: 0.12em;
-    padding: 0 12px 6px; font-weight: 600;
-  }}
-  .kpi-sidebar__item {{
-    display: block; padding: 8px 12px;
-    border-radius: 8px; text-decoration: none;
-    color: var(--text-soft);
-    font-size: 13px;
-    transition: background .12s;
-  }}
-  .kpi-sidebar__item:hover {{ background: var(--card-hi); color: var(--text); }}
-  .kpi-sidebar__item--active {{
-    background: var(--card-hi); color: var(--text);
-    border: 1px solid var(--border-hi);
-    font-weight: 500;
-    box-shadow: inset 2.5px 0 0 var(--accent-blue);
-  }}
-
-  .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
-  .kpi-header {{
-    padding: 18px 22px 8px;
-    border-bottom: 1px solid var(--border);
-    display: flex; align-items: baseline; justify-content: space-between;
-  }}
-  .kpi-header__title {{ font-size: 18px; font-weight: 600; color: var(--text); }}
-  .kpi-header__sub {{ font-size: 12.5px; color: var(--muted); margin-top: 4px; }}
-  .kpi-header__time {{
-    font-family: var(--font-mono); font-size: 11.5px;
-    color: var(--muted); letter-spacing: 0.02em;
-  }}
-
-  /* Summary chips — top-of-page headline numbers */
-  .svc-chips {{
-    display: flex; gap: 14px;
-    padding: 18px 22px 6px;
-    flex-wrap: wrap;
-  }}
-  .svc-chip {{
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--accent-cyan);
-    border-radius: 10px;
-    padding: 10px 16px;
-    display: flex; flex-direction: column; gap: 2px;
-    min-width: 140px;
-  }}
-  .svc-chip__n {{
-    font-family: var(--font-mono);
-    font-size: 22px; font-weight: 600; color: var(--text);
-    line-height: 1.1;
-  }}
-  .svc-chip__l {{
-    font-size: 11px; color: var(--muted);
-    text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
-  }}
-
-  /* Services table — one row per service */
-  .svc-table-wrap {{ padding: 14px 22px 22px; }}
-  .svc-table {{
-    width: 100%;
-    border-collapse: collapse;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    overflow: hidden;
-    font-size: 13px;
-  }}
-  .svc-table thead th {{
-    text-align: left;
-    padding: 10px 14px;
-    background: var(--bg-soft);
-    border-bottom: 1px solid var(--border);
-    font-size: 11px; color: var(--muted-2);
-    text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
-  }}
-  .svc-table tbody td {{
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-    color: var(--text-soft);
-    vertical-align: top;
-  }}
-  .svc-table tbody tr:last-child td {{ border-bottom: none; }}
-  .svc-table tbody tr:hover td {{ background: var(--card-hi); }}
-  .svc-cell-name a {{
-    color: var(--accent-cyan);
-    text-decoration: none;
-    font-weight: 500;
-  }}
-  .svc-cell-name a:hover {{ text-decoration: underline; }}
-  .svc-cell-num {{
-    font-family: var(--font-mono);
-    color: var(--text);
-    font-weight: 600;
-  }}
-  .svc-cell-mono {{
-    font-family: var(--font-mono);
-    color: var(--muted);
-    font-size: 12px;
-    white-space: nowrap;
-  }}
-  .svc-cell-alert {{ color: var(--text-soft); font-size: 12.5px; }}
-  .svc-pair {{
-    display: inline-block;
-    color: var(--muted);
-  }}
-  .svc-pair b {{ color: var(--text); font-weight: 600; }}
-  .svc-muted {{ color: var(--muted-2); }}
-
-  /* Empty-DB affordance */
-  .svc-empty {{
-    margin: 18px 22px;
-    padding: 36px 28px;
-    background: var(--card);
-    border: 1px dashed var(--border);
-    border-radius: 12px;
-    text-align: center;
-    color: var(--muted);
-  }}
-  .svc-empty__title {{
-    font-size: 15px; font-weight: 600;
-    color: var(--text-soft);
-    margin-bottom: 6px;
-  }}
-  .svc-empty__sub {{ font-size: 12.5px; }}
-  .svc-empty code {{
-    font-family: var(--font-mono);
-    background: var(--bg-soft);
-    padding: 1px 5px; border-radius: 4px;
-    font-size: 11.5px;
-  }}
-
-  .kpi-foot {{
-    padding: 12px 22px 22px;
-    font-size: 11.5px;
-    color: var(--muted-2);
-    border-top: 1px solid var(--border);
-  }}
-</style>
-</head>
-<body>
-
-<div class="kpi-shell">
-  {sidebar_html}
-  <main class="kpi-main">
-    <div class="kpi-header">
-      <div>
-        <div class="kpi-header__title">Services</div>
-        <div class="kpi-header__sub">Health summary per monitored service, last 7 days.</div>
-      </div>
-      <div class="kpi-header__time">
-        <span class="live-dot"></span>{_esc(now_tng)} GMT+1
-      </div>
-    </div>
-
-    {chips_html}
-
-    <div class="svc-table-wrap">{table_html}
-    </div>
-
-    <div class="kpi-foot">
-      Click a service name to see its alerts in the triage feed. Auto-refresh: 60 s.
-    </div>
-  </main>
-</div>
-
-</body>
-</html>""")
+async def dashboard_services_redirect():
+    """2026-06-13 — Services merged into the Incidents page as a toggle view.
+    Old links/bookmarks land on the services view."""
+    return RedirectResponse(url="/dashboard/incidents?view=services", status_code=301)
 
 
-# ──────────────────────────────────────────────────────────────────────
-# /dashboard/alerts — read-only per-alertname rollup
-# ──────────────────────────────────────────────────────────────────────
-# Wires up the previously-dead "Alerts" sidebar item in the Configuration
-# group. Read-only by design — the operator path for tuning is "edit the
-# Ansible template + re-provision," not an in-app Grafana API write.
-# Annotation writes (auto-tuning the recurrence_gate per rule) are
-# EPIC15 / Sprint-5 territory; this page surfaces the read-side picture
-# the operator needs to choose which rule to tune.
-#
-# Highlight policy: rows where emails/fires > 0.50 get the "noisy" tint —
-# these are the alerts that mostly get through to the inbox, i.e. the
-# noise candidates. Reference is commit db79ee7 (raised MediumCpuUsage's
-# llm_dismiss 2→10 after this same ratio surfaced it as the top emailer).
 @app.get("/dashboard/alerts", response_class=HTMLResponse)
 async def dashboard_v2_alerts():
     """Per-alertname summary for the last 7 days.
@@ -4280,35 +4091,7 @@ async def dashboard_v2_alerts():
 
     # Sidebar — server-rendered twin of the React sidebar. The Alerts item
     # is the active one on this page.
-    sidebar_html = """
-  <aside class="kpi-sidebar">
-    <div class="kpi-sidebar__brand">
-      <div class="kpi-sidebar__brand-mark"></div>
-      <div>
-        <div class="kpi-sidebar__brand-title">Observability</div>
-        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
-      </div>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Incident response</div>
-      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
-      <a class="kpi-sidebar__item" href="/dashboard/incidents">Incidents</a>
-      <a class="kpi-sidebar__item" href="/dashboard/anomalies">Anomalies</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Insights</div>
-      <a class="kpi-sidebar__item" href="/dashboard/stats">Stats</a>
-      <a class="kpi-sidebar__item" href="/dashboard/services">Services</a>
-      <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Configuration</div>
-      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/alerts">Alerts</a>
-      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
-      <a class="kpi-sidebar__item" href="/dashboard/settings">Settings</a>
-      <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
-    </div>
-  </aside>"""
+    sidebar_html = _render_insight_sidebar("alerts")
 
     # Counts for the header — gives the operator a quick read on how many
     # distinct rules we're surfacing without making them count rows.
@@ -5137,9 +4920,65 @@ def _fmt_duration(seconds: int) -> str:
 # fire_count + duration (last_seen − first_seen) are the prominent columns.
 # Server-rendered in the same chrome as /dashboard/services. Read-only,
 # all data via RCAStore (the canonical writer) — MCP-invariant clean.
+def _render_services_section(services: list[dict]) -> tuple[str, str]:
+    """(chips_html, table_html) for the per-service 7-day rollup — shared by the
+    merged Incidents/Services page (2026-06-13)."""
+    import urllib.parse as _urllib
+
+    def _esc(s) -> str:
+        return _html.escape(str(s)) if s is not None else ""
+
+    n_services = len(services)
+    total_decisions = sum(s["total"] for s in services)
+    total_emails = sum(s["actions"].get("emailed", 0) for s in services)
+    emails_per_day = round(total_emails / 7.0, 1) if total_emails else 0
+    chips_html = f"""
+    <div class="svc-chips">
+      <div class="svc-chip"><span class="svc-chip__n">{n_services}</span><span class="svc-chip__l">services seen</span></div>
+      <div class="svc-chip"><span class="svc-chip__n">{total_decisions}</span><span class="svc-chip__l">decisions</span></div>
+      <div class="svc-chip"><span class="svc-chip__n">{emails_per_day}</span><span class="svc-chip__l">emails / day avg</span></div>
+    </div>"""
+    if services:
+        def _fmt(d: dict) -> str:
+            if not d:
+                return "<span class='svc-muted'>—</span>"
+            items = sorted(d.items(), key=lambda kv: kv[1], reverse=True)
+            return " &middot; ".join(
+                f"<span class='svc-pair'>{_esc(_humanize_verdict_token(k))} <b>{v}</b></span>"
+                for k, v in items
+            )
+        rows = []
+        for s in services:
+            svc = s["service"] or ""
+            q = _urllib.quote_plus(svc)
+            lf = s["last_fire"] or "—"
+            if lf and lf != "—":
+                lf = lf[:16].replace("T", " ")
+            rows.append(
+                f'<tr><td class="svc-cell-name"><a href="/dashboard?q={q}">{_esc(_v2m_display_service(svc))}</a></td>'
+                f'<td class="svc-cell-num">{s["total"]}</td>'
+                f'<td>{_fmt(s["actions"])}</td><td>{_fmt(s["verdicts"])}</td><td>{_fmt(s["severities"])}</td>'
+                f'<td class="svc-cell-mono">{_esc(lf)}</td>'
+                f'<td class="svc-cell-alert">{_esc(s["top_alertname"] or "—")}</td></tr>'
+            )
+        table_html = (
+            '<table class="svc-table"><thead><tr><th>Service</th><th>Total</th><th>By action</th>'
+            '<th>By verdict</th><th>By severity</th><th>Last fire</th><th>Top alert</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table>'
+        )
+    else:
+        table_html = ('<div class="svc-empty"><div class="svc-empty__title">No services yet</div>'
+                      '<div class="svc-empty__sub">No service activity in the last 7 days.</div></div>')
+    return chips_html, table_html
+
+
 @app.get("/dashboard/incidents", response_class=HTMLResponse)
-async def dashboard_sprint5_incidents():
-    """Incident surface — one row per alert_fingerprint, sorted by recency."""
+async def dashboard_sprint5_incidents(view: str = Query("incidents", max_length=12)):
+    """Incident surface — one row per alert_fingerprint, sorted by recency.
+
+    2026-06-13: Services merged in as a second view (segmented toggle). Both
+    answer "what's noisy"; incidents group by fingerprint, services by service.
+    Server-side toggle via ?view= (survives the 60 s meta-refresh; no JS)."""
     import urllib.parse as _urllib
     from datetime import datetime, timezone, timedelta
 
@@ -5238,35 +5077,32 @@ async def dashboard_sprint5_incidents():
       <div class="svc-empty__sub">Nothing is currently open. New alerts will be grouped into incidents here as they arrive.</div>
     </div>"""
 
-    sidebar_html = """
-  <aside class="kpi-sidebar">
-    <div class="kpi-sidebar__brand">
-      <div class="kpi-sidebar__brand-mark"></div>
-      <div>
-        <div class="kpi-sidebar__brand-title">Observability</div>
-        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
-      </div>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Incident response</div>
-      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
-      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/incidents">Incidents</a>
-      <a class="kpi-sidebar__item" href="/dashboard/anomalies">Anomalies</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Insights</div>
-      <a class="kpi-sidebar__item" href="/dashboard/stats">Stats</a>
-      <a class="kpi-sidebar__item" href="/dashboard/services">Services</a>
-      <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Configuration</div>
-      <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
-      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
-      <a class="kpi-sidebar__item" href="/dashboard/settings">Settings</a>
-      <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
-    </div>
-  </aside>"""
+    # ── Services view (merged 2026-06-13): same page, segmented toggle.
+    view = "services" if view == "services" else "incidents"
+    services: list[dict] = []
+    if _store is not None:
+        try:
+            services = await _store.get_service_summary(days=7)
+        except Exception as exc:
+            logger.warning("services summary query failed (non-fatal): %s", exc)
+            services = []
+    svc_chips, svc_table = _render_services_section(services)
+    if view == "services":
+        active_chips, active_table = svc_chips, svc_table
+        head_sub = "Per-service activity over the last 7 days — what each service generated and how it was triaged."
+        foot = "Each row is one service. <em>Total</em> is its decisions in the window; the breakdowns show how they were actioned, triaged, and rated. Auto-refresh: 60 s."
+    else:
+        active_chips, active_table = chips_html, table_html
+        head_sub = "Repeated alerts grouped into one line per ongoing issue."
+        foot = "Each row is one incident. <em>Fires</em> counts how many times it alerted; <em>Duration</em> is how long it has been going on. Auto-refresh: 60 s."
+
+    def _seg(v: str, label: str) -> str:
+        cls = "seg-toggle__btn seg-toggle__btn--active" if v == view else "seg-toggle__btn"
+        return f'<a class="{cls}" href="/dashboard/incidents?view={v}">{label}</a>'
+    toggle_html = (f'<div class="seg-toggle">{_seg("incidents", "Incidents")}'
+                   f'{_seg("services", "Services")}</div>')
+
+    sidebar_html = _render_insight_sidebar("incidents")
 
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="en">
@@ -5314,12 +5150,20 @@ async def dashboard_sprint5_incidents():
   .inc-cell-fires {{ font-family: var(--font-mono); color: var(--accent-yellow); font-weight: 600; }}
   .inc-cell-dur {{ font-family: var(--font-mono); color: var(--text); font-weight: 600; }}
   .svc-cell-mono {{ font-family: var(--font-mono); color: var(--muted); font-size: 12px; white-space: nowrap; }}
-  .svc-muted {{ color: var(--muted-2); }}
+  .svc-muted {{ color: var(--muted); }}
+  .svc-cell-num {{ font-family: var(--font-mono); color: var(--text); font-weight: 600; }}
+  .svc-pair {{ color: var(--muted); }}
+  .svc-pair b {{ color: var(--text); }}
+  .svc-cell-alert {{ font-size: 12px; color: var(--text-soft); }}
   .svc-empty {{ margin: 18px 22px; padding: 36px 28px; background: var(--card); border: 1px dashed var(--border); border-radius: 12px; text-align: center; color: var(--muted); }}
   .svc-empty__title {{ font-size: 15px; font-weight: 600; color: var(--text-soft); margin-bottom: 6px; }}
   .svc-empty__sub {{ font-size: 12.5px; }}
   .svc-empty code {{ font-family: var(--font-mono); background: var(--bg-soft); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }}
-  .kpi-foot {{ padding: 12px 22px 22px; font-size: 11.5px; color: var(--muted-2); border-top: 1px solid var(--border); }}
+  .seg-toggle {{ display: inline-flex; gap: 3px; margin: 16px 22px 0; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 9px; padding: 3px; }}
+  .seg-toggle__btn {{ padding: 6px 18px; border-radius: 7px; font-size: 13px; font-weight: 500; color: var(--muted); text-decoration: none; transition: background .12s, color .12s; }}
+  .seg-toggle__btn:hover {{ color: var(--text); }}
+  .seg-toggle__btn--active {{ background: var(--card-hi); color: var(--text); border: 1px solid var(--border-hi); }}
+  .kpi-foot {{ padding: 12px 22px 22px; font-size: 11.5px; color: var(--muted); border-top: 1px solid var(--border); }}
   .kpi-foot strong {{ color: var(--muted); }}
 </style>
 </head>
@@ -5330,21 +5174,22 @@ async def dashboard_sprint5_incidents():
   <main class="kpi-main">
     <div class="kpi-header">
       <div>
-        <div class="kpi-header__title">Incidents</div>
-        <div class="kpi-header__sub">Repeated alerts grouped into one line per ongoing issue.</div>
+        <div class="kpi-header__title">Incidents &amp; services</div>
+        <div class="kpi-header__sub">{head_sub}</div>
       </div>
       <div class="kpi-header__time">
         <span class="live-dot"></span>{_esc(now_tng)} GMT+1
       </div>
     </div>
 
-    {chips_html}
+    {toggle_html}
+    {active_chips}
 
-    <div class="svc-table-wrap">{table_html}
+    <div class="svc-table-wrap">{active_table}
     </div>
 
     <div class="kpi-foot">
-      Each row is one incident. <em>Fires</em> counts how many times it alerted; <em>Duration</em> is how long it has been going on. Auto-refresh: 60 s.
+      {foot}
     </div>
   </main>
 </div>
@@ -5425,35 +5270,7 @@ async def dashboard_sprint5_anomalies():
         timezone(timedelta(hours=1))
     ).strftime("%Y-%m-%d %H:%M:%S")
 
-    sidebar_html = """
-  <aside class="kpi-sidebar">
-    <div class="kpi-sidebar__brand">
-      <div class="kpi-sidebar__brand-mark"></div>
-      <div>
-        <div class="kpi-sidebar__brand-title">Observability</div>
-        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
-      </div>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Incident response</div>
-      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
-      <a class="kpi-sidebar__item" href="/dashboard/incidents">Incidents</a>
-      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/anomalies">Anomalies</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Insights</div>
-      <a class="kpi-sidebar__item" href="/dashboard/stats">Stats</a>
-      <a class="kpi-sidebar__item" href="/dashboard/services">Services</a>
-      <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Configuration</div>
-      <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
-      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
-      <a class="kpi-sidebar__item" href="/dashboard/settings">Settings</a>
-      <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
-    </div>
-  </aside>"""
+    sidebar_html = _render_insight_sidebar("anomalies")
 
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="en">
@@ -5571,34 +5388,7 @@ async def dashboard_sprint5_anomalies():
 async def dashboard_settings():
     """2026-06-12 (Lina): operator settings — manage who receives the
     escalation emails, editable here (no redeploy)."""
-    sidebar_html = """
-  <aside class="kpi-sidebar">
-    <div class="kpi-sidebar__brand">
-      <div class="kpi-sidebar__brand-mark"></div>
-      <div>
-        <div class="kpi-sidebar__brand-title">Observability</div>
-        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
-      </div>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Incident response</div>
-      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
-      <a class="kpi-sidebar__item" href="/dashboard/incidents">Incidents</a>
-      <a class="kpi-sidebar__item" href="/dashboard/anomalies">Anomalies</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Insights</div>
-      <a class="kpi-sidebar__item" href="/dashboard/stats">Stats</a>
-      <a class="kpi-sidebar__item" href="/dashboard/services">Services</a>
-      <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Configuration</div>
-      <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
-      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
-      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/settings">Settings</a>
-    </div>
-  </aside>"""
+    sidebar_html = _render_insight_sidebar("settings")
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -5686,255 +5476,10 @@ load();
 
 
 @app.get("/dashboard/stats", response_class=HTMLResponse)
-async def dashboard_sprint5_stats():
-    """Aggregate insight surface over the last 7 days."""
-    from datetime import datetime, timezone, timedelta
-
-    agg: dict = {}
-    if _store is not None:
-        try:
-            agg = await _store.get_stats_aggregates(days=7)
-        except Exception as exc:
-            logger.warning("stats aggregates query failed (non-fatal): %s", exc)
-            agg = {}
-
-    noisiest = agg.get("noisiest_alerts", [])
-    escalated = agg.get("escalated_services", [])
-    families = agg.get("verdict_by_family", [])
-    fp = agg.get("false_positive", {})
-    archetypes = agg.get("archetypes_used", [])
-
-    now_tng = datetime.now(timezone.utc).astimezone(
-        timezone(timedelta(hours=1))
-    ).strftime("%Y-%m-%d %H:%M:%S")
-
-    def _esc(s) -> str:
-        return _html.escape(str(s)) if s is not None else ""
-
-    # ── Bar-row renderer: horizontal proportional bar scaled to the max.
-    def _bars(items, label_key, value_key, accent):
-        if not items:
-            return "<div class='stats-empty'>No data in the last 7 days.</div>"
-        mx = max((int(i[value_key]) for i in items), default=0) or 1
-        parts = []
-        for i in items:
-            v = int(i[value_key])
-            pct = int(round(100 * v / mx))
-            parts.append(f"""
-        <div class="stats-bar-row">
-          <div class="stats-bar-label">{_esc(i[label_key])}</div>
-          <div class="stats-bar-track"><div class="stats-bar-fill stats-bar-fill--{accent}" style="width:{pct}%"></div></div>
-          <div class="stats-bar-val">{v}</div>
-        </div>""")
-        return "".join(parts)
-
-    noisiest_html = _bars(noisiest, "alert_name", "count", "blue")
-    escalated_html = _bars(escalated, "service", "escalates", "red")
-
-    # ── Verdict mix per family — compact table.
-    if families:
-        fam_rows = []
-        for f in families:
-            verds = f.get("verdicts", {})
-            mix = " &middot; ".join(
-                f"<span class='stats-pair'>{_esc(k)} <b>{v}</b></span>"
-                for k, v in sorted(verds.items(), key=lambda kv: kv[1], reverse=True)
-            ) or "<span class='stats-muted'>—</span>"
-            fam_rows.append(f"""
-        <tr>
-          <td class="stats-fam-name">{_esc(f["alert_name"])}</td>
-          <td class="stats-fam-total">{int(f.get("total", 0))}</td>
-          <td>{mix}</td>
-        </tr>""")
-        families_html = f"""
-    <table class="stats-table">
-      <thead><tr><th>Alert family</th><th>Fires</th><th>Verdict mix</th></tr></thead>
-      <tbody>{"".join(fam_rows)}
-      </tbody>
-    </table>"""
-    else:
-        families_html = "<div class='stats-empty'>No verdicts recorded in the last 7 days.</div>"
-
-    # ── RCA archetypes used (finding #3) — exemplar_id, count, actionable-rate.
-    if archetypes:
-        arch_rows = []
-        for a in archetypes:
-            rate = a.get("actionable_rate")
-            rate_disp = f"{rate * 100:.0f}%" if rate is not None else "—"
-            arch_rows.append(f"""
-        <tr>
-          <td class="stats-fam-name">{_esc(a.get("exemplar_id"))}</td>
-          <td class="stats-fam-total">{int(a.get("count", 0))}</td>
-          <td class="stats-fam-total">{rate_disp}</td>
-        </tr>""")
-        archetypes_html = f"""
-    <table class="stats-table">
-      <thead><tr><th>Archetype (exemplar id)</th><th>Used</th><th>Actionable rate</th></tr></thead>
-      <tbody>{"".join(arch_rows)}
-      </tbody>
-    </table>"""
-    else:
-        archetypes_html = (
-            "<div class='stats-empty'>No archetype usage recorded in the last 7 days yet "
-            "&mdash; this fills in as new decisions record which exemplar they used.</div>"
-        )
-
-    # ── False-positive proxy card.
-    if fp.get("wired"):
-        rate = fp.get("rate")
-        rate_disp = f"{rate * 100:.0f}%" if rate is not None else "—"
-        fp_html = f"""
-      <div class="stats-fp__big">{_esc(rate_disp)}</div>
-      <div class="stats-fp__sub">{int(fp.get("overrides", 0))} of {int(fp.get("rated", 0))} reviewed alerts had their verdict corrected by an operator.</div>"""
-    else:
-        fp_html = """
-      <div class="stats-fp__big stats-muted">n/a</div>
-      <div class="stats-fp__sub">No operator reviews in the last 7 days yet &mdash; this fills in automatically as alerts get rated.</div>"""
-
-    sidebar_html = """
-  <aside class="kpi-sidebar">
-    <div class="kpi-sidebar__brand">
-      <div class="kpi-sidebar__brand-mark"></div>
-      <div>
-        <div class="kpi-sidebar__brand-title">Observability</div>
-        <div class="kpi-sidebar__brand-sub">AI RCA &middot; v0.1.0</div>
-      </div>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Incident response</div>
-      <a class="kpi-sidebar__item" href="/dashboard">Triage feed</a>
-      <a class="kpi-sidebar__item" href="/dashboard/incidents">Incidents</a>
-      <a class="kpi-sidebar__item" href="/dashboard/anomalies">Anomalies</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Insights</div>
-      <a class="kpi-sidebar__item kpi-sidebar__item--active" href="/dashboard/stats">Stats</a>
-      <a class="kpi-sidebar__item" href="/dashboard/services">Services</a>
-      <a class="kpi-sidebar__item" href="/dashboard/kpi">KPI &middot; Evaluation</a>
-    </div>
-    <div class="kpi-sidebar__group">
-      <div class="kpi-sidebar__group-label">Configuration</div>
-      <a class="kpi-sidebar__item" href="/dashboard/alerts">Alerts</a>
-      <a class="kpi-sidebar__item" href="/dashboard/drain3">Drain3 engine</a>
-      <a class="kpi-sidebar__item" href="/dashboard/settings">Settings</a>
-      <a class="kpi-sidebar__item" href="/dashboard/integrations">Integrations</a>
-    </div>
-  </aside>"""
-
-    return HTMLResponse(f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<meta http-equiv="refresh" content="60"/>
-<title>Observability &middot; Stats</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/design/tokens.css"/>
-{_CIRES_THEME_HEAD_SCRIPT}
-<style>
-  body {{ margin: 0; background: var(--bg, #0f1117); font-family: 'Inter', system-ui, sans-serif; color: var(--text, #e4e6ee); min-height: 100vh; }}
-  .kpi-shell {{ display: flex; min-height: 100vh; }}
-  .kpi-sidebar {{ width: 224px; flex-shrink: 0; background: var(--bg-soft, #13151e); border-right: 1px solid var(--border, #2a2d3a); padding: 0 0 14px; display: flex; flex-direction: column; }}
-  .kpi-sidebar__brand {{ display: flex; align-items: center; gap: 10px; padding: 14px 14px 14px 16px; border-bottom: 1px solid var(--border); height: 60px; }}
-  .kpi-sidebar__brand-mark {{ width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, #4ea8de, #b07ee8); flex-shrink: 0; }}
-  .kpi-sidebar__brand-title {{ font-size: 13.5px; font-weight: 600; color: var(--text); }}
-  .kpi-sidebar__brand-sub {{ font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }}
-  .kpi-sidebar__group {{ padding: 12px; margin-bottom: 6px; }}
-  .kpi-sidebar__group-label {{ font-size: 10px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.12em; padding: 0 12px 6px; font-weight: 600; }}
-  .kpi-sidebar__item {{ display: block; padding: 8px 12px; border-radius: 8px; text-decoration: none; color: var(--text-soft); font-size: 13px; transition: background .12s; }}
-  .kpi-sidebar__item:hover {{ background: var(--card-hi); color: var(--text); }}
-  .kpi-sidebar__item--active {{ background: var(--card-hi); color: var(--text); border: 1px solid var(--border-hi); font-weight: 500; box-shadow: inset 2.5px 0 0 var(--accent-blue); }}
-  .kpi-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
-  .kpi-header {{ padding: 18px 22px 8px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; justify-content: space-between; }}
-  .kpi-header__title {{ font-size: 18px; font-weight: 600; color: var(--text); }}
-  .kpi-header__sub {{ font-size: 12.5px; color: var(--muted); margin-top: 4px; }}
-  .kpi-header__time {{ font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); letter-spacing: 0.02em; }}
-
-  .stats-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 18px 22px 22px; }}
-  @media (max-width: 980px) {{ .stats-grid {{ grid-template-columns: 1fr; }} }}
-  .stats-card {{ background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px 18px; }}
-  .stats-card--wide {{ grid-column: 1 / -1; }}
-  .stats-card__title {{ font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }}
-  .stats-card__q {{ font-size: 11.5px; color: var(--muted); margin-bottom: 12px; }}
-
-  .stats-bar-row {{ display: grid; grid-template-columns: 190px 1fr 44px; align-items: center; gap: 10px; margin-bottom: 8px; }}
-  .stats-bar-label {{ font-size: 12.5px; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-  .stats-bar-track {{ background: var(--bg-soft); border-radius: 5px; height: 14px; overflow: hidden; }}
-  .stats-bar-fill {{ height: 100%; border-radius: 5px; }}
-  .stats-bar-fill--blue {{ background: var(--accent-blue); }}
-  .stats-bar-fill--red  {{ background: var(--accent-red); }}
-  .stats-bar-val {{ font-family: var(--font-mono); font-size: 12.5px; color: var(--text); font-weight: 600; text-align: right; }}
-
-  .stats-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-  .stats-table thead th {{ text-align: left; padding: 8px 10px; background: var(--bg-soft); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }}
-  .stats-table tbody td {{ padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text-soft); }}
-  .stats-table tbody tr:last-child td {{ border-bottom: none; }}
-  .stats-fam-name {{ color: var(--text); font-weight: 500; }}
-  .stats-fam-total {{ font-family: var(--font-mono); color: var(--text); font-weight: 600; }}
-  .stats-pair {{ color: var(--muted); }}
-  .stats-pair b {{ color: var(--text); }}
-  .stats-muted {{ color: var(--muted-2); }}
-
-  .stats-fp__big {{ font-family: var(--font-mono); font-size: 34px; font-weight: 600; color: var(--accent-red); line-height: 1.1; margin: 4px 0 8px; }}
-  .stats-fp__sub {{ font-size: 12px; color: var(--muted); line-height: 1.5; }}
-  .stats-fp__sub code, .stats-card__q code {{ font-family: var(--font-mono); background: var(--bg-soft); padding: 1px 5px; border-radius: 4px; font-size: 11px; }}
-  .stats-empty {{ font-size: 12.5px; color: var(--muted-2); padding: 8px 0; }}
-  .kpi-foot {{ padding: 12px 22px 22px; font-size: 11.5px; color: var(--muted-2); border-top: 1px solid var(--border); }}
-</style>
-</head>
-<body>
-
-<div class="kpi-shell">
-  {sidebar_html}
-  <main class="kpi-main">
-    <div class="kpi-header">
-      <div>
-        <div class="kpi-header__title">Stats</div>
-        <div class="kpi-header__sub">Trends from the last 7 days &mdash; the noisiest alerts and the most-affected services.</div>
-      </div>
-      <div class="kpi-header__time">
-        <span class="live-dot"></span>{_esc(now_tng)} GMT+1
-      </div>
-    </div>
-
-    <div class="stats-grid">
-      <div class="stats-card">
-        <div class="stats-card__title">Noisiest alerts</div>
-        <div class="stats-card__q">Top 10 alert rules by total fires.</div>
-        {noisiest_html}
-      </div>
-      <div class="stats-card">
-        <div class="stats-card__title">Most-escalated services</div>
-        <div class="stats-card__q">Top 5 services by escalated alerts.</div>
-        {escalated_html}
-      </div>
-      <div class="stats-card stats-card--wide">
-        <div class="stats-card__title">Verdict mix per alert family</div>
-        <div class="stats-card__q">How each alert family was triaged (top 10 by fires).</div>
-        {families_html}
-      </div>
-      <div class="stats-card stats-card--wide">
-        <div class="stats-card__title">RCA archetypes used (7d)</div>
-        <div class="stats-card__q">Which exemplar archetype the prompt builder selected per decision, and how often that decision came out actionable. Answers "which archetypes actually help".</div>
-        {archetypes_html}
-      </div>
-      <div class="stats-card">
-        <div class="stats-card__title">False-positive proxy</div>
-        <div class="stats-card__q">How often a person corrected the platform's verdict.</div>
-        {fp_html}
-      </div>
-    </div>
-
-    <div class="kpi-foot">
-      Auto-refresh: 60 s.
-    </div>
-  </main>
-</div>
-
-</body>
-</html>""")
+async def dashboard_stats_redirect():
+    """2026-06-13 — Stats merged into the Evaluation page. Old links/bookmarks
+    keep working via a permanent redirect."""
+    return RedirectResponse(url="/dashboard/kpi", status_code=301)
 
 
 @app.get("/dashboard/drain3", response_class=HTMLResponse)

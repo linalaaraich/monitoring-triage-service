@@ -26,21 +26,22 @@ const NAV_GROUPS = [
   {
     label: "Insights",
     items: [
-      { id: "stats",     label: "Stats",            icon: "stats",    href: "/dashboard/stats" },
-      { id: "services",  label: "Services",         icon: "services", href: "/dashboard/services" },
-      { id: "kpi",       label: "KPI · Evaluation", icon: "kpi",      href: "/dashboard/kpi" },
+      { id: "kpi",       label: "Evaluation",       icon: "kpi",      href: "/dashboard/kpi" },
     ],
   },
   {
     label: "Configuration",
     items: [
       { id: "alerts-cfg",   label: "Alerts",        icon: "alerts",       href: "/dashboard/alerts" },
-      { id: "drain3",       label: "Drain3 engine", icon: "drain3",       href: "/dashboard/drain3" },
       { id: "settings",     label: "Settings",      icon: "integrations", href: "/dashboard/settings" },
-      { id: "integrations", label: "Integrations",  icon: "integrations", href: "/dashboard/integrations" },
     ],
   },
 ];
+// 2026-06-13 — Sprint-5 placeholder nav items (Drain3 engine, Integrations)
+// removed from the surface to avoid confusion; their routes still resolve.
+// Stats merged into Evaluation (/dashboard/kpi); Services merged into the
+// Incidents page (segmented toggle). The server-rendered insight pages mirror
+// this exact nav via _render_insight_sidebar() in app/main.py.
 
 // Inline stroke-only icons (16px), single-color
 function NavIcon({ name, size = 16 }) {
@@ -226,9 +227,9 @@ function Sidebar({ active = "triage", collapsed = false, onToggleCollapse }) {
             background: "linear-gradient(135deg, #b07ee8, #40d0d0)",
             display: "grid", placeItems: "center", flexShrink: 0,
             fontSize: 11, fontWeight: 600, color: "#0f1117",
-          }}>YB</div>
+          }}>LL</div>
           {!collapsed && <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.15, flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 12.5, color: "var(--text)" }}>y.benhaddou</div>
+            <div style={{ fontSize: 12.5, color: "var(--text)" }}>l.laaraich</div>
             <div style={{ fontSize: 10.5, color: "var(--muted)" }}>on-call · Tier 2</div>
           </div>}
         </div>

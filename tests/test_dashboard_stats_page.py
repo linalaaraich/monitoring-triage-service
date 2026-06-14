@@ -52,7 +52,7 @@ async def client_with_stats():
 
 @pytest.mark.asyncio
 async def test_stats_page_renders_aggregates(client_with_stats):
-    r = await client_with_stats.get("/dashboard/stats")
+    r = await client_with_stats.get("/dashboard/kpi")
     assert r.status_code == 200
     body = r.text
     head = body.split("</head>", 1)[0]
@@ -89,7 +89,7 @@ async def test_stats_page_renders_archetype_table_with_data():
     transport = ASGITransport(app=app_main.app, raise_app_exceptions=False)
     try:
         async with AsyncClient(transport=transport, base_url="http://test") as c:
-            r = await c.get("/dashboard/stats")
+            r = await c.get("/dashboard/kpi")
         assert r.status_code == 200
         assert "workload-replica-deficit" in r.text
     finally:

@@ -37,7 +37,10 @@ html[data-theme="light"] body {
   --text:         #e4e6ee;
   --text-soft:    #c0c5d0;
   --muted:        #8890a0;
-  --muted-2:      #5b6172;
+  /* 2026-06-13 contrast pass: tertiary text (sidebar group labels, table
+     headers) was #5b6172 — too dark to read on the dark bg. Lifted so it
+     clears ~4:1 while staying dimmer than --muted. */
+  --muted-2:      #6f7688;
   --accent-blue:  #4ea8de;
   --accent-green: #6bcf7f;
   --accent-orange:#f0a050;
@@ -70,7 +73,10 @@ html[data-theme="light"],
   --text:         #1a1d27;
   --text-soft:    #3a3f52;
   --muted:        #6b7385;
-  --muted-2:      #a0a6b3;
+  /* 2026-06-13 contrast pass: was #a0a6b3 — far too light on the near-white
+     bg (sidebar group labels / table headers vanished). Darkened to ~4:1
+     while staying lighter than --muted so the hierarchy holds. */
+  --muted-2:      #767d90;
   --accent-blue:  #1e88d5;
   --accent-green: #16a34a;
   --accent-orange:#d97706;
@@ -145,9 +151,14 @@ html[data-theme="light"],
 }
 .btn:hover { background: var(--card-alt); border-color: var(--border-hi); }
 .btn.primary {
-  background: rgba(78,168,222,.12); border-color: rgba(78,168,222,.45); color: #b9dcf2;
+  /* 2026-06-13 contrast pass: text was a hardcoded light-blue (#b9dcf2) that
+     vanished on the light-blue tint in light mode. Use the theme-aware accent
+     so it reads in both themes. */
+  background: color-mix(in oklab, var(--accent-blue) 14%, transparent);
+  border-color: color-mix(in oklab, var(--accent-blue) 45%, transparent);
+  color: color-mix(in oklab, var(--accent-blue) 78%, var(--text));
 }
-.btn.primary:hover { background: rgba(78,168,222,.20); }
+.btn.primary:hover { background: color-mix(in oklab, var(--accent-blue) 22%, transparent); }
 .btn.ghost { background: transparent; }
 .btn.sm { font-size: 12px; padding: 4px 9px; border-radius: 6px; }
 

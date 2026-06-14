@@ -138,7 +138,7 @@ async def test_rate_page_ships_topbar_and_sidebar_chrome(ws2_client):
 
 @pytest.mark.parametrize("route", [
     "/dashboard/kpi",
-    "/dashboard/services",
+    "/dashboard/incidents",
     "/dashboard/alerts",
 ])
 @pytest.mark.asyncio
@@ -151,11 +151,11 @@ async def test_sidebar_sprint5_links_are_wired(ws2_client, route):
     assert r.status_code == 200
     body = r.text
     expectations = {
-        ">Incidents<":     'href="/dashboard/incidents"',
-        ">Anomalies<":     'href="/dashboard/anomalies"',
-        ">Stats<":         'href="/dashboard/stats"',
-        ">Drain3 engine<": 'href="/dashboard/drain3"',
-        ">Integrations<":  'href="/dashboard/integrations"',
+        ">Incidents<":  'href="/dashboard/incidents"',
+        ">Anomalies<":  'href="/dashboard/anomalies"',
+        ">Evaluation<": 'href="/dashboard/kpi"',
+        ">Alerts<":     'href="/dashboard/alerts"',
+        ">Settings<":   'href="/dashboard/settings"',
     }
     for label, expected_href in expectations.items():
         # The label appears in the sidebar; we want the surrounding

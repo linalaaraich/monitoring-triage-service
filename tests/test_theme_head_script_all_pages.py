@@ -28,9 +28,7 @@ from app.rca_store import RCAStore
 _THEME_PAGES = [
     "/dashboard",
     "/dashboard/kpi",
-    "/dashboard/services",
     "/dashboard/alerts",
-    "/dashboard/stats",
     "/dashboard/incidents",
     "/dashboard/anomalies",
     "/dashboard/drain3",

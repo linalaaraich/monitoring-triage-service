@@ -236,7 +236,7 @@ async def test_service_summary_sorted_by_total_desc(populated_store):
 
 @pytest.mark.asyncio
 async def test_services_route_returns_200_with_body(services_app_client):
-    resp = await services_app_client.get("/dashboard/services")
+    resp = await services_app_client.get("/dashboard/incidents?view=services")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     assert len(resp.text) > 500
@@ -245,7 +245,7 @@ async def test_services_route_returns_200_with_body(services_app_client):
 @pytest.mark.asyncio
 async def test_services_route_renders_each_service_as_anchor_with_q_param(services_app_client):
     """Service names must be clickable anchors that drop into /dashboard?q=<svc>."""
-    resp = await services_app_client.get("/dashboard/services")
+    resp = await services_app_client.get("/dashboard/incidents?view=services")
     body = resp.text
     # Each fixture service should appear inside an href="/dashboard?q=…" anchor.
     for svc in ("spring-boot", "kong", "nginx"):
@@ -254,7 +254,7 @@ async def test_services_route_renders_each_service_as_anchor_with_q_param(servic
 
 @pytest.mark.asyncio
 async def test_services_route_renders_summary_chips(services_app_client):
-    resp = await services_app_client.get("/dashboard/services")
+    resp = await services_app_client.get("/dashboard/incidents?view=services")
     body = resp.text
     # The three top-of-page chip labels per spec.
     assert "services seen" in body
@@ -269,7 +269,7 @@ async def test_services_route_renders_summary_chips(services_app_client):
 @pytest.mark.asyncio
 async def test_services_route_renders_top_alertname(services_app_client):
     """The dominant alertname column must surface HighP95Latency for spring-boot."""
-    resp = await services_app_client.get("/dashboard/services")
+    resp = await services_app_client.get("/dashboard/incidents?view=services")
     assert "HighP95Latency" in resp.text
     assert "CPUSpike" in resp.text
 
@@ -277,7 +277,7 @@ async def test_services_route_renders_top_alertname(services_app_client):
 @pytest.mark.asyncio
 async def test_services_route_has_auto_refresh_meta(services_app_client):
     """60s meta-refresh per spec — same cadence as /dashboard/kpi."""
-    resp = await services_app_client.get("/dashboard/services")
+    resp = await services_app_client.get("/dashboard/incidents?view=services")
     body = resp.text
     assert 'http-equiv="refresh"' in body
     assert 'content="60"' in body
@@ -286,7 +286,7 @@ async def test_services_route_has_auto_refresh_meta(services_app_client):
 @pytest.mark.asyncio
 async def test_services_route_empty_db_still_200s_with_affordance(empty_app_client):
     """Regression — empty DB must not 500 the route + must show the affordance."""
-    resp = await empty_app_client.get("/dashboard/services")
+    resp = await empty_app_client.get("/dashboard/incidents?view=services")
     assert resp.status_code == 200
     # "no services yet" affordance per spec
     assert "No services yet" in resp.text
@@ -299,7 +299,7 @@ async def test_services_route_empty_db_still_200s_with_affordance(empty_app_clie
 @pytest.mark.asyncio
 async def test_services_route_renders_sidebar_active(services_app_client):
     """The sidebar twin must mark Services as the active item."""
-    resp = await services_app_client.get("/dashboard/services")
+    resp = await services_app_client.get("/dashboard/incidents?view=services")
     body = resp.text
     # Active-class marker on the Services nav item
     assert 'kpi-sidebar__item--active' in body
@@ -309,12 +309,12 @@ async def test_services_route_renders_sidebar_active(services_app_client):
 
 @pytest.mark.asyncio
 async def test_services_route_title_marker(services_app_client):
-    resp = await services_app_client.get("/dashboard/services")
+    resp = await services_app_client.get("/dashboard/incidents?view=services")
     body = resp.text
     assert "Services" in body
     # Presentation polish (2026-06-11): plain-language sub, no banner strip,
     # no dev-facing provenance copy.
-    assert "Health summary per monitored service" in body
+    assert "Per-service activity" in body
     assert "kpi-banner" not in body
     assert "rca_history" not in body
     assert "back to triage feed" not in body

@@ -253,7 +253,7 @@ function FeedbackForm({ filled = false, submitted = false }) {
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div style={{ fontSize: 12, color: "var(--muted)" }}>
-              Submitted feedback is anonymous to the team but tagged to <span style={{ color: "var(--text-soft)" }}>y.benhaddou</span> for audit.
+              Submitted feedback is anonymous to the team but tagged to <span style={{ color: "var(--text-soft)" }}>l.laaraich</span> for audit.
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               {submitErr && <span style={{ color: "var(--accent-red)", fontSize: 12 }}>Save failed: {submitErr}</span>}

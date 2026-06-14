@@ -157,7 +157,6 @@ async def test_dashboard_partial_honors_filters(overhaul_client):
 SPRINT5_ROUTES = [
     "/dashboard/incidents",
     "/dashboard/anomalies",
-    "/dashboard/stats",
     "/dashboard/drain3",
     "/dashboard/integrations",
 ]
@@ -165,7 +164,6 @@ SPRINT5_ROUTES = [
 SPRINT5_BUILT_ROUTES = [
     "/dashboard/incidents",
     "/dashboard/anomalies",
-    "/dashboard/stats",
 ]
 # Out-of-EPIC14 scope — still placeholders.
 SPRINT5_PLACEHOLDER_ROUTES = [
