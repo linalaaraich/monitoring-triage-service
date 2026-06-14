@@ -412,11 +412,29 @@ class EmailNotifier:
         # cognitive-load doctrine (§12.1 in solution-brief): names not
         # metrics, brief not verbose, one ACTION not a list.
         subject = self._v2_subject(alert, decision, record)
-        body = self._build_v2_escalation_body(
-            alert, decision, record, history_count, ctx, correlated or [],
-            cofire or [],
-        )
-        await self._send(subject, body)
+        try:
+            body = self._build_v2_escalation_body(
+                alert, decision, record, history_count, ctx, correlated or [],
+                cofire or [],
+            )
+            await self._send(subject, body)
+        except Exception as exc:
+            # 2026-06-13 (co-fire safety): the rich v2 body can throw on an
+            # unusual payload, and on the co-fire path this email is the
+            # incident's ONLY page (the sibling suppressed its own). Never let
+            # a rendering failure — or a transient send — swallow it: fall back
+            # to the simpler v1 body and try once more. Only if THIS also
+            # fails (e.g. SMTP genuinely down) do we re-raise, so the pipeline
+            # releases the co-fire claim. Pre-co-fire there were two
+            # independent emails; this restores that redundancy in one place.
+            logger.warning(
+                "v2 escalation send failed for %s (%s) — falling back to plain body",
+                alert.alertname, exc,
+            )
+            body = self._build_escalation_body(
+                alert, decision, record, history_count, ctx, correlated or [],
+            )
+            await self._send(subject, body)
 
     async def send_timeout_alert(self, alert: GrafanaAlert):
         subject = f"[ALERT] TIMEOUT: {alert.alertname} — AI triage timed out"
