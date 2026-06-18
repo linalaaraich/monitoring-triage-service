@@ -598,6 +598,10 @@ def build_crashloop_playbook(alert: GrafanaAlert) -> str:
     )
 
 
+# FIXME(label-drift, 2026-06-18): the docstring/log below say "NEEDS_HUMAN_REVIEW",
+# but this fallback actually returns Decision.ESCALATE at confidence 0.0 (fail-open).
+# No NEEDS_HUMAN_REVIEW verdict exists in the Decision enum. Reconcile the wording
+# (or introduce a real verdict) when next touching this path. Marker only.
 def _build_fallback_decision() -> LLMDecision:
     """Return a safe NEEDS_HUMAN_REVIEW fallback when the LLM is unavailable."""
     return LLMDecision(
@@ -756,6 +760,8 @@ class LLMClient:
 
         if decision is None:
             # Second parse failure -> fallback
+            # FIXME(label-drift): "NEEDS_HUMAN_REVIEW" here is a misnomer — the
+            # fallback returns ESCALATE (fail-open). See _build_fallback_decision.
             logger.error("LLM JSON parse failed after retry -- falling back to NEEDS_HUMAN_REVIEW")
             triage_fallback_total.labels(reason="parse_failure").inc()
             return _stamp(_build_fallback_decision()), duration_ms

@@ -109,6 +109,9 @@ _TOOL_SCHEMAS: dict[str, type[BaseModel]] = {
 }
 
 
+# FIXME(count-drift, 2026-06-18): the catalog text below says "15 archetypes",
+# but exemplars/library.yaml currently defines 17. Update the count when
+# reconciling (the PFE report Ch3/Ch4 already states 17). Marker only.
 TOOLS_DESCRIPTION = """## Available tools (pick EXACTLY ONE)
 
 If you can't reach a confident verdict on this alert with the evidence
